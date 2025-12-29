@@ -176,6 +176,10 @@ model SearchSubscription {
   resumeText      String   @map("resume_text")
   resumeHash      String   @map("resume_hash")
 
+  // Exclusion filters
+  excludedTitles    String[] @default([]) @map("excluded_titles")
+  excludedCompanies String[] @default([]) @map("excluded_companies")
+
   // Status
   isActive        Boolean  @default(true) @map("is_active")
   isPaused        Boolean  @default(false) @map("is_paused")

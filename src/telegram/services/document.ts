@@ -2,9 +2,11 @@ import type { Bot } from 'grammy';
 import axios from 'axios';
 import mammoth from 'mammoth';
 
-// pdf-parse v1 uses CommonJS default export
+// pdf-parse has a bug where it reads a test file on import
+// Import the actual parser directly to avoid this
 async function parsePdf(buffer: Buffer): Promise<string> {
-  const pdfParse = (await import('pdf-parse')).default;
+  // @ts-expect-error - importing internal module to avoid test file bug
+  const pdfParse = (await import('pdf-parse/lib/pdf-parse.js')).default;
   const data = await pdfParse(buffer);
   return data.text;
 }
@@ -115,7 +117,7 @@ export function setupDocumentHandler(bot: Bot<BotContext>): void {
 
       await ctx.reply(
         `<b>Resume extracted!</b> (${resumeText.length} characters)\n\n` +
-          '<b>Step 4/4: Minimum Match Score</b>\n\n' +
+          '<b>Step 4/6: Minimum Match Score</b>\n\n' +
           "I'll only notify you about jobs with a score >= this value.\n\n" +
           '<b>Score ranges:</b>\n' +
           '- 90-100: Perfect match\n' +

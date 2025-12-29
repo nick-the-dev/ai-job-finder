@@ -82,8 +82,37 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       logger.debug('Scheduler', `  Collected ${allRawJobs.length} raw jobs`);
 
       // Step 2: Normalize and dedupe
-      const normalizedJobs = await normalizer.execute(allRawJobs);
+      let normalizedJobs = await normalizer.execute(allRawJobs);
       logger.debug('Scheduler', `  ${normalizedJobs.length} unique jobs after dedup`);
+
+      // Step 2.5: Apply exclusion filters
+      const excludedTitles = sub.excludedTitles ?? [];
+      const excludedCompanies = sub.excludedCompanies ?? [];
+
+      if (excludedTitles.length > 0 || excludedCompanies.length > 0) {
+        const beforeFilter = normalizedJobs.length;
+        normalizedJobs = normalizedJobs.filter((job) => {
+          // Check excluded titles (case-insensitive partial match)
+          const titleLower = job.title.toLowerCase();
+          for (const excluded of excludedTitles) {
+            if (titleLower.includes(excluded.toLowerCase())) {
+              return false;
+            }
+          }
+          // Check excluded companies (case-insensitive partial match)
+          const companyLower = job.company.toLowerCase();
+          for (const excluded of excludedCompanies) {
+            if (companyLower.includes(excluded.toLowerCase())) {
+              return false;
+            }
+          }
+          return true;
+        });
+        const filtered = beforeFilter - normalizedJobs.length;
+        if (filtered > 0) {
+          logger.debug('Scheduler', `  Filtered ${filtered} jobs by exclusions`);
+        }
+      }
 
       // Step 3: Get already-sent job match IDs
       const sentJobMatchIds = new Set(sub.sentNotifications.map((n) => n.jobMatchId));

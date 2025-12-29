@@ -58,7 +58,7 @@ Ready to get started? Use /subscribe!
     });
 
     await ctx.reply(
-      '<b>Step 1/4: Job Titles</b>\n\n' +
+      '<b>Step 1/6: Job Titles</b>\n\n' +
         'What job titles are you looking for?\n\n' +
         'Send a comma-separated list, e.g.:\n' +
         '<i>"Backend Engineer, Senior Developer, DevOps"</i>',
@@ -90,6 +90,13 @@ Ready to get started? Use /subscribe!
       ? sub.lastSearchAt.toLocaleDateString()
       : 'Never';
 
+    const excludedTitles = sub.excludedTitles?.length
+      ? sub.excludedTitles.join(', ')
+      : 'None';
+    const excludedCompanies = sub.excludedCompanies?.length
+      ? sub.excludedCompanies.join(', ')
+      : 'None';
+
     const message = `
 <b>Your Subscription</b>
 
@@ -98,6 +105,8 @@ Ready to get started? Use /subscribe!
 <b>Location:</b> ${sub.location || 'Any'}
 <b>Remote Only:</b> ${sub.isRemote ? 'Yes' : 'No'}
 <b>Min Score:</b> ${sub.minScore}
+<b>Excluded Titles:</b> ${excludedTitles}
+<b>Excluded Companies:</b> ${excludedCompanies}
 
 <b>Last Search:</b> ${lastSearch}
 <b>Created:</b> ${sub.createdAt.toLocaleDateString()}

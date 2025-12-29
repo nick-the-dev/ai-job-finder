@@ -10,6 +10,8 @@ interface ConversationData {
   isRemote?: boolean;
   resumeText?: string;
   minScore?: number;
+  excludedTitles?: string[];
+  excludedCompanies?: string[];
 }
 
 function getResumeHash(text: string): string {
@@ -53,7 +55,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Got it!</b> Searching for: ${titles.join(', ')}\n\n` +
-            '<b>Step 2/4: Location</b>\n\n' +
+            '<b>Step 2/6: Location</b>\n\n' +
             'Where should I search for jobs?\n\n' +
             'Options:\n' +
             '- Send <b>"Remote"</b> for remote-only jobs\n' +
@@ -96,7 +98,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Location:</b> ${locationText}\n\n` +
-            '<b>Step 3/4: Resume</b>\n\n' +
+            '<b>Step 3/6: Resume</b>\n\n' +
             'Now I need your resume to match you with jobs.\n\n' +
             'You can:\n' +
             '- <b>Upload</b> a PDF or DOCX file\n' +
@@ -125,7 +127,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Resume received!</b> (${text.length} characters)\n\n` +
-            '<b>Step 4/4: Minimum Match Score</b>\n\n' +
+            '<b>Step 4/6: Minimum Match Score</b>\n\n' +
             "I'll only notify you about jobs with a score >= this value.\n\n" +
             '<b>Score ranges:</b>\n' +
             '- 90-100: Perfect match\n' +
@@ -153,8 +155,75 @@ export function setupConversation(bot: Bot<BotContext>): void {
           minScore = parsed;
         }
 
-        // Create subscription
-        const finalData = { ...data, minScore } as ConversationData;
+        // Move to excluded titles step
+        await db.telegramUser.update({
+          where: { id: ctx.telegramUser.id },
+          data: {
+            conversationState: 'awaiting_excluded_titles',
+            conversationData: { ...data, minScore },
+          },
+        });
+
+        await ctx.reply(
+          `<b>Min Score:</b> ${minScore}\n\n` +
+            '<b>Step 5/6: Excluded Job Titles (Optional)</b>\n\n' +
+            'Any job title keywords to exclude?\n\n' +
+            'Examples: <b>"Manager, Director, Lead"</b>\n' +
+            '(Jobs with these words in the title will be skipped)\n\n' +
+            'Send keywords separated by commas, or <b>"Skip"</b> to continue',
+          { parse_mode: 'HTML' }
+        );
+        break;
+      }
+
+      case 'awaiting_excluded_titles': {
+        let excludedTitles: string[] = [];
+
+        const lowerText = text.toLowerCase();
+        if (lowerText !== 'skip') {
+          excludedTitles = text
+            .split(',')
+            .map((t) => t.trim())
+            .filter((t) => t.length > 0);
+        }
+
+        await db.telegramUser.update({
+          where: { id: ctx.telegramUser.id },
+          data: {
+            conversationState: 'awaiting_excluded_companies',
+            conversationData: { ...data, excludedTitles },
+          },
+        });
+
+        const excludedText = excludedTitles.length > 0
+          ? excludedTitles.join(', ')
+          : 'None';
+
+        await ctx.reply(
+          `<b>Excluded Titles:</b> ${excludedText}\n\n` +
+            '<b>Step 6/6: Excluded Companies (Optional)</b>\n\n' +
+            'Any companies to exclude?\n\n' +
+            'Examples: <b>"Amazon, Meta, Google"</b>\n' +
+            '(Jobs from these companies will be skipped)\n\n' +
+            'Send company names separated by commas, or <b>"Skip"</b> to finish',
+          { parse_mode: 'HTML' }
+        );
+        break;
+      }
+
+      case 'awaiting_excluded_companies': {
+        let excludedCompanies: string[] = [];
+
+        const lowerText = text.toLowerCase();
+        if (lowerText !== 'skip') {
+          excludedCompanies = text
+            .split(',')
+            .map((t) => t.trim())
+            .filter((t) => t.length > 0);
+        }
+
+        // Create subscription with all data
+        const finalData = { ...data, excludedCompanies } as ConversationData;
         await createSubscription(ctx, finalData);
         break;
       }
@@ -201,6 +270,8 @@ async function createSubscription(
         minScore: data.minScore ?? 60,
         resumeText: data.resumeText,
         resumeHash,
+        excludedTitles: data.excludedTitles ?? [],
+        excludedCompanies: data.excludedCompanies ?? [],
         isActive: true,
         isPaused: false,
       },
@@ -221,11 +292,20 @@ async function createSubscription(
         ? data.location
         : 'Any location';
 
+    const excludedTitlesText = data.excludedTitles?.length
+      ? data.excludedTitles.join(', ')
+      : 'None';
+    const excludedCompaniesText = data.excludedCompanies?.length
+      ? data.excludedCompanies.join(', ')
+      : 'None';
+
     await ctx.reply(
       '<b>Subscription created!</b>\n\n' +
         `<b>Job Titles:</b> ${data.jobTitles.join(', ')}\n` +
         `<b>Location:</b> ${locationText}\n` +
-        `<b>Min Score:</b> ${data.minScore ?? 60}\n\n` +
+        `<b>Min Score:</b> ${data.minScore ?? 60}\n` +
+        `<b>Excluded Titles:</b> ${excludedTitlesText}\n` +
+        `<b>Excluded Companies:</b> ${excludedCompaniesText}\n\n` +
         "I'll search for jobs every hour and notify you when I find matches.\n\n" +
         'Use /status to check your subscription anytime.',
       { parse_mode: 'HTML' }
