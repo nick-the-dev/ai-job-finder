@@ -74,11 +74,11 @@ export const JobMatchJsonSchema = {
  */
 export const QueryExpansionSchema = z.object({
   expandedQueries: z.array(z.string())
-    .max(25)
+    .max(50)
     .describe('Expanded job title variants from original queries'),
 
   resumeSuggestedTitles: z.array(z.string())
-    .max(10)
+    .max(15)
     .describe('Additional job titles suggested based on resume skills'),
 });
 
@@ -93,13 +93,13 @@ export const QueryExpansionJsonSchema = {
     expandedQueries: {
       type: 'array',
       items: { type: 'string' },
-      maxItems: 25,
+      maxItems: 50,
       description: 'Expanded job title variants from original queries',
     },
     resumeSuggestedTitles: {
       type: 'array',
       items: { type: 'string' },
-      maxItems: 10,
+      maxItems: 15,
       description: 'Additional job titles suggested based on resume skills',
     },
   },

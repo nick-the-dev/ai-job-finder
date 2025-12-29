@@ -57,8 +57,8 @@ export class QueryExpanderAgent implements IAgent<QueryExpanderInput, QueryExpan
     const systemPrompt = `You are a job search expert. Your task is to expand job search queries to find more relevant positions.
 
 You MUST respond with a JSON object containing these exact fields:
-- expandedQueries: array of job titles (max 25 total)
-- resumeSuggestedTitles: array of additional job titles based on resume skills (max 10)
+- expandedQueries: array of job titles (max 50 total)
+- resumeSuggestedTitles: array of additional job titles based on resume skills (max 15)
 
 CRITICAL RULE for expandedQueries:
 - Include each original job title exactly as given
