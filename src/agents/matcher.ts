@@ -22,7 +22,7 @@ export class MatcherAgent implements IAgent<MatcherInput, JobMatchResult> {
 You MUST respond with a valid JSON object only. Do NOT include comments (// or /* */) in your JSON response.
 
 JSON object must contain these exact fields:
-- score: number from 1-100 (match score)
+- score: number from 0-100 (match score, 0 = no match at all)
 - reasoning: string (explanation for the score)
 - matchedSkills: array of strings (skills from resume that match job)
 - missingSkills: array of strings (skills required by job but not in resume)
@@ -49,6 +49,7 @@ Score guidelines:
 - 50-69: Moderate match
 - 30-49: Weak match
 - 1-29: Poor match
+- 0: Completely irrelevant (different field/industry entirely)
 
 Salary extraction guidelines:
 - Look for salary ranges like "$100K-$150K", "$100,000 - $150,000", "100k-150k USD"
@@ -88,9 +89,23 @@ Provide your analysis in the required JSON format.`;
         JobMatchJsonSchema
       );
 
+      // Log suspiciously low scores for debugging
+      if (result.score === 0) {
+        logger.warn('Matcher', `Score=0 returned for job: ${job.title} @ ${job.company}`, {
+          descriptionLength: job.description?.length || 0,
+          resumeLength: resumeText?.length || 0,
+          reasoning: result.reasoning,
+        });
+      }
+
       return result;
     } catch (error) {
-      logger.error('Matcher', 'Analysis failed', error);
+      logger.error('Matcher', 'Analysis failed', error, {
+        jobTitle: job.title,
+        company: job.company,
+        descriptionLength: job.description?.length || 0,
+        resumeLength: resumeText?.length || 0,
+      });
       throw error;
     }
   }
