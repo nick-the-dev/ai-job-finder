@@ -106,12 +106,13 @@ export function setupDocumentHandler(bot: Bot<BotContext>): void {
 
       const data = (user?.conversationData as ConversationData) || {};
 
-      // Save resume and move to next step
+      // Save resume with filename and move to next step
+      const resumeName = doc.file_name || 'Uploaded file';
       await db.telegramUser.update({
         where: { id: ctx.telegramUser.id },
         data: {
           conversationState: 'awaiting_min_score',
-          conversationData: { ...data, resumeText },
+          conversationData: { ...data, resumeText, resumeName },
         },
       });
 

@@ -3,26 +3,33 @@ import type { Bot } from 'grammy';
 import type { BotContext } from '../bot.js';
 import { getDb } from '../../db/client.js';
 import { logger } from '../../utils/logger.js';
+import { runSingleSubscriptionSearch } from '../../scheduler/jobs/search-subscriptions.js';
 
 export function setupCommands(bot: Bot<BotContext>): void {
-  // /start - Welcome message
+  // /start - Welcome message with inline keyboard
   bot.command('start', async (ctx) => {
     const firstName = ctx.from?.first_name || 'there';
 
     const welcomeMessage = `
-Hey ${firstName}! Welcome to AI Job Finder Bot.
+Hey ${firstName}! 👋 Welcome to <b>AI Job Finder Bot</b>.
 
 I'll help you find jobs that match your skills and notify you automatically when new opportunities appear.
 
-<b>Commands:</b>
-/subscribe - Create a new job search subscription
-/mysubs - View and manage all your subscriptions
-/history - View past (cancelled) subscriptions
+<b>How it works:</b>
+1️⃣ Create a subscription with your job preferences
+2️⃣ Upload or paste your resume
+3️⃣ I'll search hourly and send you matching jobs
 
-Ready to get started? Use /subscribe!
+Ready to get started?
     `.trim();
 
-    await ctx.reply(welcomeMessage, { parse_mode: 'HTML' });
+    const keyboard = new InlineKeyboard()
+      .text('🚀 Create Subscription', 'sub:new')
+      .row()
+      .text('📋 My Subscriptions', 'sub:list')
+      .text('📜 History', 'cmd:history');
+
+    await ctx.reply(welcomeMessage, { parse_mode: 'HTML', reply_markup: keyboard });
   });
 
   // /subscribe - Start subscription flow (allow multiple)
@@ -121,7 +128,7 @@ Ready to get started? Use /subscribe!
     await ctx.reply('Use /mysubs to view and manage your subscriptions.');
   });
 
-  // /history - View past subscriptions
+  // /history - View past subscriptions with inline keyboard
   bot.command('history', async (ctx) => {
     if (!ctx.telegramUser) {
       await ctx.reply('Something went wrong. Please try again.');
@@ -136,8 +143,15 @@ Ready to get started? Use /subscribe!
       include: { _count: { select: { sentNotifications: true } } },
     });
 
+    const keyboard = new InlineKeyboard()
+      .text('📋 My Subscriptions', 'sub:list')
+      .text('➕ New', 'sub:new');
+
     if (pastSubs.length === 0) {
-      await ctx.reply('No past subscriptions found.');
+      await ctx.reply(
+        'No past subscriptions found.\n\nYour cancelled subscriptions will appear here.',
+        { reply_markup: keyboard }
+      );
       return;
     }
 
@@ -152,7 +166,7 @@ Ready to get started? Use /subscribe!
       message += `  📬 ${sub._count.sentNotifications} notifications sent\n\n`;
     }
 
-    await ctx.reply(message, { parse_mode: 'HTML' });
+    await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
   });
 
   // Legacy commands - redirect to new UI
@@ -216,6 +230,12 @@ Ready to get started? Use /subscribe!
       ? sub.excludedCompanies.join(', ')
       : 'None';
 
+    // Resume info
+    const resumeName = sub.resumeName || 'Resume';
+    const resumeDate = sub.resumeUploadedAt
+      ? sub.resumeUploadedAt.toLocaleDateString()
+      : sub.createdAt.toLocaleDateString();
+
     const message = `
 <b>📋 Subscription Details</b>
 
@@ -223,6 +243,9 @@ Ready to get started? Use /subscribe!
 <b>Job Titles:</b> ${sub.jobTitles.join(', ')}
 <b>Location:</b> ${location}
 <b>Min Score:</b> ${sub.minScore}
+
+<b>📄 Resume:</b> ${resumeName}
+<b>📅 Uploaded:</b> ${resumeDate}
 
 <b>Excluded Titles:</b> ${excludedTitles}
 <b>Excluded Companies:</b> ${excludedCompanies}
@@ -235,14 +258,17 @@ Ready to get started? Use /subscribe!
 
     // Build action buttons
     const keyboard = new InlineKeyboard();
+    if (!sub.isPaused) {
+      keyboard.text('🔍 Scan Now', `sub:scan:${sub.id}`);
+    }
     if (sub.isPaused) {
       keyboard.text('▶️ Resume', `sub:unpause:${sub.id}`);
     } else {
       keyboard.text('⏸️ Pause', `sub:pause:${sub.id}`);
     }
-    keyboard.text('🗑️ Delete', `sub:delete:${sub.id}`);
     keyboard.row();
-    keyboard.text('« Back to List', 'sub:list');
+    keyboard.text('🗑️ Delete', `sub:delete:${sub.id}`);
+    keyboard.text('« Back', 'sub:list');
 
     await ctx.answerCallbackQuery();
     await ctx.editMessageText(message, { parse_mode: 'HTML', reply_markup: keyboard });
@@ -435,5 +461,122 @@ Ready to get started? Use /subscribe!
         '<i>"Backend Engineer, Senior Developer, DevOps"</i>',
       { parse_mode: 'HTML' }
     );
+  });
+
+  // Scan subscription now (manual trigger)
+  bot.callbackQuery(/^sub:scan:(.+)$/, async (ctx) => {
+    const subId = ctx.match[1];
+    const db = getDb();
+
+    const sub = await db.searchSubscription.findUnique({
+      where: { id: subId },
+    });
+
+    if (!sub || !sub.isActive) {
+      await ctx.answerCallbackQuery({ text: 'Subscription not found' });
+      return;
+    }
+
+    if (sub.isPaused) {
+      await ctx.answerCallbackQuery({ text: 'Subscription is paused. Resume it first.' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: '🔍 Starting scan...' });
+
+    // Update message to show scanning status
+    await ctx.editMessageText(
+      '🔍 <b>Scanning for jobs...</b>\n\n' +
+        'This may take a minute. I\'ll send you the results when done.',
+      { parse_mode: 'HTML' }
+    );
+
+    try {
+      const result = await runSingleSubscriptionSearch(subId);
+
+      const keyboard = new InlineKeyboard()
+        .text('📋 My Subscriptions', 'sub:list')
+        .text('🔍 Scan Again', `sub:scan:${subId}`);
+
+      if (result.notificationsSent > 0) {
+        await ctx.editMessageText(
+          `✅ <b>Scan Complete!</b>\n\n` +
+            `Found <b>${result.matchesFound}</b> new matches.\n` +
+            `Sent <b>${result.notificationsSent}</b> notifications.\n\n` +
+            'Check above for your job matches!',
+          { parse_mode: 'HTML', reply_markup: keyboard }
+        );
+      } else {
+        await ctx.editMessageText(
+          `✅ <b>Scan Complete!</b>\n\n` +
+            `No new matches found at this time.\n\n` +
+            'I\'ll keep searching hourly and notify you when I find something.',
+          { parse_mode: 'HTML', reply_markup: keyboard }
+        );
+      }
+
+      logger.info('Telegram', `Manual scan completed for subscription ${subId}: ${result.matchesFound} matches`);
+    } catch (error) {
+      logger.error('Telegram', `Manual scan failed for subscription ${subId}`, error);
+
+      await ctx.editMessageText(
+        '❌ <b>Scan Failed</b>\n\n' +
+          'Something went wrong. Please try again later.',
+        {
+          parse_mode: 'HTML',
+          reply_markup: new InlineKeyboard()
+            .text('🔄 Retry', `sub:scan:${subId}`)
+            .text('« Back', 'sub:list'),
+        }
+      );
+    }
+  });
+
+  // History command via callback
+  bot.callbackQuery('cmd:history', async (ctx) => {
+    if (!ctx.telegramUser) {
+      await ctx.answerCallbackQuery({ text: 'Please try again' });
+      return;
+    }
+
+    const db = getDb();
+    const pastSubs = await db.searchSubscription.findMany({
+      where: { userId: ctx.telegramUser.id, isActive: false },
+      orderBy: { updatedAt: 'desc' },
+      take: 10,
+      include: { _count: { select: { sentNotifications: true } } },
+    });
+
+    await ctx.answerCallbackQuery();
+
+    if (pastSubs.length === 0) {
+      await ctx.editMessageText(
+        'No past subscriptions found.\n\nYour cancelled subscriptions will appear here.',
+        {
+          reply_markup: new InlineKeyboard()
+            .text('📋 My Subscriptions', 'sub:list')
+            .text('➕ New', 'sub:new'),
+        }
+      );
+      return;
+    }
+
+    let message = '<b>📜 Past Subscriptions</b>\n\n';
+
+    for (const sub of pastSubs) {
+      const location = sub.isRemote ? 'Remote' : sub.location || 'Any';
+      const ended = sub.updatedAt.toLocaleDateString();
+
+      message += `• <b>${sub.jobTitles.slice(0, 2).join(', ')}</b>\n`;
+      message += `  ${location} | Ended: ${ended}\n`;
+      message += `  📬 ${sub._count.sentNotifications} notifications sent\n\n`;
+    }
+
+    await ctx.editMessageText(message, {
+      parse_mode: 'HTML',
+      reply_markup: new InlineKeyboard()
+        .text('📋 My Subscriptions', 'sub:list')
+        .text('➕ New', 'sub:new'),
+    });
   });
 }

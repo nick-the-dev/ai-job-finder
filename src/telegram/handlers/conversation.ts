@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { InlineKeyboard } from 'grammy';
 import type { Bot } from 'grammy';
 import type { BotContext } from '../bot.js';
 import { getDb } from '../../db/client.js';
@@ -9,6 +10,7 @@ interface ConversationData {
   location?: string;
   isRemote?: boolean;
   resumeText?: string;
+  resumeName?: string;
   minScore?: number;
   excludedTitles?: string[];
   excludedCompanies?: string[];
@@ -121,7 +123,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
           where: { id: ctx.telegramUser.id },
           data: {
             conversationState: 'awaiting_min_score',
-            conversationData: { ...data, resumeText: text },
+            conversationData: { ...data, resumeText: text, resumeName: 'Pasted text' },
           },
         });
 
@@ -274,7 +276,7 @@ async function createSubscription(
     }
 
     // Create new subscription (multiple allowed)
-    await db.searchSubscription.create({
+    const subscription = await db.searchSubscription.create({
       data: {
         userId: ctx.telegramUser.id,
         jobTitles: data.jobTitles,
@@ -283,6 +285,8 @@ async function createSubscription(
         minScore: data.minScore ?? 60,
         resumeText: data.resumeText,
         resumeHash,
+        resumeName: data.resumeName,
+        resumeUploadedAt: new Date(),
         excludedTitles: data.excludedTitles ?? [],
         excludedCompanies: data.excludedCompanies ?? [],
         isActive: true,
@@ -312,16 +316,24 @@ async function createSubscription(
       ? data.excludedCompanies.join(', ')
       : 'None';
 
+    // Build inline keyboard with scan option
+    const keyboard = new InlineKeyboard()
+      .text('🔍 Start Scanning Now', `sub:scan:${subscription.id}`)
+      .row()
+      .text('📋 My Subscriptions', 'sub:list')
+      .text('➕ Add Another', 'sub:new');
+
     await ctx.reply(
-      '<b>Subscription created!</b>\n\n' +
+      '<b>✅ Subscription created!</b>\n\n' +
         `<b>Job Titles:</b> ${data.jobTitles.join(', ')}\n` +
         `<b>Location:</b> ${locationText}\n` +
         `<b>Min Score:</b> ${data.minScore ?? 60}\n` +
+        `<b>Resume:</b> ${data.resumeName || 'Uploaded'}\n` +
         `<b>Excluded Titles:</b> ${excludedTitlesText}\n` +
         `<b>Excluded Companies:</b> ${excludedCompaniesText}\n\n` +
         "I'll search for jobs every hour and notify you when I find matches.\n\n" +
-        'Use /status to check your subscription anytime.',
-      { parse_mode: 'HTML' }
+        '<b>Would you like to start scanning now?</b>',
+      { parse_mode: 'HTML', reply_markup: keyboard }
     );
 
     logger.info(

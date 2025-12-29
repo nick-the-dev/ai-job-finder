@@ -175,6 +175,8 @@ model SearchSubscription {
   minScore        Int      @default(60) @map("min_score")
   resumeText      String   @map("resume_text")
   resumeHash      String   @map("resume_hash")
+  resumeName      String?  @map("resume_name")
+  resumeUploadedAt DateTime @default(now()) @map("resume_uploaded_at")
 
   // Exclusion filters
   excludedTitles    String[] @default([]) @map("excluded_titles")

@@ -22,6 +22,192 @@ interface SearchResult {
   notificationsSent: number;
 }
 
+interface SingleSearchResult {
+  matchesFound: number;
+  notificationsSent: number;
+}
+
+// Run search for a single subscription (used for immediate scan)
+export async function runSingleSubscriptionSearch(subscriptionId: string): Promise<SingleSearchResult> {
+  const db = getDb();
+
+  const sub = await db.searchSubscription.findUnique({
+    where: { id: subscriptionId },
+    include: {
+      user: true,
+      sentNotifications: {
+        select: { jobMatchId: true },
+      },
+    },
+  });
+
+  if (!sub || !sub.isActive) {
+    throw new Error('Subscription not found or inactive');
+  }
+
+  const userLabel = sub.user.username
+    ? `@${sub.user.username}`
+    : `user-${sub.user.telegramId}`;
+
+  logger.info('Scheduler', `[Manual] Scanning for ${userLabel}: ${sub.jobTitles.join(', ')}`);
+
+  // Collect jobs for each title
+  const allRawJobs = [];
+  for (const title of sub.jobTitles) {
+    const collectFn = async () => {
+      const jobs = await collector.execute({
+        query: title,
+        location: sub.location ?? undefined,
+        isRemote: sub.isRemote,
+        limit: 50,
+        source: 'jobspy',
+        skipCache: false,
+        datePosted: '3days',
+      });
+      return jobs;
+    };
+    const jobs = await jobspyLimit(collectFn);
+    allRawJobs.push(...jobs);
+  }
+
+  // Normalize and dedupe
+  let normalizedJobs = await normalizer.execute(allRawJobs);
+
+  // Apply exclusion filters
+  const excludedTitles = sub.excludedTitles ?? [];
+  const excludedCompanies = sub.excludedCompanies ?? [];
+
+  if (excludedTitles.length > 0 || excludedCompanies.length > 0) {
+    normalizedJobs = normalizedJobs.filter((job) => {
+      const titleLower = job.title.toLowerCase();
+      for (const excluded of excludedTitles) {
+        if (titleLower.includes(excluded.toLowerCase())) return false;
+      }
+      const companyLower = job.company.toLowerCase();
+      for (const excluded of excludedCompanies) {
+        if (companyLower.includes(excluded.toLowerCase())) return false;
+      }
+      return true;
+    });
+  }
+
+  // Get already-sent job match IDs
+  const sentJobMatchIds = new Set(sub.sentNotifications.map((n) => n.jobMatchId));
+
+  // Match jobs and find NEW matches
+  const newMatches: Array<{
+    job: NormalizedJob;
+    match: JobMatchResult;
+    matchId: string;
+  }> = [];
+
+  for (const job of normalizedJobs) {
+    try {
+      const existingJob = await db.job.findUnique({
+        where: { contentHash: job.contentHash },
+        include: {
+          matches: { where: { resumeHash: sub.resumeHash }, take: 1 },
+        },
+      });
+
+      let matchResult: JobMatchResult;
+      let jobMatchId: string;
+
+      if (existingJob?.matches?.[0]) {
+        const cached = existingJob.matches[0];
+        matchResult = {
+          score: cached.score,
+          reasoning: cached.reasoning,
+          matchedSkills: cached.matchedSkills,
+          missingSkills: cached.missingSkills,
+          pros: cached.pros,
+          cons: cached.cons,
+        };
+        jobMatchId = cached.id;
+      } else {
+        matchResult = await matcher.execute({ job, resumeText: sub.resumeText });
+
+        const savedJob = await db.job.upsert({
+          where: { contentHash: job.contentHash },
+          create: {
+            contentHash: job.contentHash,
+            title: job.title,
+            company: job.company,
+            description: job.description,
+            location: job.location,
+            isRemote: job.isRemote || false,
+            salaryMin: job.salaryMin,
+            salaryMax: job.salaryMax,
+            salaryCurrency: job.salaryCurrency,
+            source: job.source,
+            sourceId: job.sourceId,
+            applicationUrl: job.applicationUrl,
+            postedDate: job.postedDate,
+          },
+          update: { lastSeenAt: new Date() },
+        });
+
+        let savedMatch = await db.jobMatch.findFirst({
+          where: { jobId: savedJob.id, resumeHash: sub.resumeHash },
+        });
+
+        if (!savedMatch) {
+          savedMatch = await db.jobMatch.create({
+            data: {
+              jobId: savedJob.id,
+              resumeHash: sub.resumeHash,
+              score: Math.round(matchResult.score),
+              reasoning: matchResult.reasoning,
+              matchedSkills: matchResult.matchedSkills ?? [],
+              missingSkills: matchResult.missingSkills ?? [],
+              pros: matchResult.pros ?? [],
+              cons: matchResult.cons ?? [],
+            },
+          });
+        }
+
+        jobMatchId = savedMatch.id;
+      }
+
+      if (matchResult.score >= sub.minScore && !sentJobMatchIds.has(jobMatchId)) {
+        newMatches.push({ job, match: matchResult, matchId: jobMatchId });
+      }
+    } catch (error) {
+      logger.error('Scheduler', `[Manual] Failed to process job: ${job.title}`, error);
+    }
+  }
+
+  let notificationsSent = 0;
+
+  if (newMatches.length > 0) {
+    newMatches.sort((a, b) => b.match.score - a.match.score);
+    const toNotify = newMatches.slice(0, 10);
+
+    await sendMatchSummary(
+      sub.user.chatId,
+      toNotify.map(({ job, match }) => ({ job, match }))
+    );
+
+    for (const { matchId } of toNotify) {
+      await db.sentNotification.create({
+        data: { subscriptionId: sub.id, jobMatchId: matchId },
+      });
+    }
+
+    notificationsSent = toNotify.length;
+  }
+
+  // Update last search timestamp
+  await db.searchSubscription.update({
+    where: { id: sub.id },
+    data: { lastSearchAt: new Date() },
+  });
+
+  logger.info('Scheduler', `[Manual] Found ${newMatches.length} matches, sent ${notificationsSent} notifications`);
+
+  return { matchesFound: newMatches.length, notificationsSent };
+}
+
 export async function runSubscriptionSearches(): Promise<SearchResult> {
   const db = getDb();
 
