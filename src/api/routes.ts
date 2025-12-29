@@ -28,10 +28,16 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
   const startTime = Date.now();
 
   try {
-    const { jobTitles, location, resumeText, limit = 5, matchLimit, source = 'serpapi', skipCache = false } = req.body;
+    const { jobTitles, resumeText, limit = 5, matchLimit, source = 'serpapi', skipCache = false } = req.body;
 
-    // Auto-detect remote: if location is "Remote", treat as remote search
-    const isRemote = req.body.isRemote ?? (location?.toLowerCase() === 'remote');
+    // Handle location and isRemote:
+    // - location: "Remote" alone → remote jobs, no geo filter
+    // - location: "USA", isRemote: true → remote jobs for USA-based candidates
+    // - location: "New York" → on-site jobs in New York
+    const locationIsRemote = req.body.location?.toLowerCase() === 'remote';
+    const location = locationIsRemote ? undefined : req.body.location;
+    const isRemote = req.body.isRemote ?? locationIsRemote;
+
     const effectiveMatchLimit = matchLimit ?? limit;
 
     logger.info('API', '=== Starting job search ===');
