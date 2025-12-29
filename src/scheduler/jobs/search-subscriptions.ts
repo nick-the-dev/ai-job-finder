@@ -66,7 +66,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
           isRemote: sub.isRemote,
           limit: 3000,
           source: 'jobspy',
-          skipCache: false,
+          skipCache: true, // Manual scans always fetch fresh results
           datePosted: datePosted === 'all' ? undefined : datePosted,
         });
         return jobs;
