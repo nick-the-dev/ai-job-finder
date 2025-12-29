@@ -28,7 +28,7 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
   const startTime = Date.now();
 
   try {
-    const { jobTitles, location, isRemote, resumeText, limit = 5, matchLimit } = req.body;
+    const { jobTitles, location, isRemote, resumeText, limit = 5, matchLimit, source = 'serpapi', skipCache = false } = req.body;
     const effectiveMatchLimit = matchLimit ?? limit; // matchLimit defaults to limit if not specified
 
     logger.info('API', '=== Starting job search ===');
@@ -53,6 +53,8 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
         location,
         isRemote,
         limit: Math.ceil(limit / jobTitles.length) + 2, // Get a few extra per title
+        source,
+        skipCache,
       });
       allRawJobs.push(...jobs);
     }
