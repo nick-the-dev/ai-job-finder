@@ -51,7 +51,8 @@ Respond ONLY with a valid JSON object. No other text.`,
         messages: enhancedMessages,
         temperature,
         max_tokens: maxTokens,
-        response_format: { type: 'json_object' },
+        // Note: json_object response_format not supported by all models
+        // We use prompt engineering to get JSON responses instead
       },
       {
         headers: {
