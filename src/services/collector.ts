@@ -398,17 +398,29 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
   }
 
   private transformJobSpyJob(job: any): RawJob {
+    // Filter out Python "nan" string from description
+    const description = (job.description && job.description !== 'nan') ? job.description : '';
+
+    // Validate date - ensure it's not "nan", null, or creates an Invalid Date
+    let postedDate: Date | undefined;
+    if (job.date_posted && job.date_posted !== 'nan') {
+      const parsed = new Date(job.date_posted);
+      if (!isNaN(parsed.getTime())) {
+        postedDate = parsed;
+      }
+    }
+
     return {
       title: job.title || 'Unknown',
       company: job.company || 'Unknown',
-      description: job.description || '',
+      description,
       location: job.location || undefined,
       isRemote: job.is_remote || false,
       salaryMin: job.min_amount ? parseInt(job.min_amount) : undefined,
       salaryMax: job.max_amount ? parseInt(job.max_amount) : undefined,
       salaryCurrency: job.currency || undefined,
       applicationUrl: job.job_url || undefined,
-      postedDate: job.date_posted ? new Date(job.date_posted) : undefined,
+      postedDate,
       source: 'jobspy',
       sourceId: job.id || undefined,
     };
