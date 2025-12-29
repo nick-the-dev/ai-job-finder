@@ -76,6 +76,15 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
         fromResume: expansion.fromResume,
         total: effectiveJobTitles.length,
       };
+
+      // JobSpy scrapes directly and gets rate-limited quickly
+      // Limit to original titles only to avoid 429 errors and redundant results
+      if (source === 'jobspy' && effectiveJobTitles.length > jobTitles.length) {
+        logger.warn('API', `JobSpy: limiting from ${effectiveJobTitles.length} to ${jobTitles.length} titles (scraper rate limits)`);
+        effectiveJobTitles = jobTitles;
+        expansionDetails.total = jobTitles.length;
+      }
+
       logger.info('API', `Expanded ${jobTitles.length} titles to ${effectiveJobTitles.length} titles`);
     }
 
@@ -99,6 +108,11 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
       });
       allRawJobs.push(...jobs);
       logger.info('API', `      ↳ ${i + 1}/${effectiveJobTitles.length} "${title}" → ${jobs.length} jobs (total: ${allRawJobs.length})`);
+
+      // Add delay between JobSpy calls to avoid rate limiting (scrapes job sites directly)
+      if (source === 'jobspy' && i < effectiveJobTitles.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
     }
 
     // Count by source before dedup
