@@ -237,3 +237,8 @@ npx prisma db execute --stdin <<< "SELECT COUNT(*) FROM job_matches;"
 2. **Docker slim images**: `node:20-slim` lacks build tools - use pure JS alternatives
 3. **Test in Docker locally**: `docker build . && docker run -it <image>` before pushing
 4. **Version pins**: Check package changelogs for breaking API changes (e.g., pdf-parse v1 vs v2)
+
+### Before Every Push
+1. **ALWAYS run `npm run build`** before committing/pushing to catch TypeScript errors
+2. Schema changes may break code (e.g., removing `@@unique` removes composite key types)
+3. If build fails on deploy, check Dokploy logs for the actual error message
