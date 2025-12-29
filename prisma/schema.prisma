@@ -69,8 +69,6 @@ model JobMatch {
   // Telegram notifications
   sentNotifications SentNotification[]
 
-  // Index for efficient lookups (not unique - resumeHash can be null)
-  @@index([jobId, resumeHash])
   @@map("job_matches")
 }
 
