@@ -66,7 +66,6 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     });
 
     if (cached && cached.expiresAt > new Date()) {
-      logger.info('Collector', `Cache hit: query was fetched ${this.timeAgo(cached.fetchedAt)}, expires ${this.timeAgo(cached.expiresAt)}`);
       return true;
     }
     return false;
@@ -147,7 +146,6 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           take: limit,
         });
 
-        logger.info('Collector', `Returning ${cachedJobs.length} cached SerpAPI jobs`);
         return cachedJobs.map(job => ({
           title: job.title,
           company: job.company,
@@ -165,8 +163,6 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       }
     }
 
-    logger.info('Collector', `[SerpAPI] Searching: "${query}" in ${location || 'any location'} (target: ${limit} jobs, posted: ${datePosted})`);
-
     const allJobs: RawJob[] = [];
     let page = 0;
     let nextPageToken: string | undefined;
@@ -174,7 +170,6 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
     try {
       while (hasMore && page < maxPages && allJobs.length < limit) {
-        logger.info('Collector', `[SerpAPI] Fetching page ${page + 1}...`);
 
         const params: Record<string, string> = {
           engine: 'google_jobs',
@@ -189,8 +184,6 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
         if (location && locationLower !== 'remote') {
           params.location = location;
         }
-        // Debug log for deployment verification
-        logger.info('Collector', `[SerpAPI] Location handling: raw="${location}", skip=${locationLower === 'remote'}`);
         if (isRemote) params.ltype = '1';
         if (nextPageToken) params.next_page_token = nextPageToken;
 
@@ -202,11 +195,9 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
         const response = await axios.get('https://serpapi.com/search', { params });
 
         const jobs = response.data.jobs_results || [];
-        logger.info('Collector', `[SerpAPI] Page ${page + 1}: found ${jobs.length} jobs`);
 
         if (jobs.length === 0) {
           hasMore = false;
-          logger.info('Collector', '[SerpAPI] No more jobs available');
         } else {
           for (const job of jobs) {
             if (allJobs.length >= limit) break;
@@ -217,10 +208,6 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           hasMore = !!nextPageToken;
           page++;
 
-          if (!hasMore) {
-            logger.info('Collector', '[SerpAPI] No more pages available');
-          }
-
           if (hasMore && allJobs.length < limit) {
             await this.delay(500);
           }
@@ -230,7 +217,6 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       // Update cache
       await this.updateCache(queryHash, query, location, isRemote, 'serpapi', allJobs.length, cacheHours);
 
-      logger.info('Collector', `[SerpAPI] Total collected: ${allJobs.length} jobs from ${page} pages`);
       return allJobs;
     } catch (error) {
       if (axios.isAxiosError(error)) {
@@ -278,7 +264,6 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           take: limit,
         });
 
-        logger.info('Collector', `Returning ${cachedJobs.length} cached JobSpy jobs`);
         return cachedJobs.map(job => ({
           title: job.title,
           company: job.company,

@@ -5,7 +5,7 @@ import { CollectorService } from '../services/collector.js';
 import { NormalizerService } from '../services/normalizer.js';
 import { MatcherAgent } from '../agents/matcher.js';
 import { QueryExpanderAgent } from '../agents/query-expander.js';
-import type { NormalizedJob, JobMatchResult, SearchResult } from '../core/types.js';
+import type { RawJob, NormalizedJob, JobMatchResult, SearchResult } from '../core/types.js';
 
 export const router = Router();
 
@@ -42,8 +42,7 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
 
     const effectiveMatchLimit = matchLimit ?? limit;
 
-    logger.info('API', '=== Starting job search ===');
-    logger.info('API', 'Request', { jobTitles, location, isRemote, limit, datePosted, widerSearch });
+    logger.info('API', `=== Search: ${jobTitles.join(', ')} | ${location || 'Any location'} | ${isRemote ? 'Remote' : 'On-site'} | limit=${limit} ===`);
 
     if (!jobTitles || !Array.isArray(jobTitles) || jobTitles.length === 0) {
       return res.status(400).json({ error: 'jobTitles array is required' });
@@ -72,10 +71,11 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     }
 
     // Step 1: Collect jobs from all titles
-    logger.info('API', 'Step 1: Collecting jobs...');
-    const allRawJobs = [];
+    logger.info('API', `[1/4] Collecting jobs from ${effectiveJobTitles.length} title(s)...`);
+    const allRawJobs: RawJob[] = [];
 
-    for (const title of effectiveJobTitles) {
+    for (let i = 0; i < effectiveJobTitles.length; i++) {
+      const title = effectiveJobTitles[i];
       // Don't add "Remote" to query - SerpAPI handles it via ltype parameter
       const shouldAddLocation = location && location.toLowerCase() !== 'remote';
       const query = shouldAddLocation ? `${title} ${location}` : title;
@@ -89,51 +89,69 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
         datePosted,
       });
       allRawJobs.push(...jobs);
+      logger.info('API', `      ↳ ${i + 1}/${effectiveJobTitles.length} "${title}" → ${jobs.length} jobs (total: ${allRawJobs.length})`);
     }
 
-    logger.info('API', `Collected ${allRawJobs.length} total jobs`);
+    // Count by source before dedup
+    const sourceCountsBefore: Record<string, number> = {};
+    for (const job of allRawJobs) {
+      sourceCountsBefore[job.source] = (sourceCountsBefore[job.source] || 0) + 1;
+    }
+    const sourcesBefore = Object.entries(sourceCountsBefore).map(([s, c]) => `${s}: ${c}`).join(', ');
 
     // Step 2: Normalize and deduplicate
-    logger.info('API', 'Step 2: Normalizing and deduping...');
+    logger.info('API', `[2/4] Deduplicating ${allRawJobs.length} jobs (${sourcesBefore})...`);
     const normalizedJobs = await normalizer.execute(allRawJobs);
-    logger.info('API', `After dedup: ${normalizedJobs.length} unique jobs`);
+
+    // Count by source after dedup
+    const sourceCountsAfter: Record<string, number> = {};
+    for (const job of normalizedJobs) {
+      sourceCountsAfter[job.source] = (sourceCountsAfter[job.source] || 0) + 1;
+    }
+    const sourcesAfter = Object.entries(sourceCountsAfter).map(([s, c]) => `${s}: ${c}`).join(', ');
+    const duplicates = allRawJobs.length - normalizedJobs.length;
+    logger.info('API', `      ↳ ${normalizedJobs.length} unique (${sourcesAfter}) | ${duplicates} duplicates removed`);
 
     // Step 3: Match jobs against resume (parallel batches of 10)
-    logger.info('API', 'Step 3: Matching jobs against resume...');
-    const matches: Array<{ job: NormalizedJob; match: JobMatchResult }> = [];
     const jobsToMatch = normalizedJobs.slice(0, effectiveMatchLimit);
+    const totalBatches = Math.ceil(jobsToMatch.length / 10);
+    logger.info('API', `[3/4] Matching ${jobsToMatch.length} jobs against resume (${totalBatches} batches)...`);
+    const matches: Array<{ job: NormalizedJob; match: JobMatchResult }> = [];
     const BATCH_SIZE = 10;
 
     for (let i = 0; i < jobsToMatch.length; i += BATCH_SIZE) {
       const batch = jobsToMatch.slice(i, i + BATCH_SIZE);
-      logger.info('API', `Matching batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(jobsToMatch.length / BATCH_SIZE)} (${batch.length} jobs)`);
+      const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+      const pct = Math.round((batchNum / totalBatches) * 100);
 
       const batchResults = await Promise.allSettled(
         batch.map(async (job) => {
           const matchResult = await matcher.execute({ job, resumeText });
           const verified = await matcher.verify(matchResult, job);
-          if (verified.warnings.length > 0) {
-            logger.warn('API', `Match warnings for ${job.title}`, verified.warnings);
-          }
-          return { job, match: matchResult };
+          return { job, match: matchResult, warnings: verified.warnings };
         })
       );
 
+      let batchSuccess = 0;
+      let batchWarnings = 0;
       for (const result of batchResults) {
         if (result.status === 'fulfilled') {
-          matches.push(result.value);
-        } else {
-          logger.error('API', 'Failed to match job', result.reason);
+          matches.push({ job: result.value.job, match: result.value.match });
+          batchSuccess++;
+          if (result.value.warnings.length > 0) batchWarnings++;
         }
       }
+      logger.info('API', `      ↳ Batch ${batchNum}/${totalBatches} (${pct}%) → ${batchSuccess} matched${batchWarnings > 0 ? `, ${batchWarnings} warnings` : ''}`);
     }
 
     // Step 4: Sort by score descending
     matches.sort((a, b) => b.match.score - a.match.score);
 
     // Step 5: Save to database
-    logger.info('API', 'Step 4: Saving to database...');
+    logger.info('API', `[4/4] Saving ${matches.length} matches to database...`);
     const db = getDb();
+    let savedCount = 0;
+    let errorCount = 0;
 
     for (const { job, match } of matches) {
       try {
@@ -172,13 +190,16 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
             cons: match.cons,
           },
         });
+        savedCount++;
       } catch (dbError) {
-        logger.error('API', `DB error for ${job.title}`, dbError);
+        errorCount++;
       }
     }
+    logger.info('API', `      ↳ Saved ${savedCount} matches${errorCount > 0 ? `, ${errorCount} errors` : ''}`);
 
-    const duration = Date.now() - startTime;
-    logger.info('API', `=== Search complete in ${duration}ms ===`);
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+    const topScore = matches.length > 0 ? matches[0].match.score : 0;
+    logger.info('API', `=== Done in ${duration}s | ${matches.length} matches | Top score: ${topScore} ===`);
 
     const result: SearchResult & { expansion?: typeof expansionDetails } = {
       jobsCollected: allRawJobs.length,

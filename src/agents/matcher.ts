@@ -17,8 +17,6 @@ export class MatcherAgent implements IAgent<MatcherInput, JobMatchResult> {
   async execute(input: MatcherInput): Promise<JobMatchResult> {
     const { job, resumeText } = input;
 
-    logger.info('Matcher', `Analyzing: ${job.title} at ${job.company}`);
-
     const systemPrompt = `You are a job matching expert. Analyze how well a candidate's resume matches a job posting.
 
 You MUST respond with a JSON object containing these exact fields:
@@ -76,9 +74,6 @@ Provide your analysis in the required JSON format.`;
         JobMatchSchema,
         JobMatchJsonSchema
       );
-
-      logger.info('Matcher', `Score: ${result.score}/100`);
-      logger.debug('Matcher', 'Result', result);
 
       return result;
     } catch (error) {
