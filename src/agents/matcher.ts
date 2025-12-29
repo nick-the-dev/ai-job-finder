@@ -102,7 +102,7 @@ Provide your analysis in the required JSON format.`;
     }
 
     if (warnings.length > 0) {
-      logger.warn('Matcher', `Verification warnings: ${warnings.length}`, warnings);
+      logger.debug('Matcher', `Verification warnings: ${warnings.length}`, warnings);
     }
 
     return {

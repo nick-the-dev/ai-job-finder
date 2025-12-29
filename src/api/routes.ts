@@ -44,7 +44,7 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
   const startTime = Date.now();
 
   try {
-    const { jobTitles, resumeText, limit = 1000, matchLimit, source = 'serpapi', skipCache = false, datePosted = 'month', widerSearch = false, minScore = 50 } = req.body;
+    const { jobTitles, resumeText, limit = 1000, matchLimit, source = 'serpapi', skipCache = false, datePosted = 'month', widerSearch = false, minScore = 40 } = req.body;
 
     // Handle location and isRemote:
     // - location: "Remote" alone → remote jobs, no geo filter

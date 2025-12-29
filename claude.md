@@ -187,7 +187,7 @@ Output:
 
 ## Score Filtering
 
-Use `minScore` to filter out low-scoring matches (default: 50):
+Use `minScore` to filter out low-scoring matches (default: 40):
 
 ```bash
 curl -X POST http://localhost:3001/search \
