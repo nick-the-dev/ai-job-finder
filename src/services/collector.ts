@@ -308,23 +308,31 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     logger.info('Collector', `[JobSpy] Searching: "${query}" (target: ${limit} jobs)`);
 
     // Convert datePosted to hours_old for JobSpy
-    const hoursOldMap: Record<string, number> = {
+    // Default: 720 hours (30 days / 1 month)
+    const hoursOldMap: Record<string, number | undefined> = {
       'today': 24,
       '3days': 72,
       'week': 168,
       'month': 720,
+      'all': undefined, // No limit - fetch all available
     };
-    const hoursOld = input.datePosted ? hoursOldMap[input.datePosted] : 72;
+    // Default to 720 (month) if not specified
+    const hoursOld = input.datePosted ? hoursOldMap[input.datePosted] : 720;
 
     try {
-      const response = await axios.post(`${jobspyUrl}/scrape`, {
+      const requestBody: Record<string, any> = {
         search_term: query,
         location: location || 'USA',
         site_name: ['indeed', 'linkedin'],  // glassdoor disabled - location parsing broken
         is_remote: isRemote,
         results_wanted: limit,
-        hours_old: hoursOld,
-      }, { timeout: 120000 }); // 2 min timeout for scraping
+      };
+      // Only add hours_old if specified (undefined = no limit / all time)
+      if (hoursOld !== undefined) {
+        requestBody.hours_old = hoursOld;
+      }
+
+      const response = await axios.post(`${jobspyUrl}/scrape`, requestBody, { timeout: 120000 }); // 2 min timeout for scraping
 
       const jobs = response.data.jobs || [];
       logger.info('Collector', `[JobSpy] Found ${jobs.length} jobs`);
