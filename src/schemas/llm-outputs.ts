@@ -16,9 +16,9 @@ export const ExtractedSalarySchema = z.object({
 export const JobMatchSchema = z.object({
   score: z.number()
     .int('Score must be an integer')
-    .min(1, 'Score must be at least 1')
+    .min(0, 'Score must be at least 0')
     .max(100, 'Score must be at most 100')
-    .describe('Match score from 1-100'),
+    .describe('Match score from 0-100'),
 
   reasoning: z.string()
     .min(10, 'Reasoning must be at least 10 characters')
@@ -50,9 +50,9 @@ export const JobMatchJsonSchema = {
   properties: {
     score: {
       type: 'number',
-      minimum: 1,
+      minimum: 0,
       maximum: 100,
-      description: 'Match score from 1-100',
+      description: 'Match score from 0-100',
     },
     reasoning: {
       type: 'string',
