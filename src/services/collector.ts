@@ -180,7 +180,11 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           api_key: this.apiKey,
         };
 
-        if (location) params.location = location;
+        // Don't pass "Remote" as location - it's not a valid SerpAPI location
+        // "Remote" is handled via ltype parameter instead
+        if (location && location.toLowerCase() !== 'remote') {
+          params.location = location;
+        }
         if (isRemote) params.ltype = '1';
         if (nextPageToken) params.next_page_token = nextPageToken;
 
