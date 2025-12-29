@@ -181,10 +181,13 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
         };
 
         // Don't pass "Remote" as location - it's not a valid SerpAPI location
-        // "Remote" is handled via ltype parameter instead (fix v2)
-        if (location && location.toLowerCase() !== 'remote') {
+        // "Remote" is handled via ltype parameter instead (fix v3 - 2024-12-29)
+        const locationLower = location?.toLowerCase();
+        if (location && locationLower !== 'remote') {
           params.location = location;
         }
+        // Debug log for deployment verification
+        logger.info('Collector', `[SerpAPI] Location handling: raw="${location}", skip=${locationLower === 'remote'}`);
         if (isRemote) params.ltype = '1';
         if (nextPageToken) params.next_page_token = nextPageToken;
 
