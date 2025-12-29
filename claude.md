@@ -216,3 +216,24 @@ Search results are automatically saved to CSV files in the `exports/` directory:
 - SerpAPI (Paid aggregator - optional)
 - Zod (Validation)
 - p-limit (Rate limiting for parallel requests)
+
+## Pre-Deploy Checklist
+
+Before deploying schema or dependency changes:
+
+### Database Migrations
+1. **New required columns**: Always make new columns optional (`String?`) or provide a default value
+2. **Unique constraints**: Never add `@@unique` on nullable fields with existing data - use `@@index` instead
+3. **Test migrations locally**: Run `npx prisma db push` against a copy of prod data before deploying
+4. **Check existing data**: Query `SELECT COUNT(*)` to know if tables have data that could conflict
+
+```bash
+# Quick check before adding constraints
+npx prisma db execute --stdin <<< "SELECT COUNT(*) FROM job_matches;"
+```
+
+### Dependencies
+1. **Native binaries**: Avoid packages requiring native compilation (e.g., `@napi-rs/*`) in Docker
+2. **Docker slim images**: `node:20-slim` lacks build tools - use pure JS alternatives
+3. **Test in Docker locally**: `docker build . && docker run -it <image>` before pushing
+4. **Version pins**: Check package changelogs for breaking API changes (e.g., pdf-parse v1 vs v2)
