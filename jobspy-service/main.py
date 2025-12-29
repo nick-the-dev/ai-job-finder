@@ -18,7 +18,52 @@ class ScrapeRequest(BaseModel):
     is_remote: bool = False
     results_wanted: int = 50
     hours_old: Optional[int] = 72  # Jobs posted in last 72 hours
-    country_indeed: str = "USA"
+    country_indeed: Optional[str] = None  # Auto-detect from location if not provided
+
+
+# Country detection from location string
+COUNTRY_MAPPINGS = {
+    "canada": "Canada",
+    "usa": "USA",
+    "united states": "USA",
+    "uk": "UK",
+    "united kingdom": "UK",
+    "australia": "Australia",
+    "germany": "Germany",
+    "france": "France",
+    "india": "India",
+    "brazil": "Brazil",
+    "mexico": "Mexico",
+    "singapore": "Singapore",
+}
+
+# Canadian provinces/cities for detection
+CANADA_INDICATORS = [
+    "toronto", "vancouver", "montreal", "calgary", "ottawa", "edmonton",
+    "winnipeg", "quebec", "hamilton", "kitchener", "london, on", "victoria",
+    "halifax", "saskatoon", "regina", "st. john", "ontario", "british columbia",
+    "alberta", "quebec", "manitoba", "saskatchewan", "nova scotia", ", on,", ", bc,",
+    ", ab,", ", qc,", ", mb,", ", sk,", ", ns,", ", nb,", ", nl,", ", pe,", ", nt,",
+    ", yt,", ", nu,", "on, canada", "bc, canada", "ab, canada", "canada"
+]
+
+
+def detect_country(location: str) -> str:
+    """Detect country from location string for Indeed/Glassdoor filtering."""
+    location_lower = location.lower()
+
+    # Check for Canadian indicators first (more specific)
+    for indicator in CANADA_INDICATORS:
+        if indicator in location_lower:
+            return "Canada"
+
+    # Check country mappings
+    for key, value in COUNTRY_MAPPINGS.items():
+        if key in location_lower:
+            return value
+
+    # Default to USA
+    return "USA"
 
 
 class JobResult(BaseModel):
@@ -44,7 +89,9 @@ def health():
 @app.post("/scrape")
 def scrape(request: ScrapeRequest):
     try:
-        logger.info(f"Scraping jobs: {request.search_term} in {request.location}")
+        # Auto-detect country from location if not provided
+        country = request.country_indeed or detect_country(request.location)
+        logger.info(f"Scraping jobs: {request.search_term} in {request.location} (country: {country})")
 
         jobs_df = scrape_jobs(
             site_name=request.site_name,
@@ -53,7 +100,7 @@ def scrape(request: ScrapeRequest):
             is_remote=request.is_remote,
             results_wanted=request.results_wanted,
             hours_old=request.hours_old,
-            country_indeed=request.country_indeed,
+            country_indeed=country,
         )
 
         if jobs_df is None or jobs_df.empty:

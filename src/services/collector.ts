@@ -15,6 +15,7 @@ interface CollectorInput {
   source?: 'serpapi' | 'jobspy' | 'all'; // Which source to use
   skipCache?: boolean; // Force fresh fetch
   cacheHours?: number; // How long to cache results (default 6 hours)
+  datePosted?: 'today' | '3days' | 'week' | 'month'; // Filter by posting date
 }
 
 const JOBS_PER_PAGE = 10;
@@ -125,6 +126,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       maxPages = DEFAULT_MAX_PAGES,
       skipCache = false,
       cacheHours = DEFAULT_CACHE_HOURS,
+      datePosted = 'month', // Default to last 30 days
     } = input;
 
     const queryHash = this.getQueryHash(query, location, isRemote, 'serpapi');
@@ -163,7 +165,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       }
     }
 
-    logger.info('Collector', `[SerpAPI] Searching: "${query}" in ${location || 'any location'} (target: ${limit} jobs)`);
+    logger.info('Collector', `[SerpAPI] Searching: "${query}" in ${location || 'any location'} (target: ${limit} jobs, posted: ${datePosted})`);
 
     const allJobs: RawJob[] = [];
     let page = 0;
@@ -191,6 +193,11 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
         logger.info('Collector', `[SerpAPI] Location handling: raw="${location}", skip=${locationLower === 'remote'}`);
         if (isRemote) params.ltype = '1';
         if (nextPageToken) params.next_page_token = nextPageToken;
+
+        // Date filter: today, 3days, week, month
+        if (datePosted) {
+          params.chips = `date_posted:${datePosted}`;
+        }
 
         const response = await axios.get('https://serpapi.com/search', { params });
 

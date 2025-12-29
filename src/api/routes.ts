@@ -28,7 +28,7 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
   const startTime = Date.now();
 
   try {
-    const { jobTitles, resumeText, limit = 5, matchLimit, source = 'serpapi', skipCache = false } = req.body;
+    const { jobTitles, resumeText, limit = 1000, matchLimit, source = 'serpapi', skipCache = false, datePosted = 'month' } = req.body;
 
     // Handle location and isRemote:
     // - location: "Remote" alone → remote jobs, no geo filter
@@ -41,7 +41,7 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     const effectiveMatchLimit = matchLimit ?? limit;
 
     logger.info('API', '=== Starting job search ===');
-    logger.info('API', 'Request', { jobTitles, location, isRemote, limit });
+    logger.info('API', 'Request', { jobTitles, location, isRemote, limit, datePosted });
 
     if (!jobTitles || !Array.isArray(jobTitles) || jobTitles.length === 0) {
       return res.status(400).json({ error: 'jobTitles array is required' });
@@ -63,9 +63,10 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
         query,
         location,
         isRemote,
-        limit: Math.ceil(limit / jobTitles.length) + 2, // Get a few extra per title
+        limit, // Fetch all available jobs per title, dedup handles overlaps
         source,
         skipCache,
+        datePosted,
       });
       allRawJobs.push(...jobs);
     }
