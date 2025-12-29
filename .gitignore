@@ -26,3 +26,9 @@ prisma/*.db-journal
 
 # CSV exports
 exports/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/

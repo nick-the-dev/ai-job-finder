@@ -21,6 +21,13 @@ export interface NormalizedJob extends RawJob {
   contentHash: string;
 }
 
+export interface ExtractedSalary {
+  min: number | null;
+  max: number | null;
+  currency: string;
+  isHourly: boolean;
+}
+
 export interface JobMatchResult {
   score: number;          // 1-100
   reasoning: string;      // Why this score
@@ -28,6 +35,7 @@ export interface JobMatchResult {
   missingSkills: string[];
   pros: string[];
   cons: string[];
+  extractedSalary?: ExtractedSalary | null;  // AI-extracted salary info
 }
 
 export interface SearchRequest {

@@ -26,6 +26,9 @@ You MUST respond with a JSON object containing these exact fields:
 - missingSkills: array of strings (skills required by job but not in resume)
 - pros: array of strings (positive aspects of this match)
 - cons: array of strings (concerns or drawbacks)
+- extractedSalary: object or null (salary info extracted from description)
+  - If salary is mentioned: { min: number|null, max: number|null, currency: "USD"|"EUR"|"GBP"|"CAD"|"AUD", isHourly: boolean }
+  - If no salary info found: null
 
 Example response:
 {
@@ -34,7 +37,8 @@ Example response:
   "matchedSkills": ["Python", "Node.js", "PostgreSQL"],
   "missingSkills": ["Angular", "GraphQL"],
   "pros": ["Great backend experience", "Leadership experience"],
-  "cons": ["No Angular experience", "May need frontend training"]
+  "cons": ["No Angular experience", "May need frontend training"],
+  "extractedSalary": { "min": 120000, "max": 150000, "currency": "USD", "isHourly": false }
 }
 
 Score guidelines:
@@ -42,7 +46,14 @@ Score guidelines:
 - 70-89: Strong match
 - 50-69: Moderate match
 - 30-49: Weak match
-- 1-29: Poor match`;
+- 1-29: Poor match
+
+Salary extraction guidelines:
+- Look for salary ranges like "$100K-$150K", "$100,000 - $150,000", "100k-150k USD"
+- Look for hourly rates like "$50/hr", "$40-60 per hour"
+- If only one number is given, use it as min with max as null
+- Set isHourly: true for hourly rates, false for annual salaries
+- If no salary is mentioned anywhere in the description, return null`;
 
     const userPrompt = `Analyze this job against the candidate's resume.
 

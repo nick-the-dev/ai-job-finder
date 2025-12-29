@@ -1,6 +1,16 @@
 import { z } from 'zod';
 
 /**
+ * Schema for extracted salary information
+ */
+export const ExtractedSalarySchema = z.object({
+  min: z.number().nullable().describe('Minimum salary amount (annual or hourly)'),
+  max: z.number().nullable().describe('Maximum salary amount (annual or hourly)'),
+  currency: z.string().describe('Currency code (USD, EUR, GBP, CAD, AUD)'),
+  isHourly: z.boolean().describe('True if this is an hourly rate, false if annual'),
+}).nullable();
+
+/**
  * Schema for job match analysis - structured LLM output
  */
 export const JobMatchSchema = z.object({
@@ -25,6 +35,9 @@ export const JobMatchSchema = z.object({
 
   cons: z.array(z.string())
     .describe('Potential concerns or drawbacks'),
+
+  extractedSalary: ExtractedSalarySchema
+    .describe('Salary extracted from job description if not already provided'),
 });
 
 export type JobMatchOutput = z.infer<typeof JobMatchSchema>;
@@ -65,8 +78,18 @@ export const JobMatchJsonSchema = {
       items: { type: 'string' },
       description: 'Potential concerns or drawbacks',
     },
+    extractedSalary: {
+      type: ['object', 'null'],
+      properties: {
+        min: { type: ['number', 'null'], description: 'Minimum salary amount' },
+        max: { type: ['number', 'null'], description: 'Maximum salary amount' },
+        currency: { type: 'string', description: 'Currency code (USD, EUR, GBP, CAD, AUD)' },
+        isHourly: { type: 'boolean', description: 'True if hourly rate, false if annual' },
+      },
+      description: 'Salary extracted from job description (null if not found)',
+    },
   },
-  required: ['score', 'reasoning', 'matchedSkills', 'missingSkills', 'pros', 'cons'],
+  required: ['score', 'reasoning', 'matchedSkills', 'missingSkills', 'pros', 'cons', 'extractedSalary'],
 } as const;
 
 /**
