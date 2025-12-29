@@ -14,7 +14,7 @@ COPY prisma ./prisma/
 RUN npx prisma generate
 
 # Cache buster - change this to force rebuild
-ARG BUILD_VERSION=v5
+ARG BUILD_VERSION=v6
 
 # Copy source code
 COPY tsconfig.json ./

@@ -49,7 +49,7 @@ model JobMatch {
   job         Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
   // Resume fingerprint for caching (hash of resume text)
-  resumeHash  String   @map("resume_hash")
+  resumeHash  String?  @map("resume_hash")
 
   // Match analysis
   score       Int      // 1-100
