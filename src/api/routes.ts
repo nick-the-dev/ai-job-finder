@@ -5,6 +5,7 @@ import { CollectorService } from '../services/collector.js';
 import { NormalizerService } from '../services/normalizer.js';
 import { MatcherAgent } from '../agents/matcher.js';
 import { QueryExpanderAgent } from '../agents/query-expander.js';
+import { saveMatchesToCSV } from '../utils/csv.js';
 import type { RawJob, NormalizedJob, JobMatchResult, SearchResult } from '../core/types.js';
 
 export const router = Router();
@@ -201,15 +202,23 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     const topScore = matches.length > 0 ? matches[0].match.score : 0;
     logger.info('API', `=== Done in ${duration}s | ${matches.length} matches | Top score: ${topScore} ===`);
 
-    const result: SearchResult & { expansion?: typeof expansionDetails } = {
+    // Save results to CSV
+    const csvFilename = await saveMatchesToCSV(matches);
+    logger.info('API', `CSV saved: ${csvFilename}`);
+
+    const protocol = req.protocol;
+    const host = req.get('host');
+    const downloadUrl = `${protocol}://${host}/exports/${csvFilename}`;
+
+    res.json({
       jobsCollected: allRawJobs.length,
       jobsAfterDedup: normalizedJobs.length,
       jobsMatched: matches.length,
-      matches,
+      topScore,
+      duration: `${duration}s`,
+      downloadUrl,
       expansion: expansionDetails,
-    };
-
-    res.json(result);
+    });
   } catch (error) {
     next(error);
   }

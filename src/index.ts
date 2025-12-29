@@ -1,4 +1,5 @@
 import express from 'express';
+import { join } from 'path';
 import { config } from './config.js';
 import { logger } from './utils/logger.js';
 import { router, errorHandler } from './api/routes.js';
@@ -8,6 +9,9 @@ const app = express();
 
 // Middleware
 app.use(express.json());
+
+// Serve CSV exports
+app.use('/exports', express.static(join(process.cwd(), 'exports')));
 
 // Request logging
 app.use((req, res, next) => {

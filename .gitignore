@@ -23,3 +23,6 @@ Thumbs.db
 # Prisma
 prisma/*.db
 prisma/*.db-journal
+
+# CSV exports
+exports/
