@@ -54,32 +54,32 @@ export class QueryExpanderAgent implements IAgent<QueryExpanderInput, QueryExpan
     }
 
     // 2. Call LLM for expansion
+    const maxExpanded = jobTitles.length * 2; // Original + 1 synonym each
     const systemPrompt = `You are a job search expert. Your task is to expand job search queries to find more relevant positions.
 
 You MUST respond with a JSON object containing these exact fields:
-- expandedQueries: array of job titles (max 50 total)
-- resumeSuggestedTitles: array of additional job titles based on resume skills (max 15)
+- expandedQueries: array of job titles (max ${maxExpanded} total - original titles + 1 synonym each)
+- resumeSuggestedTitles: array of additional job titles based on resume skills (max 5)
 
 CRITICAL RULE for expandedQueries:
 - Include each original job title exactly as given
-- Add 4 related ROLE/FUNCTION variants per original title
+- Add exactly 1 related ROLE/FUNCTION synonym per original title (not more)
 - ONLY expand with synonymous job ROLES, NOT with technology/tool names
 - The expansion should work for ANY job title - keep it about the ROLE, not the tech stack
 
-Examples of CORRECT expansions (role synonyms only):
-- "Backend Engineer" → "Backend Developer", "Server-Side Engineer", "Software Engineer", "API Engineer"
-- "Data Scientist" → "Data Analyst", "ML Engineer", "Research Scientist", "Applied Scientist"
-- "DevOps Engineer" → "Platform Engineer", "Site Reliability Engineer", "Infrastructure Engineer", "Cloud Engineer"
-- "Frontend Developer" → "UI Developer", "Web Developer", "Frontend Engineer", "UI Engineer"
+Examples of CORRECT expansions (1 synonym per title):
+- "Backend Engineer" → "Backend Developer" (just 1 synonym)
+- "Data Scientist" → "ML Engineer" (just 1 synonym)
+- "DevOps Engineer" → "Platform Engineer" (just 1 synonym)
+- "Frontend Developer" → "UI Developer" (just 1 synonym)
 
-Examples of WRONG expansions (adding tech-specific titles NOT in original):
-- "Backend Engineer" → "Python Developer" ❌ (Python wasn't in original title)
-- "Data Scientist" → "TensorFlow Engineer" ❌ (TensorFlow wasn't in original title)
-- "DevOps Engineer" → "Kubernetes Administrator" ❌ (Kubernetes wasn't in original title)
+Examples of WRONG expansions:
+- "Backend Engineer" → "Python Developer" ❌ (tech-specific, not in original)
+- "Backend Engineer" → "Backend Developer", "API Engineer", "Server Engineer" ❌ (too many - only 1 allowed)
 
-For resumeSuggestedTitles:
+For resumeSuggestedTitles (max 5):
 - Analyze the resume skills and experience level
-- Suggest job titles the candidate would be qualified for
+- Suggest up to 5 job titles the candidate would be qualified for
 - These CAN include technology-specific titles if the resume explicitly shows that expertise
 - Consider seniority level (Senior, Lead, Staff, Principal) based on years of experience
 - Don't repeat titles already in expandedQueries`;

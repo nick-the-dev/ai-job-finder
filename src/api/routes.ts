@@ -1,5 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
+import { join } from 'path';
+import pLimit from 'p-limit';
 import { logger } from '../utils/logger.js';
 import { getDb } from '../db/client.js';
 import { CollectorService } from '../services/collector.js';
@@ -8,6 +10,9 @@ import { MatcherAgent } from '../agents/matcher.js';
 import { QueryExpanderAgent } from '../agents/query-expander.js';
 import { saveMatchesToCSV } from '../utils/csv.js';
 import type { RawJob, NormalizedJob, JobMatchResult, SearchResult } from '../core/types.js';
+
+// Limit concurrent JobSpy requests to avoid rate limiting
+const jobspyLimit = pLimit(2);
 
 /**
  * Generate a hash of resume text for caching matches
@@ -39,7 +44,7 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
   const startTime = Date.now();
 
   try {
-    const { jobTitles, resumeText, limit = 1000, matchLimit, source = 'serpapi', skipCache = false, datePosted = 'month', widerSearch = false } = req.body;
+    const { jobTitles, resumeText, limit = 1000, matchLimit, source = 'serpapi', skipCache = false, datePosted = 'month', widerSearch = false, minScore = 50 } = req.body;
 
     // Handle location and isRemote:
     // - location: "Remote" alone → remote jobs, no geo filter
@@ -90,30 +95,32 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
 
     // Step 1: Collect jobs from all titles
     logger.info('API', `[1/4] Collecting jobs from ${effectiveJobTitles.length} title(s)...`);
-    const allRawJobs: RawJob[] = [];
 
-    for (let i = 0; i < effectiveJobTitles.length; i++) {
-      const title = effectiveJobTitles[i];
-      // Don't add "Remote" to query - SerpAPI handles it via ltype parameter
-      const shouldAddLocation = location && location.toLowerCase() !== 'remote';
-      const query = shouldAddLocation ? `${title} ${location}` : title;
-      const jobs = await collector.execute({
-        query,
-        location,
-        isRemote,
-        limit, // Fetch all available jobs per title, dedup handles overlaps
-        source,
-        skipCache,
-        datePosted,
-      });
-      allRawJobs.push(...jobs);
-      logger.info('API', `      ↳ ${i + 1}/${effectiveJobTitles.length} "${title}" → ${jobs.length} jobs (total: ${allRawJobs.length})`);
+    // Use p-limit for parallel collection with rate limiting for JobSpy
+    const shouldAddLocation = location && location.toLowerCase() !== 'remote';
+    const collectPromises = effectiveJobTitles.map((title, i) => {
+      const collectFn = async () => {
+        const query = shouldAddLocation ? `${title} ${location}` : title;
+        const jobs = await collector.execute({
+          query,
+          location,
+          isRemote,
+          limit,
+          source,
+          skipCache,
+          datePosted,
+        });
+        logger.info('API', `      ↳ ${i + 1}/${effectiveJobTitles.length} "${title}" → ${jobs.length} jobs`);
+        return jobs;
+      };
 
-      // Add delay between JobSpy calls to avoid rate limiting (scrapes job sites directly)
-      if (source === 'jobspy' && i < effectiveJobTitles.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-    }
+      // Use p-limit for JobSpy (max 2 concurrent), run SerpAPI in parallel
+      return source === 'jobspy' ? jobspyLimit(collectFn) : collectFn();
+    });
+
+    const results = await Promise.all(collectPromises);
+    const allRawJobs: RawJob[] = results.flat();
+    logger.info('API', `      ✓ Collected ${allRawJobs.length} total jobs`);
 
     // Count by source before dedup
     const sourceCountsBefore: Record<string, number> = {};
@@ -215,11 +222,16 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
       logger.info('API', `      ✓ Cache hit: ${totalCached} jobs skipped LLM | ${totalFresh} fresh analyses`);
     }
 
-    // Step 4: Sort by score descending
+    // Step 4: Sort by score descending and filter by minScore
     matches.sort((a, b) => b.match.score - a.match.score);
+    const filteredMatches = matches.filter(m => m.match.score >= minScore);
+    const filteredOut = matches.length - filteredMatches.length;
+    if (filteredOut > 0) {
+      logger.info('API', `      ✓ Filtered out ${filteredOut} matches with score < ${minScore}`);
+    }
 
     // Step 5: Save fresh matches to database (cached ones are already saved)
-    const freshMatches = matches.filter(m => !m.cached);
+    const freshMatches = filteredMatches.filter(m => !m.cached);
     logger.info('API', `[4/4] Saving ${freshMatches.length} new matches to database (${totalCached} already cached)...`);
     let savedCount = 0;
     let errorCount = 0;
@@ -284,13 +296,14 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     logger.info('API', `      ↳ Saved ${savedCount} matches${errorCount > 0 ? `, ${errorCount} errors` : ''}`);
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-    const topScore = matches.length > 0 ? matches[0].match.score : 0;
-    logger.info('API', `=== Done in ${duration}s | ${matches.length} matches | Top score: ${topScore} ===`);
+    const topScore = filteredMatches.length > 0 ? filteredMatches[0].match.score : 0;
+    logger.info('API', `=== Done in ${duration}s | ${filteredMatches.length} matches (minScore: ${minScore}) | Top score: ${topScore} ===`);
 
-    // Save results to CSV (strip cached field for CSV export)
-    const matchesForCSV = matches.map(({ job, match }) => ({ job, match }));
+    // Save filtered results to CSV (strip cached field for CSV export)
+    const matchesForCSV = filteredMatches.map(({ job, match }) => ({ job, match }));
     const csvFilename = await saveMatchesToCSV(matchesForCSV);
-    logger.info('API', `CSV saved: ${csvFilename}`);
+    const csvAbsolutePath = join(process.cwd(), 'exports', csvFilename);
+    logger.info('API', `CSV saved: ${csvAbsolutePath}`);
 
     const protocol = req.protocol;
     const host = req.get('host');
@@ -299,7 +312,9 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     res.json({
       jobsCollected: allRawJobs.length,
       jobsAfterDedup: normalizedJobs.length,
-      jobsMatched: matches.length,
+      jobsMatched: filteredMatches.length,
+      jobsFiltered: filteredOut,
+      minScore,
       matchesCached: totalCached,
       matchesFresh: totalFresh,
       topScore,

@@ -338,10 +338,10 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       salaryCurrency = salary.includes('$') ? 'USD' : undefined;
     }
 
-    const isRemote = Boolean(
-      serpJob.detected_extensions?.work_from_home ||
-      serpJob.location?.toLowerCase().includes('remote') ||
-      serpJob.description?.toLowerCase().includes('remote')
+    const isRemote = this.detectRemote(
+      serpJob.detected_extensions?.work_from_home,
+      serpJob.location,
+      serpJob.description
     );
 
     return {
@@ -419,5 +419,50 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Detect if a job is truly remote using multiple signals
+   * Avoids false positives from incidental "remote" mentions in descriptions
+   */
+  private detectRemote(
+    workFromHomeFlag: boolean | undefined,
+    location: string | undefined,
+    description: string | undefined
+  ): boolean {
+    // Most reliable: SerpAPI's work_from_home extension
+    if (workFromHomeFlag) return true;
+
+    // Check location field (usually reliable)
+    const locationLower = location?.toLowerCase() || '';
+    if (locationLower.includes('remote') || locationLower.includes('work from home')) {
+      return true;
+    }
+
+    // Check description with strict patterns to avoid false positives
+    const descLower = description?.toLowerCase() || '';
+
+    // Strong indicators that this IS a remote position
+    const remotePatterns = [
+      /\bremote\s+(position|role|job|work|opportunity)/,   // "remote position", "remote role"
+      /\b(fully|100%|completely)\s+remote\b/,               // "fully remote", "100% remote"
+      /\bwork\s+(from\s+)?home\b/,                          // "work from home", "work home"
+      /\bremote[\s-]first\b/,                               // "remote-first"
+      /\bremote[\s-]only\b/,                                // "remote only"
+      /\bremote\s+friendly\b/,                              // "remote friendly"
+      /\blocation:\s*remote\b/,                             // "location: remote"
+      /\bthis\s+is\s+a\s+remote\b/,                         // "this is a remote"
+      /\bcan\s+work\s+remotely\b/,                          // "can work remotely"
+      /\bwork\s+remotely\s+(from\s+)?anywhere\b/,           // "work remotely from anywhere"
+    ];
+
+    for (const pattern of remotePatterns) {
+      if (pattern.test(descLower)) {
+        return true;
+      }
+    }
+
+    // NOT remote: mentions like "remote debugging", "remote teams", "support remote"
+    return false;
   }
 }

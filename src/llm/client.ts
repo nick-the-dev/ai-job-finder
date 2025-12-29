@@ -71,8 +71,6 @@ Respond ONLY with a valid JSON object. No other text.`,
     try {
       if (attempt > 0) {
         logger.info('LLM', `Retry attempt ${attempt}/${maxRetries}...`);
-      } else {
-        logger.debug('LLM', 'Messages', { count: messages.length });
       }
 
       const response = await axios.post(
@@ -98,8 +96,6 @@ Respond ONLY with a valid JSON object. No other text.`,
       if (!content) {
         throw new Error('Empty response from LLM');
       }
-
-      logger.debug('LLM', 'Raw response', content.substring(0, 300));
 
       // Parse JSON
       let parsed: unknown;

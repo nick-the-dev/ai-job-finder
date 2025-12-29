@@ -20,6 +20,9 @@ const envSchema = z.object({
 
   // Server
   PORT: z.string().default('3000').transform(Number),
+
+  // Logging
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 
 function loadConfig() {

@@ -1,5 +1,6 @@
 /**
  * Simple logger with clear, short output for monitoring and debugging
+ * Supports LOG_LEVEL env var: debug | info | warn | error (default: info)
  */
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -12,11 +13,32 @@ const colors = {
   reset: '\x1b[0m',
 };
 
+const levelPriority: Record<LogLevel, number> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
+};
+
+function getLogLevel(): LogLevel {
+  const level = process.env.LOG_LEVEL?.toLowerCase();
+  if (level && level in levelPriority) {
+    return level as LogLevel;
+  }
+  return 'info'; // default
+}
+
 function formatTime(): string {
   return new Date().toISOString().substring(11, 23);
 }
 
 function log(level: LogLevel, context: string, message: string, data?: unknown): void {
+  // Filter by log level
+  const minLevel = getLogLevel();
+  if (levelPriority[level] < levelPriority[minLevel]) {
+    return;
+  }
+
   const color = colors[level];
   const prefix = `${colors.reset}[${formatTime()}] ${color}${level.toUpperCase().padEnd(5)}${colors.reset}`;
   const ctx = `[${context}]`;

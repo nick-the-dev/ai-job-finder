@@ -2,6 +2,8 @@
 
 AI-powered job aggregation and matching system that collects jobs from multiple sources, analyzes them against a user's resume using LLM, and returns match scores with detailed reasoning.
 
+> **Note**: We use the free JobSpy scraper as the primary data source. All optimizations and solutions should target JobSpy first. SerpAPI is available but requires a paid API key.
+
 ## Quick Start
 
 ```bash
@@ -30,25 +32,27 @@ npm run dev
 ## Example: Search Jobs
 
 ```bash
-# Basic search
+# Basic search (uses JobSpy by default)
 curl -X POST http://localhost:3001/search \
   -H "Content-Type: application/json" \
   -d '{
     "jobTitles": ["Senior Software Engineer"],
     "location": "United States",
     "isRemote": true,
+    "source": "jobspy",
     "resumeText": "Your resume text here...",
     "limit": 100
   }'
 
-# Collect 1000 jobs, match top 10 (fast test)
+# Collect jobs, match top 10 (fast test)
 curl -X POST http://localhost:3001/search \
   -H "Content-Type: application/json" \
   -d '{
-    "jobTitles": ["Software Engineer", "Backend Developer", "Python Developer"],
+    "jobTitles": ["Software Engineer", "Backend Developer"],
     "location": "United States",
     "isRemote": true,
-    "limit": 1000,
+    "source": "jobspy",
+    "limit": 200,
     "matchLimit": 10,
     "resumeText": "Your resume..."
   }'
@@ -58,18 +62,21 @@ curl -X POST http://localhost:3001/search \
   -H "Content-Type: application/json" \
   -d '{
     "jobTitles": ["Backend Developer"],
+    "source": "jobspy",
     "skipCache": true,
     "limit": 50,
     "resumeText": "..."
   }'
 
 # Wider search (LLM expands job titles + suggests based on resume)
+# Note: widerSearch is limited to original titles for JobSpy to avoid rate limits
 curl -X POST http://localhost:3001/search \
   -H "Content-Type: application/json" \
   -d '{
     "jobTitles": ["Backend Engineer"],
+    "source": "jobspy",
     "widerSearch": true,
-    "limit": 500,
+    "limit": 200,
     "matchLimit": 20,
     "resumeText": "Senior engineer with Python, Django, AWS..."
   }'
@@ -85,7 +92,7 @@ src/
 │   ├── types.ts          # Shared TypeScript types
 │   └── interfaces.ts     # IService, IAgent interfaces (DRY)
 ├── services/
-│   ├── collector.ts      # SerpAPI job collection
+│   ├── collector.ts      # JobSpy/SerpAPI job collection (JobSpy primary)
 │   └── normalizer.ts     # Job deduplication & normalization
 ├── agents/
 │   ├── matcher.ts        # LLM-based job matching (score 1-100)
@@ -121,24 +128,36 @@ All LLM responses are validated with Zod schemas to prevent hallucinations.
 ## Environment Variables
 
 ```bash
+# Required
 DATABASE_URL=postgresql://user:pass@localhost:5433/jobfinder
 OPENROUTER_API_KEY=sk-or-...
 OPENROUTER_MODEL=xiaomi/mimo-v2-flash:free
+
+# JobSpy (Primary - Free scraper)
+JOBSPY_URL=http://localhost:8000
+
+# SerpAPI (Optional - Paid)
 SERPAPI_API_KEY=...
+
+# Server
 PORT=3001
+LOG_LEVEL=info  # debug | info | warn | error (default: info)
 ```
 
 ## Data Sources
 
-### SerpAPI Google Jobs (Primary - Paid)
-- Aggregates jobs from LinkedIn, Indeed, Glassdoor, etc.
-- Uses pagination with `next_page_token`
-- ~10 jobs per page, up to 100 pages
+### JobSpy (Primary - Free)
+- Scrapes Indeed, LinkedIn, Glassdoor, ZipRecruiter directly
+- Requires separate Python microservice (see `jobspy-service/`)
+- Set `JOBSPY_URL` env var (e.g., `http://localhost:8000`)
+- Use `source: "jobspy"` in search requests
+- Rate limited: max 2 concurrent requests via p-limit
 
-### JobSpy (Secondary - Free)
-- Scrapes Indeed, LinkedIn, Glassdoor, ZipRecruiter
-- Requires separate Python microservice
-- Set `JOBSPY_URL` to enable
+### SerpAPI Google Jobs (Optional - Paid)
+- Aggregates jobs from LinkedIn, Indeed, Glassdoor, etc.
+- Requires `SERPAPI_API_KEY` env var
+- Use `source: "serpapi"` in search requests
+- ~10 jobs per page, up to 100 pages
 
 ## Query Caching
 
@@ -153,23 +172,47 @@ To optimize API costs, queries are cached for 6 hours by default:
 Use `widerSearch: true` to automatically expand job titles using LLM:
 
 ```
-Input:  ["Backend Engineer"]
+Input:  ["Backend Engineer", "DevOps Engineer"]
 Output:
-  fromExpansion: ["Backend Engineer", "Backend Developer", "Server-Side Engineer", "Software Engineer", "API Engineer"]
-  fromResume:    ["Senior Backend Engineer", "Lead Backend Engineer", "Python Backend Engineer", ...]
-  total: ~15 unique titles searched
+  fromExpansion: ["Backend Engineer", "Backend Developer", "DevOps Engineer", "Platform Engineer"]
+  fromResume:    ["Senior Backend Engineer", "Cloud Engineer", "SRE", ...]
+  total: ~9 unique titles searched
 ```
 
 **How it works:**
-- **fromExpansion**: Role synonyms only (no tech-specific titles unless in original query)
-- **fromResume**: LLM analyzes resume and suggests titles based on skills/experience level
+- **fromExpansion**: Original titles + 1 synonym per title (conservative to reduce duplicates)
+- **fromResume**: Max 5 additional titles based on resume skills/experience level
 - Results are cached to avoid repeated LLM calls
 - Response includes `expansion` object showing all searched titles
+
+## Score Filtering
+
+Use `minScore` to filter out low-scoring matches (default: 50):
+
+```bash
+curl -X POST http://localhost:3001/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jobTitles": ["Software Engineer"],
+    "minScore": 70,
+    "resumeText": "..."
+  }'
+```
+
+Response includes `jobsFiltered` count showing how many were below threshold.
+
+## CSV Export
+
+Search results are automatically saved to CSV files in the `exports/` directory:
+- Filename: `job-matches-{timestamp}.csv`
+- Accessible via: `http://localhost:3001/exports/{filename}`
+- Response includes `downloadUrl` for direct download
 
 ## Tech Stack
 - TypeScript, Node.js, Express
 - PostgreSQL + Prisma ORM
 - OpenRouter (LLM) - xiaomi/mimo-v2-flash:free
-- SerpAPI (Paid job aggregator)
-- JobSpy (Free scraper - optional)
+- JobSpy (Free scraper - primary)
+- SerpAPI (Paid aggregator - optional)
 - Zod (Validation)
+- p-limit (Rate limiting for parallel requests)
