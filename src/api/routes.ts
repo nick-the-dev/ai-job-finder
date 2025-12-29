@@ -8,7 +8,7 @@ import { CollectorService } from '../services/collector.js';
 import { NormalizerService } from '../services/normalizer.js';
 import { MatcherAgent } from '../agents/matcher.js';
 import { QueryExpanderAgent } from '../agents/query-expander.js';
-import { saveMatchesToCSV } from '../utils/csv.js';
+import { saveMatchesToCSV, generateDownloadToken, validateDownloadToken, getExportFile } from '../utils/csv.js';
 import type { RawJob, NormalizedJob, JobMatchResult, SearchResult } from '../core/types.js';
 
 // Limit concurrent JobSpy requests to avoid rate limiting
@@ -309,9 +309,11 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     const csvAbsolutePath = join(process.cwd(), 'exports', csvFilename);
     logger.info('API', `CSV saved: ${csvAbsolutePath}`);
 
+    // Generate secure download token (24h expiry)
+    const downloadToken = generateDownloadToken(csvFilename);
     const protocol = req.protocol;
     const host = req.get('host');
-    const downloadUrl = `${protocol}://${host}/exports/${csvFilename}`;
+    const downloadUrl = `${protocol}://${host}/download/${downloadToken}`;
 
     res.json({
       jobsCollected: allRawJobs.length,
@@ -367,6 +369,39 @@ router.get('/matches', async (req: Request, res: Response, next: NextFunction) =
 
     logger.info('API', `Returning ${matches.length} matches`);
     res.json({ count: matches.length, matches });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /download/:token - Secure file download with token authentication
+ */
+router.get('/download/:token', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { token } = req.params;
+
+    // Validate token and get filename
+    const filename = validateDownloadToken(token);
+    if (!filename) {
+      logger.warn('API', `Invalid or expired download token: ${token.substring(0, 8)}...`);
+      return res.status(404).json({ error: 'Invalid or expired download link' });
+    }
+
+    // Get file content
+    const content = await getExportFile(filename);
+    if (!content) {
+      logger.error('API', `File not found for valid token: ${filename}`);
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    logger.info('API', `Serving download: ${filename}`);
+
+    // Set headers for file download
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', content.length);
+    res.send(content);
   } catch (error) {
     next(error);
   }

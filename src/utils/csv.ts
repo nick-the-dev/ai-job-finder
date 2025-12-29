@@ -1,8 +1,71 @@
+import crypto from 'crypto';
 import { NormalizedJob, JobMatchResult, ExtractedSalary } from '../core/types.js';
-import { writeFile, mkdir } from 'fs/promises';
+import { writeFile, mkdir, readFile, unlink } from 'fs/promises';
 import { join } from 'path';
+import { existsSync } from 'fs';
 
 const EXPORTS_DIR = join(process.cwd(), 'exports');
+
+// Token-based download system for security
+// Maps token -> { filename, createdAt }
+const downloadTokens = new Map<string, { filename: string; createdAt: Date }>();
+const TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * Generate a secure download token for a CSV file
+ */
+export function generateDownloadToken(filename: string): string {
+  const token = crypto.randomBytes(32).toString('hex');
+  downloadTokens.set(token, { filename, createdAt: new Date() });
+  return token;
+}
+
+/**
+ * Validate and get filename for download token
+ * Returns null if token is invalid or expired
+ */
+export function validateDownloadToken(token: string): string | null {
+  const entry = downloadTokens.get(token);
+  if (!entry) return null;
+
+  // Check expiry
+  if (Date.now() - entry.createdAt.getTime() > TOKEN_EXPIRY_MS) {
+    downloadTokens.delete(token);
+    return null;
+  }
+
+  return entry.filename;
+}
+
+/**
+ * Get file content for download
+ */
+export async function getExportFile(filename: string): Promise<Buffer | null> {
+  const filepath = join(EXPORTS_DIR, filename);
+
+  // Security: ensure path doesn't escape exports directory
+  if (!filepath.startsWith(EXPORTS_DIR) || filename.includes('..')) {
+    return null;
+  }
+
+  if (!existsSync(filepath)) {
+    return null;
+  }
+
+  return readFile(filepath);
+}
+
+/**
+ * Clean up expired tokens and old files (call periodically)
+ */
+export function cleanupExpiredTokens(): void {
+  const now = Date.now();
+  for (const [token, entry] of downloadTokens.entries()) {
+    if (now - entry.createdAt.getTime() > TOKEN_EXPIRY_MS) {
+      downloadTokens.delete(token);
+    }
+  }
+}
 
 interface MatchEntry {
   job: NormalizedJob;

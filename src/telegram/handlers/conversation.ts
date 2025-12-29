@@ -260,7 +260,20 @@ async function createSubscription(
 
     const resumeHash = getResumeHash(data.resumeText);
 
-    // Create subscription
+    // Count existing active subscriptions
+    const activeCount = await db.searchSubscription.count({
+      where: { userId: ctx.telegramUser.id, isActive: true },
+    });
+
+    if (activeCount >= 5) {
+      await ctx.reply(
+        'You have reached the maximum of 5 active subscriptions.\n\n' +
+          'Use /mysubs to manage existing subscriptions before creating a new one.'
+      );
+      return;
+    }
+
+    // Create new subscription (multiple allowed)
     await db.searchSubscription.create({
       data: {
         userId: ctx.telegramUser.id,

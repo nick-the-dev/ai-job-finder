@@ -149,8 +149,8 @@ model TelegramUser {
   username      String?
   firstName     String?  @map("first_name")
 
-  // One subscription per user
-  subscription  SearchSubscription?
+  // Subscriptions (multiple allowed, only one active at a time)
+  subscriptions SearchSubscription[]
 
   // Conversation state for multi-step setup
   conversationState  String?  @map("conversation_state")
@@ -162,10 +162,10 @@ model TelegramUser {
   @@map("telegram_users")
 }
 
-// User's job search subscription (one per user)
+// User's job search subscription (multiple allowed, only one active at a time)
 model SearchSubscription {
   id              String   @id @default(uuid())
-  userId          String   @unique @map("user_id")
+  userId          String   @map("user_id")
   user            TelegramUser @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   // Search parameters
