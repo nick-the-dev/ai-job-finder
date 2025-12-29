@@ -1,4 +1,5 @@
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { config } from './config.js';
 import { logger } from './utils/logger.js';
 import { router, errorHandler } from './api/routes.js';
@@ -8,11 +9,45 @@ import { initScheduler, stopScheduler } from './scheduler/cron.js';
 
 const app = express();
 
+// Trust proxy for rate limiting behind reverse proxy
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(express.json());
 
 // Note: CSV exports are now served via /download/:token endpoint with auth
 // Static /exports directory is NOT exposed for security
+
+// Rate limiting - different limits for different endpoints
+const searchLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // 10 searches per minute
+  message: { error: 'Too many search requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    logger.warn('RateLimit', `Search rate limit exceeded: ${req.ip}`);
+    res.status(429).json({ error: 'Too many search requests, please try again later' });
+  },
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 60, // 60 requests per minute for general API
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    logger.warn('RateLimit', `API rate limit exceeded: ${req.ip}`);
+    res.status(429).json({ error: 'Too many requests, please try again later' });
+  },
+});
+
+// Apply rate limiting (search is more restrictive)
+app.use('/search', searchLimiter);
+app.use('/jobs', apiLimiter);
+app.use('/matches', apiLimiter);
+app.use('/download', apiLimiter);
 
 // Request logging
 app.use((req, res, next) => {

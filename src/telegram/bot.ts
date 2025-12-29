@@ -111,14 +111,20 @@ export async function initBot(app: Express): Promise<void> {
     logger.info('Telegram', `Bot connected: @${me.username}`);
 
     if (config.TELEGRAM_WEBHOOK_URL) {
-      // Webhook mode (production)
+      // Webhook mode (production) - secret is REQUIRED for security
+      if (!config.TELEGRAM_WEBHOOK_SECRET) {
+        logger.error('Telegram', 'TELEGRAM_WEBHOOK_SECRET is required when using webhook mode');
+        logger.error('Telegram', 'Set TELEGRAM_WEBHOOK_SECRET in your environment variables');
+        throw new Error('TELEGRAM_WEBHOOK_SECRET is required for webhook mode');
+      }
+
       app.post('/telegram/webhook', getWebhookHandler());
 
       await telegramBot.api.setWebhook(config.TELEGRAM_WEBHOOK_URL, {
         secret_token: config.TELEGRAM_WEBHOOK_SECRET,
       });
 
-      logger.info('Telegram', `Webhook set to ${config.TELEGRAM_WEBHOOK_URL}`);
+      logger.info('Telegram', `Webhook set to ${config.TELEGRAM_WEBHOOK_URL} (secret enabled)`);
     } else {
       // Polling mode (development)
       telegramBot.start();
