@@ -151,22 +151,25 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
               update: { lastSeenAt: new Date() },
             });
 
-            const savedMatch = await db.jobMatch.upsert({
-              where: {
-                jobId_resumeHash: { jobId: savedJob.id, resumeHash: sub.resumeHash },
-              },
-              create: {
-                jobId: savedJob.id,
-                resumeHash: sub.resumeHash,
-                score: Math.round(matchResult.score),
-                reasoning: matchResult.reasoning,
-                matchedSkills: matchResult.matchedSkills ?? [],
-                missingSkills: matchResult.missingSkills ?? [],
-                pros: matchResult.pros ?? [],
-                cons: matchResult.cons ?? [],
-              },
-              update: {},
+            // Find or create match record
+            let savedMatch = await db.jobMatch.findFirst({
+              where: { jobId: savedJob.id, resumeHash: sub.resumeHash },
             });
+
+            if (!savedMatch) {
+              savedMatch = await db.jobMatch.create({
+                data: {
+                  jobId: savedJob.id,
+                  resumeHash: sub.resumeHash,
+                  score: Math.round(matchResult.score),
+                  reasoning: matchResult.reasoning,
+                  matchedSkills: matchResult.matchedSkills ?? [],
+                  missingSkills: matchResult.missingSkills ?? [],
+                  pros: matchResult.pros ?? [],
+                  cons: matchResult.cons ?? [],
+                },
+              });
+            }
 
             jobMatchId = savedMatch.id;
           }

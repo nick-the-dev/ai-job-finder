@@ -261,33 +261,37 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
           },
         });
 
-        // Upsert match record with resumeHash (prevents duplicates)
-        await db.jobMatch.upsert({
-          where: {
-            jobId_resumeHash: {
+        // Find or create match record
+        const existingMatch = await db.jobMatch.findFirst({
+          where: { jobId: savedJob.id, resumeHash },
+        });
+
+        if (existingMatch) {
+          await db.jobMatch.update({
+            where: { id: existingMatch.id },
+            data: {
+              score: Math.round(match.score),
+              reasoning: match.reasoning,
+              matchedSkills: match.matchedSkills ?? [],
+              missingSkills: match.missingSkills ?? [],
+              pros: match.pros ?? [],
+              cons: match.cons ?? [],
+            },
+          });
+        } else {
+          await db.jobMatch.create({
+            data: {
               jobId: savedJob.id,
               resumeHash,
+              score: Math.round(match.score),
+              reasoning: match.reasoning,
+              matchedSkills: match.matchedSkills ?? [],
+              missingSkills: match.missingSkills ?? [],
+              pros: match.pros ?? [],
+              cons: match.cons ?? [],
             },
-          },
-          create: {
-            jobId: savedJob.id,
-            resumeHash,
-            score: Math.round(match.score),
-            reasoning: match.reasoning,
-            matchedSkills: match.matchedSkills ?? [],
-            missingSkills: match.missingSkills ?? [],
-            pros: match.pros ?? [],
-            cons: match.cons ?? [],
-          },
-          update: {
-            score: Math.round(match.score),
-            reasoning: match.reasoning,
-            matchedSkills: match.matchedSkills ?? [],
-            missingSkills: match.missingSkills ?? [],
-            pros: match.pros ?? [],
-            cons: match.cons ?? [],
-          },
-        });
+          });
+        }
         savedCount++;
       } catch (dbError) {
         errorCount++;
