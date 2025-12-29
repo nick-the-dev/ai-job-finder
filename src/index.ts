@@ -6,6 +6,14 @@ import { router, errorHandler } from './api/routes.js';
 import { getDb, disconnectDb } from './db/client.js';
 import { initBot, stopBot } from './telegram/bot.js';
 import { initScheduler, stopScheduler } from './scheduler/cron.js';
+import {
+  initRedis,
+  disconnectRedis,
+  initQueues,
+  closeQueues,
+  startCollectionWorker,
+  startMatchingWorker,
+} from './queue/index.js';
 
 const app = express();
 
@@ -66,6 +74,8 @@ async function shutdown(signal: string) {
   logger.info('Server', `${signal} received, shutting down...`);
   stopScheduler();
   await stopBot();
+  await closeQueues();
+  await disconnectRedis();
   await disconnectDb();
   process.exit(0);
 }
@@ -83,6 +93,20 @@ async function start() {
     const db = getDb();
     await db.$queryRaw`SELECT 1`;
     logger.info('Server', 'Database connected');
+
+    // Initialize Redis and queue system
+    logger.info('Server', 'Initializing queue system...');
+    const redisOk = await initRedis();
+    if (redisOk) {
+      const queuesOk = await initQueues();
+      if (queuesOk) {
+        startCollectionWorker();
+        startMatchingWorker();
+        logger.info('Server', 'Queue workers started');
+      }
+    } else {
+      logger.warn('Server', 'Redis unavailable - using fallback mode (in-process rate limiting)');
+    }
 
     // Initialize Telegram bot (if configured)
     if (config.TELEGRAM_BOT_TOKEN) {

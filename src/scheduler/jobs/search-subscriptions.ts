@@ -1,18 +1,13 @@
 import crypto from 'crypto';
-import pLimit from 'p-limit';
 import { getDb } from '../../db/client.js';
-import { CollectorService } from '../../services/collector.js';
 import { NormalizerService } from '../../services/normalizer.js';
 import { MatcherAgent } from '../../agents/matcher.js';
 import { sendMatchSummary } from '../../telegram/services/notification.js';
 import { logger } from '../../utils/logger.js';
+import { queueService, PRIORITY } from '../../queue/index.js';
 import type { NormalizedJob, JobMatchResult } from '../../core/types.js';
 
-// Rate limit JobSpy requests
-const jobspyLimit = pLimit(2);
-
 // Services (reuse singleton pattern)
-const collector = new CollectorService();
 const normalizer = new NormalizerService();
 const matcher = new MatcherAgent();
 
@@ -59,19 +54,15 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   for (const title of sub.jobTitles) {
     try {
       logger.info('Scheduler', `[Manual] Collecting jobs for: "${title}"`);
-      const collectFn = async () => {
-        const jobs = await collector.execute({
-          query: title,
-          location: sub.location ?? undefined,
-          isRemote: sub.isRemote,
-          limit: 3000,
-          source: 'jobspy',
-          skipCache: true, // Manual scans always fetch fresh results
-          datePosted: datePosted === 'all' ? undefined : datePosted,
-        });
-        return jobs;
-      };
-      const jobs = await jobspyLimit(collectFn);
+      const jobs = await queueService.enqueueCollection({
+        query: title,
+        location: sub.location ?? undefined,
+        isRemote: sub.isRemote,
+        limit: 3000,
+        source: 'jobspy',
+        skipCache: true, // Manual scans always fetch fresh results
+        datePosted: datePosted === 'all' ? undefined : datePosted,
+      }, PRIORITY.MANUAL_SCAN);
       logger.info('Scheduler', `[Manual] Found ${jobs.length} jobs for "${title}"`);
       allRawJobs.push(...jobs);
     } catch (error) {
@@ -288,21 +279,15 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       for (const title of sub.jobTitles) {
         try {
           logger.info('Scheduler', `  Collecting jobs for: "${title}"`);
-          const collectFn = async () => {
-            const jobs = await collector.execute({
-              query: title,
-              location: sub.location ?? undefined,
-              isRemote: sub.isRemote,
-              limit: 3000,
-              source: 'jobspy',
-              skipCache: false,
-              datePosted: datePosted === 'all' ? undefined : datePosted,
-            });
-            return jobs;
-          };
-
-          // Rate limit JobSpy
-          const jobs = await jobspyLimit(collectFn);
+          const jobs = await queueService.enqueueCollection({
+            query: title,
+            location: sub.location ?? undefined,
+            isRemote: sub.isRemote,
+            limit: 3000,
+            source: 'jobspy',
+            skipCache: false,
+            datePosted: datePosted === 'all' ? undefined : datePosted,
+          }, PRIORITY.SCHEDULED);
           logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}"`);
           allRawJobs.push(...jobs);
         } catch (error) {

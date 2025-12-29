@@ -1,18 +1,14 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { join } from 'path';
-import pLimit from 'p-limit';
 import { logger } from '../utils/logger.js';
 import { getDb } from '../db/client.js';
-import { CollectorService } from '../services/collector.js';
 import { NormalizerService } from '../services/normalizer.js';
 import { MatcherAgent } from '../agents/matcher.js';
 import { QueryExpanderAgent } from '../agents/query-expander.js';
 import { saveMatchesToCSV, generateDownloadToken, validateDownloadToken, getExportFile } from '../utils/csv.js';
+import { queueService, PRIORITY, getQueueStatus, isRedisConnected } from '../queue/index.js';
 import type { RawJob, NormalizedJob, JobMatchResult, SearchResult } from '../core/types.js';
-
-// Limit concurrent JobSpy requests to avoid rate limiting
-const jobspyLimit = pLimit(2);
 
 /**
  * Generate a hash of resume text for caching matches
@@ -24,7 +20,6 @@ function getResumeHash(resumeText: string): string {
 export const router = Router();
 
 // Services (singleton instances)
-const collector = new CollectorService();
 const normalizer = new NormalizerService();
 const matcher = new MatcherAgent();
 const queryExpander = new QueryExpanderAgent();
@@ -35,6 +30,31 @@ const queryExpander = new QueryExpanderAgent();
 router.get('/health', (req: Request, res: Response) => {
   logger.info('API', 'Health check');
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+/**
+ * GET /queue/status - Queue monitoring endpoint
+ */
+router.get('/queue/status', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const redisConnected = isRedisConnected();
+
+    if (!redisConnected) {
+      return res.json({
+        status: 'fallback',
+        message: 'Redis unavailable, using in-process rate limiting',
+        queues: null,
+      });
+    }
+
+    const queueStatus = await getQueueStatus();
+    res.json({
+      status: 'active',
+      queues: queueStatus,
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 /**
@@ -98,29 +118,23 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
       logger.info('API', `Expanded ${jobTitles.length} titles to ${effectiveJobTitles.length} titles`);
     }
 
-    // Step 1: Collect jobs from all titles
+    // Step 1: Collect jobs from all titles via queue (rate limited)
     logger.info('API', `[1/4] Collecting jobs from ${effectiveJobTitles.length} title(s)...`);
 
-    // Use p-limit for parallel collection with rate limiting for JobSpy
     const shouldAddLocation = location && location.toLowerCase() !== 'remote';
-    const collectPromises = effectiveJobTitles.map((title, i) => {
-      const collectFn = async () => {
-        const query = shouldAddLocation ? `${title} ${location}` : title;
-        const jobs = await collector.execute({
-          query,
-          location,
-          isRemote,
-          limit,
-          source,
-          skipCache,
-          datePosted,
-        });
-        logger.info('API', `      ↳ ${i + 1}/${effectiveJobTitles.length} "${title}" → ${jobs.length} jobs`);
-        return jobs;
-      };
-
-      // Use p-limit for JobSpy (max 2 concurrent), run SerpAPI in parallel
-      return source === 'jobspy' ? jobspyLimit(collectFn) : collectFn();
+    const collectPromises = effectiveJobTitles.map(async (title, i) => {
+      const query = shouldAddLocation ? `${title} ${location}` : title;
+      const jobs = await queueService.enqueueCollection({
+        query,
+        location,
+        isRemote,
+        limit,
+        source,
+        skipCache,
+        datePosted,
+      }, PRIORITY.API_REQUEST);
+      logger.info('API', `      ↳ ${i + 1}/${effectiveJobTitles.length} "${title}" → ${jobs.length} jobs`);
+      return jobs;
     });
 
     const results = await Promise.all(collectPromises);

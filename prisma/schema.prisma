@@ -190,6 +190,7 @@ model SearchSubscription {
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
   lastSearchAt    DateTime? @map("last_search_at")
+  nextRunAt       DateTime? @map("next_run_at") // When to run next (null = run immediately)
 
   // Track sent notifications
   sentNotifications SentNotification[]

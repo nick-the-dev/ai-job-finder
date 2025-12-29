@@ -8,8 +8,16 @@ const envSchema = z.object({
   // Database
   DATABASE_URL: z.string().url(),
 
-  // Redis (optional for now)
-  REDIS_URL: z.string().optional(),
+  // Redis (optional - queue falls back to in-process if unavailable)
+  REDIS_URL: z.string().default('redis://localhost:6379'),
+
+  // Queue concurrency limits
+  QUEUE_JOBSPY_CONCURRENCY: z.coerce.number().default(2),
+  QUEUE_LLM_CONCURRENCY: z.coerce.number().default(5),
+  QUEUE_FALLBACK_ENABLED: z.coerce.boolean().default(true),
+
+  // Scheduling
+  SUBSCRIPTION_INTERVAL_HOURS: z.coerce.number().default(1),
 
   // OpenRouter
   OPENROUTER_API_KEY: z.string().min(1),

@@ -28,6 +28,7 @@ npm run dev
 | `/search` | POST | Search jobs and analyze matches |
 | `/jobs` | GET | List all collected jobs |
 | `/matches` | GET | List all job matches with scores |
+| `/queue/status` | GET | Queue monitoring (waiting/active/completed counts) |
 
 ## Example: Search Jobs
 
@@ -103,10 +104,49 @@ src/
 │   └── routes.ts         # Express routes with logging
 ├── db/
 │   └── client.ts         # Prisma singleton
+├── queue/                # Bull queue for rate-limited job processing
+│   ├── redis.ts          # Redis connection management
+│   ├── queues.ts         # Queue definitions (collection, matching)
+│   ├── service.ts        # QueueService with fallback to p-limit
+│   └── workers/
+│       ├── collection.ts # JobSpy/SerpAPI worker (concurrency: 2)
+│       └── matching.ts   # LLM matching worker (concurrency: 5)
+├── scheduler/
+│   ├── cron.ts           # Per-minute scheduler for subscriptions
+│   └── jobs/
+│       └── search-subscriptions.ts  # Subscription search logic
+├── telegram/
+│   ├── bot.ts            # Telegram bot initialization
+│   ├── handlers/         # Command and callback handlers
+│   └── services/         # Notification services
 ├── schemas/
 │   └── llm-outputs.ts    # Zod schemas for LLM responses
 └── utils/
     └── logger.ts         # Logging utility
+```
+
+### Request Flow
+
+```
+                    +------------------+
+                    |   Entry Points   |
+                    +------------------+
+                           |
+       +-------------------+-------------------+
+       |                   |                   |
+  API /search       Telegram Scan      Scheduled Run
+       |                   |                   |
+       v                   v                   v
++------------------------------------------------------+
+|                   Bull Queue (Redis)                  |
+|  +----------------+  +----------------+               |
+|  | collection     |  | matching       |               |
+|  | (concurrency:2)|  | (concurrency:5)|               |
+|  +----------------+  +----------------+               |
++------------------------------------------------------+
+       |                   |
+       v                   v
+   JobSpy API         OpenRouter LLM
 ```
 
 ## Key Concepts
@@ -139,6 +179,17 @@ JOBSPY_URL=http://localhost:8000
 # SerpAPI (Optional - Paid)
 SERPAPI_API_KEY=...
 
+# Redis (Optional - enables Bull queue)
+REDIS_URL=redis://localhost:6379
+
+# Queue configuration
+QUEUE_JOBSPY_CONCURRENCY=2      # Max concurrent JobSpy requests
+QUEUE_LLM_CONCURRENCY=5         # Max concurrent LLM calls
+QUEUE_FALLBACK_ENABLED=true     # Fallback to in-process p-limit if Redis unavailable
+
+# Scheduling
+SUBSCRIPTION_INTERVAL_HOURS=1   # Hours between subscription runs
+
 # Server
 PORT=3001
 LOG_LEVEL=info  # debug | info | warn | error (default: info)
@@ -151,7 +202,7 @@ LOG_LEVEL=info  # debug | info | warn | error (default: info)
 - Requires separate Python microservice (see `jobspy-service/`)
 - Set `JOBSPY_URL` env var (e.g., `http://localhost:8000`)
 - Use `source: "jobspy"` in search requests
-- Rate limited: max 2 concurrent requests via p-limit
+- Rate limited: max 2 concurrent requests via Bull queue (or p-limit fallback)
 
 ### SerpAPI Google Jobs (Optional - Paid)
 - Aggregates jobs from LinkedIn, Indeed, Glassdoor, etc.
@@ -211,11 +262,63 @@ Search results are automatically saved to CSV files in the `exports/` directory:
 ## Tech Stack
 - TypeScript, Node.js, Express
 - PostgreSQL + Prisma ORM
+- Redis + Bull (Job queue)
 - OpenRouter (LLM) - xiaomi/mimo-v2-flash:free
 - JobSpy (Free scraper - primary)
 - SerpAPI (Paid aggregator - optional)
 - Zod (Validation)
-- p-limit (Rate limiting for parallel requests)
+- ioredis + Bull (Queue) or p-limit (Fallback rate limiting)
+
+## Queue System
+
+The queue system prevents rate limiting when multiple users trigger searches simultaneously.
+
+### How It Works
+- **Bull + Redis**: All JobSpy and LLM requests go through rate-limited queues
+- **Collection Queue**: Max 2 concurrent JobSpy requests (prevents 429 errors)
+- **Matching Queue**: Max 5 concurrent LLM calls (controls costs)
+- **Priority Levels**: Manual scans (1) > API requests (2) > Scheduled runs (3)
+
+### Fallback Mode
+If Redis is unavailable, the system falls back to in-process `p-limit` rate limiting.
+This provides graceful degradation but doesn't share limits across instances.
+
+### Monitoring
+```bash
+# Check queue status
+curl http://localhost:3001/queue/status
+
+# Response:
+{
+  "status": "active",
+  "queues": {
+    "collection": { "waiting": 5, "active": 2, "completed": 100 },
+    "matching": { "waiting": 20, "active": 5, "completed": 500 }
+  }
+}
+```
+
+## Subscription Scheduler
+
+Users subscribe to job searches via Telegram. The scheduler processes each subscription independently.
+
+### Staggered Scheduling
+- Each subscription has its own `nextRunAt` timestamp
+- Scheduler checks every minute for due subscriptions (`nextRunAt <= now`)
+- After processing, `nextRunAt` is set to `now + SUBSCRIPTION_INTERVAL_HOURS`
+- Natural load distribution: users subscribe at different times
+
+### Why Not Batch Processing?
+The old approach ran all subscriptions at the same fixed time (e.g., hourly at :00).
+Problems:
+- Thundering herd: all requests hit JobSpy/LLM simultaneously
+- Queue backup: late subscribers wait for earlier ones
+- Unfair priority: all jobs have equal priority
+
+The new per-subscription approach:
+- Spreads load naturally across time
+- Manual scans get priority (jump the queue)
+- No waiting for other users' jobs
 
 ## Pre-Deploy Checklist
 
