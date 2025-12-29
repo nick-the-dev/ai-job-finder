@@ -4,6 +4,7 @@ import { logger } from '../utils/logger.js';
 
 let redisClient: Redis | null = null;
 let isRedisAvailable = false;
+let connectionFailed = false; // Suppress repeated error logs after initial failure
 
 export function getRedis(): Redis | null {
   return redisClient;
@@ -19,8 +20,7 @@ export async function initRedis(): Promise<boolean> {
       maxRetriesPerRequest: 3,
       retryStrategy(times: number) {
         if (times > 3) {
-          logger.warn('Redis', `Connection failed after ${times} attempts`);
-          return null; // Stop retrying
+          return null; // Stop retrying - error will be logged in catch block
         }
         return Math.min(times * 200, 2000);
       },
@@ -28,7 +28,9 @@ export async function initRedis(): Promise<boolean> {
     });
 
     redisClient.on('error', (err: Error) => {
-      logger.warn('Redis', 'Connection error', err.message);
+      if (!connectionFailed) {
+        logger.warn('Redis', 'Connection error', err.message);
+      }
       isRedisAvailable = false;
     });
 
@@ -49,8 +51,17 @@ export async function initRedis(): Promise<boolean> {
     logger.info('Redis', `Connected to ${config.REDIS_URL}`);
     return true;
   } catch (error) {
+    connectionFailed = true; // Suppress further error logs
     logger.warn('Redis', 'Failed to connect - using fallback mode', error instanceof Error ? error.message : 'Unknown error');
     isRedisAvailable = false;
+    // Properly disconnect to stop retry attempts
+    if (redisClient) {
+      try {
+        redisClient.disconnect();
+      } catch {
+        // Ignore disconnect errors
+      }
+    }
     redisClient = null;
     return false;
   }
