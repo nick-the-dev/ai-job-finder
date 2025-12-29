@@ -77,24 +77,33 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     const normalizedJobs = await normalizer.execute(allRawJobs);
     logger.info('API', `After dedup: ${normalizedJobs.length} unique jobs`);
 
-    // Step 3: Match jobs against resume
+    // Step 3: Match jobs against resume (parallel batches of 10)
     logger.info('API', 'Step 3: Matching jobs against resume...');
     const matches: Array<{ job: NormalizedJob; match: JobMatchResult }> = [];
+    const jobsToMatch = normalizedJobs.slice(0, effectiveMatchLimit);
+    const BATCH_SIZE = 10;
 
-    for (const job of normalizedJobs.slice(0, effectiveMatchLimit)) {
-      try {
-        const matchResult = await matcher.execute({ job, resumeText });
+    for (let i = 0; i < jobsToMatch.length; i += BATCH_SIZE) {
+      const batch = jobsToMatch.slice(i, i + BATCH_SIZE);
+      logger.info('API', `Matching batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(jobsToMatch.length / BATCH_SIZE)} (${batch.length} jobs)`);
 
-        // Verify the result
-        const verified = await matcher.verify(matchResult, job);
-        if (verified.warnings.length > 0) {
-          logger.warn('API', `Match warnings for ${job.title}`, verified.warnings);
+      const batchResults = await Promise.allSettled(
+        batch.map(async (job) => {
+          const matchResult = await matcher.execute({ job, resumeText });
+          const verified = await matcher.verify(matchResult, job);
+          if (verified.warnings.length > 0) {
+            logger.warn('API', `Match warnings for ${job.title}`, verified.warnings);
+          }
+          return { job, match: matchResult };
+        })
+      );
+
+      for (const result of batchResults) {
+        if (result.status === 'fulfilled') {
+          matches.push(result.value);
+        } else {
+          logger.error('API', 'Failed to match job', result.reason);
         }
-
-        matches.push({ job, match: matchResult });
-      } catch (error) {
-        logger.error('API', `Failed to match: ${job.title}`, error);
-        // Continue with other jobs
       }
     }
 
