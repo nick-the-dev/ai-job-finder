@@ -1,0 +1,235 @@
+import crypto from 'crypto';
+import pLimit from 'p-limit';
+import { getDb } from '../../db/client.js';
+import { CollectorService } from '../../services/collector.js';
+import { NormalizerService } from '../../services/normalizer.js';
+import { MatcherAgent } from '../../agents/matcher.js';
+import { sendMatchSummary } from '../../telegram/services/notification.js';
+import { logger } from '../../utils/logger.js';
+import type { NormalizedJob, JobMatchResult } from '../../core/types.js';
+
+// Rate limit JobSpy requests
+const jobspyLimit = pLimit(2);
+
+// Services (reuse singleton pattern)
+const collector = new CollectorService();
+const normalizer = new NormalizerService();
+const matcher = new MatcherAgent();
+
+interface SearchResult {
+  usersProcessed: number;
+  matchesFound: number;
+  notificationsSent: number;
+}
+
+export async function runSubscriptionSearches(): Promise<SearchResult> {
+  const db = getDb();
+
+  // Get all active, non-paused subscriptions
+  const subscriptions = await db.searchSubscription.findMany({
+    where: {
+      isActive: true,
+      isPaused: false,
+    },
+    include: {
+      user: true,
+      sentNotifications: {
+        select: { jobMatchId: true },
+      },
+    },
+  });
+
+  if (subscriptions.length === 0) {
+    logger.info('Scheduler', 'No active subscriptions to process');
+    return { usersProcessed: 0, matchesFound: 0, notificationsSent: 0 };
+  }
+
+  logger.info('Scheduler', `Processing ${subscriptions.length} active subscriptions`);
+
+  let totalMatchesFound = 0;
+  let totalNotifications = 0;
+
+  for (const sub of subscriptions) {
+    try {
+      const userLabel = sub.user.username
+        ? `@${sub.user.username}`
+        : `user-${sub.user.telegramId}`;
+
+      logger.info('Scheduler', `Processing ${userLabel}: ${sub.jobTitles.join(', ')}`);
+
+      // Step 1: Collect jobs for each title
+      const allRawJobs = [];
+
+      for (const title of sub.jobTitles) {
+        const collectFn = async () => {
+          const jobs = await collector.execute({
+            query: title,
+            location: sub.location ?? undefined,
+            isRemote: sub.isRemote,
+            limit: 50, // Limit per title for scheduler
+            source: 'jobspy', // Use free source
+            skipCache: false, // Use cache aggressively
+            datePosted: '3days', // Focus on recent jobs
+          });
+          return jobs;
+        };
+
+        // Rate limit JobSpy
+        const jobs = await jobspyLimit(collectFn);
+        allRawJobs.push(...jobs);
+      }
+
+      logger.debug('Scheduler', `  Collected ${allRawJobs.length} raw jobs`);
+
+      // Step 2: Normalize and dedupe
+      const normalizedJobs = await normalizer.execute(allRawJobs);
+      logger.debug('Scheduler', `  ${normalizedJobs.length} unique jobs after dedup`);
+
+      // Step 3: Get already-sent job match IDs
+      const sentJobMatchIds = new Set(sub.sentNotifications.map((n) => n.jobMatchId));
+
+      // Step 4: Match jobs and find NEW matches
+      const newMatches: Array<{
+        job: NormalizedJob;
+        match: JobMatchResult;
+        matchId: string;
+      }> = [];
+
+      for (const job of normalizedJobs) {
+        try {
+          // Check for existing match in DB
+          const existingJob = await db.job.findUnique({
+            where: { contentHash: job.contentHash },
+            include: {
+              matches: {
+                where: { resumeHash: sub.resumeHash },
+                take: 1,
+              },
+            },
+          });
+
+          let matchResult: JobMatchResult;
+          let jobMatchId: string;
+
+          if (existingJob?.matches?.[0]) {
+            // Use cached match
+            const cached = existingJob.matches[0];
+            matchResult = {
+              score: cached.score,
+              reasoning: cached.reasoning,
+              matchedSkills: cached.matchedSkills,
+              missingSkills: cached.missingSkills,
+              pros: cached.pros,
+              cons: cached.cons,
+            };
+            jobMatchId = cached.id;
+          } else {
+            // Need to create new match via LLM
+            matchResult = await matcher.execute({
+              job,
+              resumeText: sub.resumeText,
+            });
+
+            // Save job and match to DB
+            const savedJob = await db.job.upsert({
+              where: { contentHash: job.contentHash },
+              create: {
+                contentHash: job.contentHash,
+                title: job.title,
+                company: job.company,
+                description: job.description,
+                location: job.location,
+                isRemote: job.isRemote || false,
+                salaryMin: job.salaryMin,
+                salaryMax: job.salaryMax,
+                salaryCurrency: job.salaryCurrency,
+                source: job.source,
+                sourceId: job.sourceId,
+                applicationUrl: job.applicationUrl,
+                postedDate: job.postedDate,
+              },
+              update: { lastSeenAt: new Date() },
+            });
+
+            const savedMatch = await db.jobMatch.upsert({
+              where: {
+                jobId_resumeHash: { jobId: savedJob.id, resumeHash: sub.resumeHash },
+              },
+              create: {
+                jobId: savedJob.id,
+                resumeHash: sub.resumeHash,
+                score: Math.round(matchResult.score),
+                reasoning: matchResult.reasoning,
+                matchedSkills: matchResult.matchedSkills ?? [],
+                missingSkills: matchResult.missingSkills ?? [],
+                pros: matchResult.pros ?? [],
+                cons: matchResult.cons ?? [],
+              },
+              update: {},
+            });
+
+            jobMatchId = savedMatch.id;
+          }
+
+          // Check if meets minScore and hasn't been sent before
+          if (matchResult.score >= sub.minScore && !sentJobMatchIds.has(jobMatchId)) {
+            newMatches.push({ job, match: matchResult, matchId: jobMatchId });
+          }
+        } catch (error) {
+          logger.error('Scheduler', `  Failed to process job: ${job.title}`, error);
+        }
+      }
+
+      logger.info('Scheduler', `  Found ${newMatches.length} new matches (score >= ${sub.minScore})`);
+      totalMatchesFound += newMatches.length;
+
+      if (newMatches.length > 0) {
+        // Sort by score descending, take top 10
+        newMatches.sort((a, b) => b.match.score - a.match.score);
+        const toNotify = newMatches.slice(0, 10);
+
+        // Send notification summary
+        try {
+          await sendMatchSummary(
+            sub.user.chatId,
+            toNotify.map(({ job, match }) => ({ job, match }))
+          );
+
+          // Record all as sent
+          for (const { matchId } of toNotify) {
+            await db.sentNotification.create({
+              data: {
+                subscriptionId: sub.id,
+                jobMatchId: matchId,
+              },
+            });
+          }
+
+          totalNotifications += toNotify.length;
+          logger.info('Scheduler', `  Sent ${toNotify.length} notifications to ${userLabel}`);
+        } catch (error) {
+          logger.error('Scheduler', `  Failed to send notifications to ${userLabel}`, error);
+        }
+      }
+
+      // Update last search timestamp
+      await db.searchSubscription.update({
+        where: { id: sub.id },
+        data: { lastSearchAt: new Date() },
+      });
+    } catch (error) {
+      logger.error(
+        'Scheduler',
+        `Failed to process subscription for user ${sub.user.telegramId}`,
+        error
+      );
+      // Continue with next user
+    }
+  }
+
+  return {
+    usersProcessed: subscriptions.length,
+    matchesFound: totalMatchesFound,
+    notificationsSent: totalNotifications,
+  };
+}

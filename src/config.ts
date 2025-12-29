@@ -23,6 +23,11 @@ const envSchema = z.object({
 
   // Logging
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+
+  // Telegram Bot (optional - bot only starts if token is set)
+  TELEGRAM_BOT_TOKEN: z.string().optional(),
+  TELEGRAM_WEBHOOK_URL: z.string().url().optional(),
+  TELEGRAM_WEBHOOK_SECRET: z.string().optional(),
 });
 
 function loadConfig() {

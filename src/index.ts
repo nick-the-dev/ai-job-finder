@@ -4,6 +4,8 @@ import { config } from './config.js';
 import { logger } from './utils/logger.js';
 import { router, errorHandler } from './api/routes.js';
 import { getDb, disconnectDb } from './db/client.js';
+import { initBot, stopBot } from './telegram/bot.js';
+import { initScheduler, stopScheduler } from './scheduler/cron.js';
 
 const app = express();
 
@@ -28,6 +30,8 @@ app.use(errorHandler);
 // Graceful shutdown
 async function shutdown(signal: string) {
   logger.info('Server', `${signal} received, shutting down...`);
+  stopScheduler();
+  await stopBot();
   await disconnectDb();
   process.exit(0);
 }
@@ -46,6 +50,17 @@ async function start() {
     await db.$queryRaw`SELECT 1`;
     logger.info('Server', 'Database connected');
 
+    // Initialize Telegram bot (if configured)
+    if (config.TELEGRAM_BOT_TOKEN) {
+      logger.info('Server', 'Initializing Telegram bot...');
+      await initBot(app);
+    } else {
+      logger.info('Server', 'Telegram bot disabled (no TELEGRAM_BOT_TOKEN)');
+    }
+
+    // Initialize scheduler for hourly job searches
+    initScheduler();
+
     // Start listening
     app.listen(config.PORT, () => {
       logger.info('Server', `Listening on port ${config.PORT}`);
@@ -55,6 +70,9 @@ async function start() {
       logger.info('Server', '  POST /search  - Search and match jobs');
       logger.info('Server', '  GET  /jobs    - List collected jobs');
       logger.info('Server', '  GET  /matches - List job matches');
+      if (config.TELEGRAM_BOT_TOKEN) {
+        logger.info('Server', '  POST /telegram/webhook - Telegram bot webhook');
+      }
     });
   } catch (error) {
     logger.error('Server', 'Failed to start', error);

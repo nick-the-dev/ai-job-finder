@@ -66,6 +66,9 @@ model JobMatch {
   // Timestamps
   createdAt   DateTime @default(now()) @map("created_at")
 
+  // Telegram notifications
+  sentNotifications SentNotification[]
+
   // Unique constraint: one match per job+resume combo
   @@unique([jobId, resumeHash])
   @@map("job_matches")
@@ -138,4 +141,66 @@ model QueryExpansion {
   createdAt       DateTime @default(now()) @map("created_at")
 
   @@map("query_expansions")
+}
+
+// Telegram bot user
+model TelegramUser {
+  id            String   @id @default(uuid())
+  telegramId    BigInt   @unique @map("telegram_id")
+  chatId        BigInt   @map("chat_id")
+  username      String?
+  firstName     String?  @map("first_name")
+
+  // One subscription per user
+  subscription  SearchSubscription?
+
+  // Conversation state for multi-step setup
+  conversationState  String?  @map("conversation_state")
+  conversationData   Json?    @map("conversation_data")
+
+  createdAt     DateTime @default(now()) @map("created_at")
+  lastActiveAt  DateTime @default(now()) @map("last_active_at")
+
+  @@map("telegram_users")
+}
+
+// User's job search subscription (one per user)
+model SearchSubscription {
+  id              String   @id @default(uuid())
+  userId          String   @unique @map("user_id")
+  user            TelegramUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Search parameters
+  jobTitles       String[] @map("job_titles")
+  location        String?
+  isRemote        Boolean  @default(true) @map("is_remote")
+  minScore        Int      @default(60) @map("min_score")
+  resumeText      String   @map("resume_text")
+  resumeHash      String   @map("resume_hash")
+
+  // Status
+  isActive        Boolean  @default(true) @map("is_active")
+  isPaused        Boolean  @default(false) @map("is_paused")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  lastSearchAt    DateTime? @map("last_search_at")
+
+  // Track sent notifications
+  sentNotifications SentNotification[]
+
+  @@map("search_subscriptions")
+}
+
+// Track which job matches have been sent to avoid duplicates
+model SentNotification {
+  id              String   @id @default(uuid())
+  subscriptionId  String   @map("subscription_id")
+  subscription    SearchSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  jobMatchId      String   @map("job_match_id")
+  jobMatch        JobMatch @relation(fields: [jobMatchId], references: [id], onDelete: Cascade)
+  sentAt          DateTime @default(now()) @map("sent_at")
+
+  @@unique([subscriptionId, jobMatchId])
+  @@map("sent_notifications")
 }
