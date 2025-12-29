@@ -61,7 +61,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
         query: title,
         location: sub.location ?? undefined,
         isRemote: sub.isRemote,
-        limit: 50,
+        limit: 3000,
         source: 'jobspy',
         skipCache: false,
         datePosted: datePosted === 'all' ? undefined : datePosted,
@@ -256,10 +256,10 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
             query: title,
             location: sub.location ?? undefined,
             isRemote: sub.isRemote,
-            limit: 50, // Limit per title for scheduler
-            source: 'jobspy', // Use free source
-            skipCache: false, // Use cache aggressively
-            datePosted: datePosted === 'all' ? undefined : datePosted, // Use user's date preference
+            limit: 3000,
+            source: 'jobspy',
+            skipCache: false,
+            datePosted: datePosted === 'all' ? undefined : datePosted,
           });
           return jobs;
         };
