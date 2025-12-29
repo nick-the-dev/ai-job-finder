@@ -328,8 +328,8 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     const csvAbsolutePath = join(process.cwd(), 'exports', csvFilename);
     logger.info('API', `CSV saved: ${csvAbsolutePath}`);
 
-    // Generate secure download token (24h expiry)
-    const downloadToken = generateDownloadToken(csvFilename);
+    // Generate secure download token (persisted in database)
+    const downloadToken = await generateDownloadToken(csvFilename);
     const protocol = req.protocol;
     const host = req.get('host');
     const downloadUrl = `${protocol}://${host}/download/${downloadToken}`;
@@ -401,10 +401,10 @@ router.get('/download/:token', async (req: Request, res: Response, next: NextFun
     const { token } = req.params;
 
     // Validate token and get filename
-    const filename = validateDownloadToken(token);
+    const filename = await validateDownloadToken(token);
     if (!filename) {
-      logger.warn('API', `Invalid or expired download token: ${token.substring(0, 8)}...`);
-      return res.status(404).json({ error: 'Invalid or expired download link' });
+      logger.warn('API', `Invalid download token: ${token.substring(0, 8)}...`);
+      return res.status(404).json({ error: 'Invalid download link' });
     }
 
     // Get file content

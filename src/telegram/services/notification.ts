@@ -143,7 +143,7 @@ export async function sendMatchSummary(
   if (sorted.length >= 10 && config.APP_URL) {
     try {
       const csvFilename = await saveMatchesToCSV(sorted);
-      const downloadToken = generateDownloadToken(csvFilename);
+      const downloadToken = await generateDownloadToken(csvFilename);
       const downloadUrl = `${config.APP_URL}/download/${downloadToken}`;
       message += `\n📥 <a href="${downloadUrl}">Download all ${sorted.length} matches as CSV</a>`;
       logger.info('Telegram', `Generated CSV download: ${csvFilename}`);

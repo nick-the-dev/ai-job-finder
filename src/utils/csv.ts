@@ -3,37 +3,31 @@ import { NormalizedJob, JobMatchResult, ExtractedSalary } from '../core/types.js
 import { writeFile, mkdir, readFile, unlink } from 'fs/promises';
 import { join } from 'path';
 import { existsSync } from 'fs';
+import { getDb } from '../db/client.js';
 
 const EXPORTS_DIR = join(process.cwd(), 'exports');
 
-// Token-based download system for security
-// Maps token -> { filename, createdAt }
-const downloadTokens = new Map<string, { filename: string; createdAt: Date }>();
-const TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
-
 /**
  * Generate a secure download token for a CSV file
+ * Stores token in database for persistence across restarts
  */
-export function generateDownloadToken(filename: string): string {
+export async function generateDownloadToken(filename: string): Promise<string> {
   const token = crypto.randomBytes(32).toString('hex');
-  downloadTokens.set(token, { filename, createdAt: new Date() });
+  await getDb().downloadToken.create({
+    data: { token, filename },
+  });
   return token;
 }
 
 /**
  * Validate and get filename for download token
- * Returns null if token is invalid or expired
+ * Returns null if token is invalid (tokens no longer expire)
  */
-export function validateDownloadToken(token: string): string | null {
-  const entry = downloadTokens.get(token);
+export async function validateDownloadToken(token: string): Promise<string | null> {
+  const entry = await getDb().downloadToken.findUnique({
+    where: { token },
+  });
   if (!entry) return null;
-
-  // Check expiry
-  if (Date.now() - entry.createdAt.getTime() > TOKEN_EXPIRY_MS) {
-    downloadTokens.delete(token);
-    return null;
-  }
-
   return entry.filename;
 }
 
@@ -55,17 +49,6 @@ export async function getExportFile(filename: string): Promise<Buffer | null> {
   return readFile(filepath);
 }
 
-/**
- * Clean up expired tokens and old files (call periodically)
- */
-export function cleanupExpiredTokens(): void {
-  const now = Date.now();
-  for (const [token, entry] of downloadTokens.entries()) {
-    if (now - entry.createdAt.getTime() > TOKEN_EXPIRY_MS) {
-      downloadTokens.delete(token);
-    }
-  }
-}
 
 interface MatchEntry {
   job: NormalizedJob;

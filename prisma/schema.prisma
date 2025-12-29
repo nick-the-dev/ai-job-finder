@@ -210,3 +210,13 @@ model SentNotification {
   @@unique([subscriptionId, jobMatchId])
   @@map("sent_notifications")
 }
+
+// Persistent download tokens for CSV exports (survives server restarts)
+model DownloadToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  filename  String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("download_tokens")
+}
