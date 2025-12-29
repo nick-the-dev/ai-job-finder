@@ -178,6 +178,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           engine: 'google_jobs',
           q: query,
           api_key: this.apiKey,
+          hl: 'en', // Force English results to avoid localized text (Arabic, etc.)
         };
 
         // Don't pass "Remote" as location - it's not a valid SerpAPI location
