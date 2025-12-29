@@ -62,6 +62,17 @@ curl -X POST http://localhost:3001/search \
     "limit": 50,
     "resumeText": "..."
   }'
+
+# Wider search (LLM expands job titles + suggests based on resume)
+curl -X POST http://localhost:3001/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jobTitles": ["Backend Engineer"],
+    "widerSearch": true,
+    "limit": 500,
+    "matchLimit": 20,
+    "resumeText": "Senior engineer with Python, Django, AWS..."
+  }'
 ```
 
 ## Architecture
@@ -77,7 +88,8 @@ src/
 │   ├── collector.ts      # SerpAPI job collection
 │   └── normalizer.ts     # Job deduplication & normalization
 ├── agents/
-│   └── matcher.ts        # LLM-based job matching (score 1-100)
+│   ├── matcher.ts        # LLM-based job matching (score 1-100)
+│   └── query-expander.ts # LLM-based query expansion for wider search
 ├── llm/
 │   └── client.ts         # OpenRouter client with structured outputs
 ├── api/
@@ -135,6 +147,24 @@ To optimize API costs, queries are cached for 6 hours by default:
 - Cached results are stored in PostgreSQL
 - Use `skipCache: true` to force fresh fetch
 - Use `cacheHours: N` to customize TTL
+
+## Wider Search (Query Expansion)
+
+Use `widerSearch: true` to automatically expand job titles using LLM:
+
+```
+Input:  ["Backend Engineer"]
+Output:
+  fromExpansion: ["Backend Engineer", "Backend Developer", "Server-Side Engineer", "Software Engineer", "API Engineer"]
+  fromResume:    ["Senior Backend Engineer", "Lead Backend Engineer", "Python Backend Engineer", ...]
+  total: ~15 unique titles searched
+```
+
+**How it works:**
+- **fromExpansion**: Role synonyms only (no tech-specific titles unless in original query)
+- **fromResume**: LLM analyzes resume and suggests titles based on skills/experience level
+- Results are cached to avoid repeated LLM calls
+- Response includes `expansion` object showing all searched titles
 
 ## Tech Stack
 - TypeScript, Node.js, Express

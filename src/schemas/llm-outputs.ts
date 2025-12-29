@@ -67,3 +67,40 @@ export const JobMatchJsonSchema = {
   },
   required: ['score', 'reasoning', 'matchedSkills', 'missingSkills', 'pros', 'cons'],
 } as const;
+
+/**
+ * Schema for query expansion - structured LLM output
+ */
+export const QueryExpansionSchema = z.object({
+  expandedQueries: z.array(z.string())
+    .max(25)
+    .describe('Expanded job title variants from original queries'),
+
+  resumeSuggestedTitles: z.array(z.string())
+    .max(10)
+    .describe('Additional job titles suggested based on resume skills'),
+});
+
+export type QueryExpansionOutput = z.infer<typeof QueryExpansionSchema>;
+
+/**
+ * JSON Schema for query expansion LLM structured output
+ */
+export const QueryExpansionJsonSchema = {
+  type: 'object',
+  properties: {
+    expandedQueries: {
+      type: 'array',
+      items: { type: 'string' },
+      maxItems: 25,
+      description: 'Expanded job title variants from original queries',
+    },
+    resumeSuggestedTitles: {
+      type: 'array',
+      items: { type: 'string' },
+      maxItems: 10,
+      description: 'Additional job titles suggested based on resume skills',
+    },
+  },
+  required: ['expandedQueries', 'resumeSuggestedTitles'],
+} as const;

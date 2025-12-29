@@ -114,3 +114,23 @@ model QueryCache {
 
   @@map("query_cache")
 }
+
+// Cache for query expansions to avoid repeated LLM calls
+model QueryExpansion {
+  id              String   @id @default(uuid())
+
+  // Cache key (hash of job titles + resume snippet)
+  cacheKey        String   @unique @map("cache_key")
+
+  // Original input
+  originalQueries String[] @map("original_queries")
+
+  // LLM-generated expansions
+  expandedQueries String[] @map("expanded_queries")
+  resumeSuggested String[] @map("resume_suggested")
+
+  // Timestamps
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@map("query_expansions")
+}

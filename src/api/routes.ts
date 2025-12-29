@@ -4,6 +4,7 @@ import { getDb } from '../db/client.js';
 import { CollectorService } from '../services/collector.js';
 import { NormalizerService } from '../services/normalizer.js';
 import { MatcherAgent } from '../agents/matcher.js';
+import { QueryExpanderAgent } from '../agents/query-expander.js';
 import type { NormalizedJob, JobMatchResult, SearchResult } from '../core/types.js';
 
 export const router = Router();
@@ -12,6 +13,7 @@ export const router = Router();
 const collector = new CollectorService();
 const normalizer = new NormalizerService();
 const matcher = new MatcherAgent();
+const queryExpander = new QueryExpanderAgent();
 
 /**
  * Health check
@@ -28,7 +30,7 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
   const startTime = Date.now();
 
   try {
-    const { jobTitles, resumeText, limit = 1000, matchLimit, source = 'serpapi', skipCache = false, datePosted = 'month' } = req.body;
+    const { jobTitles, resumeText, limit = 1000, matchLimit, source = 'serpapi', skipCache = false, datePosted = 'month', widerSearch = false } = req.body;
 
     // Handle location and isRemote:
     // - location: "Remote" alone → remote jobs, no geo filter
@@ -41,7 +43,7 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     const effectiveMatchLimit = matchLimit ?? limit;
 
     logger.info('API', '=== Starting job search ===');
-    logger.info('API', 'Request', { jobTitles, location, isRemote, limit, datePosted });
+    logger.info('API', 'Request', { jobTitles, location, isRemote, limit, datePosted, widerSearch });
 
     if (!jobTitles || !Array.isArray(jobTitles) || jobTitles.length === 0) {
       return res.status(400).json({ error: 'jobTitles array is required' });
@@ -51,11 +53,29 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
       return res.status(400).json({ error: 'resumeText is required for matching' });
     }
 
+    // Step 0: Expand job titles if widerSearch is enabled
+    let effectiveJobTitles = jobTitles;
+    let expansionDetails: { original: string[]; fromExpansion: string[]; fromResume: string[]; total: number } | undefined;
+
+    if (widerSearch) {
+      logger.info('API', 'Step 0: Expanding job titles for wider search...');
+      const expansion = await queryExpander.execute({ jobTitles, resumeText });
+
+      effectiveJobTitles = expansion.allTitles;
+      expansionDetails = {
+        original: jobTitles,
+        fromExpansion: expansion.fromExpansion,
+        fromResume: expansion.fromResume,
+        total: effectiveJobTitles.length,
+      };
+      logger.info('API', `Expanded ${jobTitles.length} titles to ${effectiveJobTitles.length} titles`);
+    }
+
     // Step 1: Collect jobs from all titles
     logger.info('API', 'Step 1: Collecting jobs...');
     const allRawJobs = [];
 
-    for (const title of jobTitles) {
+    for (const title of effectiveJobTitles) {
       // Don't add "Remote" to query - SerpAPI handles it via ltype parameter
       const shouldAddLocation = location && location.toLowerCase() !== 'remote';
       const query = shouldAddLocation ? `${title} ${location}` : title;
@@ -160,11 +180,12 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     const duration = Date.now() - startTime;
     logger.info('API', `=== Search complete in ${duration}ms ===`);
 
-    const result: SearchResult = {
+    const result: SearchResult & { expansion?: typeof expansionDetails } = {
       jobsCollected: allRawJobs.length,
       jobsAfterDedup: normalizedJobs.length,
       jobsMatched: matches.length,
       matches,
+      expansion: expansionDetails,
     };
 
     res.json(result);
