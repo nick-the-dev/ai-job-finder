@@ -290,6 +290,15 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
     logger.info('Collector', `[JobSpy] Searching: "${query}" (target: ${limit} jobs)`);
 
+    // Convert datePosted to hours_old for JobSpy
+    const hoursOldMap: Record<string, number> = {
+      'today': 24,
+      '3days': 72,
+      'week': 168,
+      'month': 720,
+    };
+    const hoursOld = input.datePosted ? hoursOldMap[input.datePosted] : 72;
+
     try {
       const response = await axios.post(`${jobspyUrl}/scrape`, {
         search_term: query,
@@ -297,6 +306,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
         site_name: ['indeed', 'linkedin'],  // glassdoor disabled - location parsing broken
         is_remote: isRemote,
         results_wanted: limit,
+        hours_old: hoursOld,
       }, { timeout: 120000 }); // 2 min timeout for scraping
 
       const jobs = response.data.jobs || [];

@@ -44,7 +44,16 @@ function log(level: LogLevel, context: string, message: string, data?: unknown):
   const ctx = `[${context}]`;
 
   if (data !== undefined) {
-    console.log(`${prefix} ${ctx} ${message}`, typeof data === 'object' ? JSON.stringify(data, null, 2) : data);
+    // Handle Error objects specially (they don't serialize with JSON.stringify)
+    let formattedData: string;
+    if (data instanceof Error) {
+      formattedData = `${data.name}: ${data.message}${data.stack ? `\n${data.stack}` : ''}`;
+    } else if (typeof data === 'object') {
+      formattedData = JSON.stringify(data, null, 2);
+    } else {
+      formattedData = String(data);
+    }
+    console.log(`${prefix} ${ctx} ${message}`, formattedData);
   } else {
     console.log(`${prefix} ${ctx} ${message}`);
   }
