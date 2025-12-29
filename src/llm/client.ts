@@ -107,9 +107,21 @@ Respond ONLY with a valid JSON object. No other text.`,
         }
       );
 
-      const content = response.data.choices[0]?.message?.content;
+      const content = response.data.choices?.[0]?.message?.content;
       if (!content) {
-        throw new Error('Empty response from LLM');
+        // Empty/malformed response - could be transient, so retry
+        if (attempt < maxRetries) {
+          const delay = getBackoffDelay(attempt);
+          logger.warn('LLM', `Empty/malformed response, waiting ${Math.round(delay / 1000)}s before retry...`, {
+            hasChoices: !!response.data.choices,
+            choicesLength: response.data.choices?.length,
+            responseKeys: Object.keys(response.data || {}),
+          });
+          await sleep(delay);
+          lastError = new Error('Empty response from LLM');
+          continue;
+        }
+        throw new Error('Empty response from LLM after all retries');
       }
 
       // Parse JSON (strip comments first - LLMs sometimes add them)
