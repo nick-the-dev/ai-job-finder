@@ -29,6 +29,21 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Strip JavaScript-style comments from JSON string
+ * LLMs sometimes add comments even when told not to
+ */
+function stripJsonComments(json: string): string {
+  // Remove single-line comments (// ...) but not inside strings
+  // This is a simplified approach that handles most cases
+  return json.replace(/("(?:[^"\\]|\\.)*")|\/\/[^\n]*/g, (match, stringLiteral) => {
+    // If it's a string literal, keep it as-is
+    if (stringLiteral) return stringLiteral;
+    // Otherwise it's a comment, remove it
+    return '';
+  });
+}
+
+/**
  * Calculate exponential backoff delay with jitter
  */
 function getBackoffDelay(attempt: number, retryAfter?: number): number {
@@ -97,10 +112,11 @@ Respond ONLY with a valid JSON object. No other text.`,
         throw new Error('Empty response from LLM');
       }
 
-      // Parse JSON
+      // Parse JSON (strip comments first - LLMs sometimes add them)
       let parsed: unknown;
       try {
-        parsed = JSON.parse(content);
+        const cleanedContent = stripJsonComments(content);
+        parsed = JSON.parse(cleanedContent);
       } catch (e) {
         logger.error('LLM', 'Failed to parse JSON response', content);
         throw new Error('Invalid JSON from LLM');

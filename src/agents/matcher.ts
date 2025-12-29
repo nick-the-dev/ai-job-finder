@@ -19,7 +19,9 @@ export class MatcherAgent implements IAgent<MatcherInput, JobMatchResult> {
 
     const systemPrompt = `You are a job matching expert. Analyze how well a candidate's resume matches a job posting.
 
-You MUST respond with a JSON object containing these exact fields:
+You MUST respond with a valid JSON object only. Do NOT include comments (// or /* */) in your JSON response.
+
+JSON object must contain these exact fields:
 - score: number from 1-100 (match score)
 - reasoning: string (explanation for the score)
 - matchedSkills: array of strings (skills from resume that match job)
