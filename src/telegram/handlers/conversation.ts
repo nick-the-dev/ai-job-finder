@@ -12,9 +12,27 @@ interface ConversationData {
   resumeText?: string;
   resumeName?: string;
   minScore?: number;
+  datePosted?: string;
   excludedTitles?: string[];
   excludedCompanies?: string[];
 }
+
+// Date range options for JobSpy
+const DATE_RANGE_OPTIONS: Record<string, string> = {
+  '1': 'today',
+  '2': '3days',
+  '3': 'week',
+  '4': 'month',
+  '5': 'all',
+};
+
+const DATE_RANGE_LABELS: Record<string, string> = {
+  today: 'Last 24 hours',
+  '3days': 'Last 3 days',
+  week: 'Last week',
+  month: 'Last month',
+  all: 'All time',
+};
 
 function getResumeHash(text: string): string {
   return crypto.createHash('sha256').update(text).digest('hex').substring(0, 16);
@@ -57,7 +75,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Got it!</b> Searching for: ${titles.join(', ')}\n\n` +
-            '<b>Step 2/6: Location</b>\n\n' +
+            '<b>Step 2/7: Location</b>\n\n' +
             'Where should I search for jobs?\n\n' +
             'Options:\n' +
             '- Send <b>"Remote"</b> for remote-only jobs\n' +
@@ -100,7 +118,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Location:</b> ${locationText}\n\n` +
-            '<b>Step 3/6: Resume</b>\n\n' +
+            '<b>Step 3/7: Resume</b>\n\n' +
             'Now I need your resume to match you with jobs.\n\n' +
             'You can:\n' +
             '- <b>Upload</b> a PDF or DOCX file\n' +
@@ -129,7 +147,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Resume received!</b> (${text.length} characters)\n\n` +
-            '<b>Step 4/6: Minimum Match Score</b>\n\n' +
+            '<b>Step 4/7: Minimum Match Score</b>\n\n' +
             "I'll only notify you about jobs with a score >= this value.\n\n" +
             '<b>Score ranges:</b>\n' +
             '- 90-100: Perfect match\n' +
@@ -157,18 +175,57 @@ export function setupConversation(bot: Bot<BotContext>): void {
           minScore = parsed;
         }
 
-        // Move to excluded titles step
+        // Move to date range step
         await db.telegramUser.update({
           where: { id: ctx.telegramUser.id },
           data: {
-            conversationState: 'awaiting_excluded_titles',
+            conversationState: 'awaiting_date_range',
             conversationData: { ...data, minScore },
           },
         });
 
         await ctx.reply(
           `<b>Min Score:</b> ${minScore}\n\n` +
-            '<b>Step 5/6: Excluded Job Titles (Optional)</b>\n\n' +
+            '<b>Step 5/7: Job Posting Date Range</b>\n\n' +
+            'How far back should I search for jobs?\n\n' +
+            '1️⃣ Last 24 hours\n' +
+            '2️⃣ Last 3 days\n' +
+            '3️⃣ Last week\n' +
+            '4️⃣ Last month (Recommended)\n' +
+            '5️⃣ All time\n\n' +
+            'Send a number (1-5) or <b>"Skip"</b> for default (Last month)',
+          { parse_mode: 'HTML' }
+        );
+        break;
+      }
+
+      case 'awaiting_date_range': {
+        let datePosted = 'month'; // default
+
+        const lowerText = text.toLowerCase();
+        if (lowerText !== 'skip') {
+          const choice = DATE_RANGE_OPTIONS[text];
+          if (!choice) {
+            await ctx.reply(
+              'Please enter a number 1-5, or "Skip" for default (Last month).'
+            );
+            return;
+          }
+          datePosted = choice;
+        }
+
+        // Move to excluded titles step
+        await db.telegramUser.update({
+          where: { id: ctx.telegramUser.id },
+          data: {
+            conversationState: 'awaiting_excluded_titles',
+            conversationData: { ...data, datePosted },
+          },
+        });
+
+        await ctx.reply(
+          `<b>Date Range:</b> ${DATE_RANGE_LABELS[datePosted]}\n\n` +
+            '<b>Step 6/7: Excluded Job Titles (Optional)</b>\n\n' +
             'Any job title keywords to exclude?\n\n' +
             'Examples: <b>"Manager, Director, Lead"</b>\n' +
             '(Jobs with these words in the title will be skipped)\n\n' +
@@ -203,7 +260,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Excluded Titles:</b> ${excludedText}\n\n` +
-            '<b>Step 6/6: Excluded Companies (Optional)</b>\n\n' +
+            '<b>Step 7/7: Excluded Companies (Optional)</b>\n\n' +
             'Any companies to exclude?\n\n' +
             'Examples: <b>"Amazon, Meta, Google"</b>\n' +
             '(Jobs from these companies will be skipped)\n\n' +
@@ -283,6 +340,7 @@ async function createSubscription(
         location: data.location,
         isRemote: data.isRemote ?? true,
         minScore: data.minScore ?? 60,
+        datePosted: data.datePosted ?? 'month',
         resumeText: data.resumeText,
         resumeHash,
         resumeName: data.resumeName,
@@ -309,6 +367,7 @@ async function createSubscription(
         ? data.location
         : 'Any location';
 
+    const dateRangeText = DATE_RANGE_LABELS[data.datePosted ?? 'month'] || 'Last month';
     const excludedTitlesText = data.excludedTitles?.length
       ? data.excludedTitles.join(', ')
       : 'None';
@@ -328,6 +387,7 @@ async function createSubscription(
         `<b>Job Titles:</b> ${data.jobTitles.join(', ')}\n` +
         `<b>Location:</b> ${locationText}\n` +
         `<b>Min Score:</b> ${data.minScore ?? 60}\n` +
+        `<b>Date Range:</b> ${dateRangeText}\n` +
         `<b>Resume:</b> ${data.resumeName || 'Uploaded'}\n` +
         `<b>Excluded Titles:</b> ${excludedTitlesText}\n` +
         `<b>Excluded Companies:</b> ${excludedCompaniesText}\n\n` +

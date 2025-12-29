@@ -223,6 +223,16 @@ Ready to get started?
       ? sub.lastSearchAt.toLocaleDateString()
       : 'Never';
 
+    // Date range labels
+    const dateRangeLabels: Record<string, string> = {
+      today: 'Last 24 hours',
+      '3days': 'Last 3 days',
+      week: 'Last week',
+      month: 'Last month',
+      all: 'All time',
+    };
+    const dateRange = dateRangeLabels[sub.datePosted] || 'Last month';
+
     const excludedTitles = sub.excludedTitles?.length
       ? sub.excludedTitles.join(', ')
       : 'None';
@@ -243,6 +253,7 @@ Ready to get started?
 <b>Job Titles:</b> ${sub.jobTitles.join(', ')}
 <b>Location:</b> ${location}
 <b>Min Score:</b> ${sub.minScore}
+<b>Date Range:</b> ${dateRange}
 
 <b>📄 Resume:</b> ${resumeName}
 <b>📅 Uploaded:</b> ${resumeDate}
@@ -463,13 +474,14 @@ Ready to get started?
     );
   });
 
-  // Scan subscription now (manual trigger)
+  // Scan subscription now (manual trigger) - runs asynchronously to avoid webhook timeout
   bot.callbackQuery(/^sub:scan:(.+)$/, async (ctx) => {
     const subId = ctx.match[1];
     const db = getDb();
 
     const sub = await db.searchSubscription.findUnique({
       where: { id: subId },
+      include: { user: true },
     });
 
     if (!sub || !sub.isActive) {
@@ -482,54 +494,59 @@ Ready to get started?
       return;
     }
 
-    await ctx.answerCallbackQuery({ text: '🔍 Starting scan...' });
+    const chatId = sub.user.chatId;
 
-    // Update message to show scanning status
+    // Answer callback immediately and update message
+    await ctx.answerCallbackQuery({ text: '🔍 Starting scan...' });
     await ctx.editMessageText(
       '🔍 <b>Scanning for jobs...</b>\n\n' +
         'This may take a minute. I\'ll send you the results when done.',
       { parse_mode: 'HTML' }
     );
 
-    try {
-      const result = await runSingleSubscriptionSearch(subId);
+    // Run scan asynchronously (fire-and-forget) to avoid webhook timeout
+    runSingleSubscriptionSearch(subId)
+      .then(async (result) => {
+        const keyboard = new InlineKeyboard()
+          .text('📋 My Subscriptions', 'sub:list')
+          .text('🔍 Scan Again', `sub:scan:${subId}`);
 
-      const keyboard = new InlineKeyboard()
-        .text('📋 My Subscriptions', 'sub:list')
-        .text('🔍 Scan Again', `sub:scan:${subId}`);
-
-      if (result.notificationsSent > 0) {
-        await ctx.editMessageText(
-          `✅ <b>Scan Complete!</b>\n\n` +
-            `Found <b>${result.matchesFound}</b> new matches.\n` +
-            `Sent <b>${result.notificationsSent}</b> notifications.\n\n` +
-            'Check above for your job matches!',
-          { parse_mode: 'HTML', reply_markup: keyboard }
-        );
-      } else {
-        await ctx.editMessageText(
-          `✅ <b>Scan Complete!</b>\n\n` +
-            `No new matches found at this time.\n\n` +
-            'I\'ll keep searching hourly and notify you when I find something.',
-          { parse_mode: 'HTML', reply_markup: keyboard }
-        );
-      }
-
-      logger.info('Telegram', `Manual scan completed for subscription ${subId}: ${result.matchesFound} matches`);
-    } catch (error) {
-      logger.error('Telegram', `Manual scan failed for subscription ${subId}`, error);
-
-      await ctx.editMessageText(
-        '❌ <b>Scan Failed</b>\n\n' +
-          'Something went wrong. Please try again later.',
-        {
-          parse_mode: 'HTML',
-          reply_markup: new InlineKeyboard()
-            .text('🔄 Retry', `sub:scan:${subId}`)
-            .text('« Back', 'sub:list'),
+        if (result.notificationsSent > 0) {
+          await ctx.api.sendMessage(
+            chatId,
+            `✅ <b>Scan Complete!</b>\n\n` +
+              `Found <b>${result.matchesFound}</b> new matches.\n` +
+              `Sent <b>${result.notificationsSent}</b> notifications.\n\n` +
+              'Check above for your job matches!',
+            { parse_mode: 'HTML', reply_markup: keyboard }
+          );
+        } else {
+          await ctx.api.sendMessage(
+            chatId,
+            `✅ <b>Scan Complete!</b>\n\n` +
+              `No new matches found at this time.\n\n` +
+              'I\'ll keep searching hourly and notify you when I find something.',
+            { parse_mode: 'HTML', reply_markup: keyboard }
+          );
         }
-      );
-    }
+
+        logger.info('Telegram', `Manual scan completed for subscription ${subId}: ${result.matchesFound} matches`);
+      })
+      .catch(async (error) => {
+        logger.error('Telegram', `Manual scan failed for subscription ${subId}`, error);
+
+        await ctx.api.sendMessage(
+          chatId,
+          '❌ <b>Scan Failed</b>\n\n' +
+            'Something went wrong. Please try again later.',
+          {
+            parse_mode: 'HTML',
+            reply_markup: new InlineKeyboard()
+              .text('🔄 Retry', `sub:scan:${subId}`)
+              .text('« Back', 'sub:list'),
+          }
+        );
+      });
   });
 
   // History command via callback

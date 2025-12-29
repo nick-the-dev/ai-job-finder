@@ -173,6 +173,7 @@ model SearchSubscription {
   location        String?
   isRemote        Boolean  @default(true) @map("is_remote")
   minScore        Int      @default(60) @map("min_score")
+  datePosted      String   @default("month") @map("date_posted") // today, 3days, week, month, all
   resumeText      String   @map("resume_text")
   resumeHash      String   @map("resume_hash")
   resumeName      String?  @map("resume_name")
