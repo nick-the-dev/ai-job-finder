@@ -112,8 +112,7 @@ function extractSalaryFromDescription(description: string): { min?: number; max?
 
 /**
  * Format salary as a single string
- * Priority: 1) Job source data (from scraper), 2) AI-extracted from description
- * No regex fallback - AI extraction is more reliable and context-aware
+ * Priority: 1) Job source data (from scraper), 2) AI-extracted from description, 3) Regex fallback
  */
 function formatSalary(job: NormalizedJob, aiExtracted?: ExtractedSalary | null): string {
   let min: number | null | undefined = job.salaryMin;
@@ -127,6 +126,17 @@ function formatSalary(job: NormalizedJob, aiExtracted?: ExtractedSalary | null):
     max = aiExtracted.max;
     currency = aiExtracted.currency || currency;
     isHourly = aiExtracted.isHourly || false;
+  }
+
+  // Regex fallback if AI didn't extract salary
+  if (!min && !max && job.description) {
+    const regexExtracted = extractSalaryFromDescription(job.description);
+    if (regexExtracted) {
+      min = regexExtracted.min;
+      max = regexExtracted.max;
+      currency = regexExtracted.currency || currency;
+      isHourly = regexExtracted.isHourly || false;
+    }
   }
 
   if (!min && !max) return '';
