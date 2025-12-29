@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import { logger } from '../utils/logger.js';
 import { getDb } from '../db/client.js';
 import { CollectorService } from '../services/collector.js';
@@ -7,6 +8,13 @@ import { MatcherAgent } from '../agents/matcher.js';
 import { QueryExpanderAgent } from '../agents/query-expander.js';
 import { saveMatchesToCSV } from '../utils/csv.js';
 import type { RawJob, NormalizedJob, JobMatchResult, SearchResult } from '../core/types.js';
+
+/**
+ * Generate a hash of resume text for caching matches
+ */
+function getResumeHash(resumeText: string): string {
+  return crypto.createHash('sha256').update(resumeText).digest('hex').substring(0, 16);
+}
 
 export const router = Router();
 
@@ -113,12 +121,18 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     const duplicates = allRawJobs.length - normalizedJobs.length;
     logger.info('API', `      ↳ ${normalizedJobs.length} unique (${sourcesAfter}) | ${duplicates} duplicates removed`);
 
-    // Step 3: Match jobs against resume (parallel batches of 20)
+    // Step 3: Match jobs against resume (with caching to skip re-analysis)
     const jobsToMatch = normalizedJobs.slice(0, effectiveMatchLimit);
     const BATCH_SIZE = 20;
     const totalBatches = Math.ceil(jobsToMatch.length / BATCH_SIZE);
-    logger.info('API', `[3/4] Matching ${jobsToMatch.length} jobs against resume (${totalBatches} batches)...`);
-    const matches: Array<{ job: NormalizedJob; match: JobMatchResult }> = [];
+    const resumeHash = getResumeHash(resumeText);
+    const db = getDb();
+
+    logger.info('API', `[3/4] Matching ${jobsToMatch.length} jobs against resume (${totalBatches} batches, resumeHash: ${resumeHash})...`);
+    const matches: Array<{ job: NormalizedJob; match: JobMatchResult; cached: boolean }> = [];
+
+    let totalCached = 0;
+    let totalFresh = 0;
 
     for (let i = 0; i < jobsToMatch.length; i += BATCH_SIZE) {
       const batch = jobsToMatch.slice(i, i + BATCH_SIZE);
@@ -127,34 +141,76 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
 
       const batchResults = await Promise.allSettled(
         batch.map(async (job) => {
+          // Check for cached match first
+          const existingJob = await db.job.findUnique({
+            where: { contentHash: job.contentHash },
+            include: {
+              matches: {
+                where: { resumeHash },
+                take: 1,
+              },
+            },
+          });
+
+          if (existingJob?.matches?.[0]) {
+            // Use cached match - no LLM call needed!
+            const cached = existingJob.matches[0];
+            return {
+              job,
+              match: {
+                score: cached.score,
+                reasoning: cached.reasoning,
+                matchedSkills: cached.matchedSkills,
+                missingSkills: cached.missingSkills,
+                pros: cached.pros,
+                cons: cached.cons,
+              } as JobMatchResult,
+              cached: true,
+              warnings: [],
+            };
+          }
+
+          // No cache - call LLM
           const matchResult = await matcher.execute({ job, resumeText });
           const verified = await matcher.verify(matchResult, job);
-          return { job, match: matchResult, warnings: verified.warnings };
+          return { job, match: matchResult, cached: false, warnings: verified.warnings };
         })
       );
 
       let batchSuccess = 0;
+      let batchCached = 0;
       let batchWarnings = 0;
       for (const result of batchResults) {
         if (result.status === 'fulfilled') {
-          matches.push({ job: result.value.job, match: result.value.match });
+          matches.push({ job: result.value.job, match: result.value.match, cached: result.value.cached });
           batchSuccess++;
+          if (result.value.cached) {
+            batchCached++;
+            totalCached++;
+          } else {
+            totalFresh++;
+          }
           if (result.value.warnings.length > 0) batchWarnings++;
         }
       }
-      logger.info('API', `      ↳ Batch ${batchNum}/${totalBatches} (${pct}%) → ${batchSuccess} matched${batchWarnings > 0 ? `, ${batchWarnings} warnings` : ''}`);
+      const cacheInfo = batchCached > 0 ? ` (${batchCached} cached)` : '';
+      logger.info('API', `      ↳ Batch ${batchNum}/${totalBatches} (${pct}%) → ${batchSuccess} matched${cacheInfo}${batchWarnings > 0 ? `, ${batchWarnings} warnings` : ''}`);
+    }
+
+    if (totalCached > 0) {
+      logger.info('API', `      ✓ Cache hit: ${totalCached} jobs skipped LLM | ${totalFresh} fresh analyses`);
     }
 
     // Step 4: Sort by score descending
     matches.sort((a, b) => b.match.score - a.match.score);
 
-    // Step 5: Save to database
-    logger.info('API', `[4/4] Saving ${matches.length} matches to database...`);
-    const db = getDb();
+    // Step 5: Save fresh matches to database (cached ones are already saved)
+    const freshMatches = matches.filter(m => !m.cached);
+    logger.info('API', `[4/4] Saving ${freshMatches.length} new matches to database (${totalCached} already cached)...`);
     let savedCount = 0;
     let errorCount = 0;
 
-    for (const { job, match } of matches) {
+    for (const { job, match } of freshMatches) {
       try {
         // Upsert job
         const savedJob = await db.job.upsert({
@@ -179,10 +235,25 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
           },
         });
 
-        // Create match record
-        await db.jobMatch.create({
-          data: {
+        // Upsert match record with resumeHash (prevents duplicates)
+        await db.jobMatch.upsert({
+          where: {
+            jobId_resumeHash: {
+              jobId: savedJob.id,
+              resumeHash,
+            },
+          },
+          create: {
             jobId: savedJob.id,
+            resumeHash,
+            score: match.score,
+            reasoning: match.reasoning,
+            matchedSkills: match.matchedSkills,
+            missingSkills: match.missingSkills,
+            pros: match.pros,
+            cons: match.cons,
+          },
+          update: {
             score: match.score,
             reasoning: match.reasoning,
             matchedSkills: match.matchedSkills,
@@ -202,8 +273,9 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     const topScore = matches.length > 0 ? matches[0].match.score : 0;
     logger.info('API', `=== Done in ${duration}s | ${matches.length} matches | Top score: ${topScore} ===`);
 
-    // Save results to CSV
-    const csvFilename = await saveMatchesToCSV(matches);
+    // Save results to CSV (strip cached field for CSV export)
+    const matchesForCSV = matches.map(({ job, match }) => ({ job, match }));
+    const csvFilename = await saveMatchesToCSV(matchesForCSV);
     logger.info('API', `CSV saved: ${csvFilename}`);
 
     const protocol = req.protocol;
@@ -214,6 +286,8 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
       jobsCollected: allRawJobs.length,
       jobsAfterDedup: normalizedJobs.length,
       jobsMatched: matches.length,
+      matchesCached: totalCached,
+      matchesFresh: totalFresh,
       topScore,
       duration: `${duration}s`,
       downloadUrl,

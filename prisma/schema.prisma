@@ -48,6 +48,9 @@ model JobMatch {
   jobId       String   @map("job_id")
   job         Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
+  // Resume fingerprint for caching (hash of resume text)
+  resumeHash  String   @map("resume_hash")
+
   // Match analysis
   score       Int      // 1-100
   reasoning   String   // Why this score
@@ -63,6 +66,8 @@ model JobMatch {
   // Timestamps
   createdAt   DateTime @default(now()) @map("created_at")
 
+  // Unique constraint: one match per job+resume combo
+  @@unique([jobId, resumeHash])
   @@map("job_matches")
 }
 
