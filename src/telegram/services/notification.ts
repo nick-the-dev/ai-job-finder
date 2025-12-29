@@ -1,6 +1,8 @@
 import { getBot } from '../bot.js';
 import type { NormalizedJob, JobMatchResult } from '../../core/types.js';
 import { logger } from '../../utils/logger.js';
+import { saveMatchesToCSV, generateDownloadToken } from '../../utils/csv.js';
+import { config } from '../../config.js';
 
 const MAX_MESSAGE_LENGTH = 3500; // Telegram limit is 4096, leave buffer
 
@@ -134,7 +136,21 @@ export async function sendMatchSummary(
   }
 
   if (sorted.length > 10) {
-    message += `<i>...and ${sorted.length - 10} more matches</i>`;
+    message += `<i>...and ${sorted.length - 10} more matches</i>\n`;
+  }
+
+  // Generate CSV download link if 10+ matches and APP_URL is configured
+  if (sorted.length >= 10 && config.APP_URL) {
+    try {
+      const csvFilename = await saveMatchesToCSV(sorted);
+      const downloadToken = generateDownloadToken(csvFilename);
+      const downloadUrl = `${config.APP_URL}/download/${downloadToken}`;
+      message += `\n📥 <a href="${downloadUrl}">Download all ${sorted.length} matches as CSV</a>`;
+      logger.info('Telegram', `Generated CSV download: ${csvFilename}`);
+    } catch (error) {
+      logger.error('Telegram', 'Failed to generate CSV', error);
+      // Continue without CSV link
+    }
   }
 
   // Truncate if too long

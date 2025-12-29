@@ -20,6 +20,7 @@ const envSchema = z.object({
 
   // Server
   PORT: z.string().default('3000').transform(Number),
+  APP_URL: z.string().url().optional(), // Base URL for download links (e.g., https://app.example.com)
 
   // Logging
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
