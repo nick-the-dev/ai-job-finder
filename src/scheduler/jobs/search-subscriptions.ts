@@ -104,6 +104,30 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     });
   }
 
+  // Apply location filter if user specified a location
+  if (sub.location) {
+    const beforeLocationFilter = normalizedJobs.length;
+    // Extract key parts from user's location (e.g., "Toronto, Ontario, Canada" -> ["toronto", "ontario", "canada"])
+    const locationParts = sub.location.toLowerCase().split(/[,\s]+/).filter(p => p.length > 2);
+
+    normalizedJobs = normalizedJobs.filter((job) => {
+      // Always include remote jobs - they can work from user's location
+      if (job.isRemote) return true;
+
+      // Check if job location contains any part of user's location
+      const jobLocationLower = (job.location || '').toLowerCase();
+      for (const part of locationParts) {
+        if (jobLocationLower.includes(part)) return true;
+      }
+      return false;
+    });
+
+    const filtered = beforeLocationFilter - normalizedJobs.length;
+    if (filtered > 0) {
+      logger.info('Scheduler', `[Manual] Filtered ${filtered} jobs outside "${sub.location}"`);
+    }
+  }
+
   // Get already-sent job match IDs
   const sentJobMatchIds = new Set(sub.sentNotifications.map((n) => n.jobMatchId));
 
@@ -319,6 +343,30 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         const filtered = beforeFilter - normalizedJobs.length;
         if (filtered > 0) {
           logger.debug('Scheduler', `  Filtered ${filtered} jobs by exclusions`);
+        }
+      }
+
+      // Step 2.6: Apply location filter if user specified a location
+      if (sub.location) {
+        const beforeLocationFilter = normalizedJobs.length;
+        // Extract key parts from user's location (e.g., "Toronto, Ontario, Canada" -> ["toronto", "ontario", "canada"])
+        const locationParts = sub.location.toLowerCase().split(/[,\s]+/).filter(p => p.length > 2);
+
+        normalizedJobs = normalizedJobs.filter((job) => {
+          // Always include remote jobs - they can work from user's location
+          if (job.isRemote) return true;
+
+          // Check if job location contains any part of user's location
+          const jobLocationLower = (job.location || '').toLowerCase();
+          for (const part of locationParts) {
+            if (jobLocationLower.includes(part)) return true;
+          }
+          return false;
+        });
+
+        const filtered = beforeLocationFilter - normalizedJobs.length;
+        if (filtered > 0) {
+          logger.info('Scheduler', `  Filtered ${filtered} jobs outside "${sub.location}"`);
         }
       }
 

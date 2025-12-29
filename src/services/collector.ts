@@ -134,17 +134,25 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     if (!skipCache) {
       const isCached = await this.checkCache(queryHash);
       if (isCached) {
-        // Return jobs from database instead of API
-        // Don't filter by location string - the query hash already includes location
         const db = getDb();
+
+        // Build location filter for cached results
+        const locationLower = location?.toLowerCase();
+        const locationFilter = (location && locationLower !== 'remote') ? {
+          location: { contains: location.split(',')[0].trim(), mode: 'insensitive' as const }
+        } : {};
+
         const cachedJobs = await db.job.findMany({
           where: {
             source: 'serpapi',
             ...(isRemote && { isRemote: true }),
+            ...locationFilter,
           },
           orderBy: { lastSeenAt: 'desc' },
           take: limit,
         });
+
+        logger.info('Collector', `[SerpAPI] Cache hit: ${cachedJobs.length} jobs for "${query}" in "${location || 'any'}"`);
 
         return cachedJobs.map(job => ({
           title: job.title,
@@ -255,14 +263,23 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       const isCached = await this.checkCache(queryHash);
       if (isCached) {
         const db = getDb();
+
+        // Build location filter for cached results
+        const locationFilter = location ? {
+          location: { contains: location.split(',')[0].trim(), mode: 'insensitive' as const }
+        } : {};
+
         const cachedJobs = await db.job.findMany({
           where: {
             source: 'jobspy',
             ...(isRemote && { isRemote: true }),
+            ...locationFilter,
           },
           orderBy: { lastSeenAt: 'desc' },
           take: limit,
         });
+
+        logger.info('Collector', `[JobSpy] Cache hit: ${cachedJobs.length} jobs for "${query}" in "${location || 'any'}"`);
 
         return cachedJobs.map(job => ({
           title: job.title,
