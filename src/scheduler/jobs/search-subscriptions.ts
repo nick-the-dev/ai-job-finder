@@ -218,7 +218,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
 
   if (newMatches.length > 0) {
     newMatches.sort((a, b) => b.match.score - a.match.score);
-    const toNotify = newMatches.slice(0, 10);
+    const toNotify = newMatches; // Send all matches
 
     await sendMatchSummary(
       sub.user.chatId,
@@ -472,9 +472,9 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       totalMatchesFound += newMatches.length;
 
       if (newMatches.length > 0) {
-        // Sort by score descending, take top 10
+        // Sort by score descending
         newMatches.sort((a, b) => b.match.score - a.match.score);
-        const toNotify = newMatches.slice(0, 10);
+        const toNotify = newMatches; // Send all matches
 
         // Send notification summary
         try {
