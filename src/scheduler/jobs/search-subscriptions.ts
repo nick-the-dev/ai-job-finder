@@ -52,7 +52,8 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   logger.info('Scheduler', `[Manual] Scanning for ${userLabel}: ${sub.jobTitles.join(', ')}`);
 
   // Collect jobs for each title using user's date preference
-  const datePosted = sub.datePosted || 'month';
+  type DatePostedType = 'today' | '3days' | 'week' | 'month' | 'all';
+  const datePosted = (sub.datePosted || 'month') as DatePostedType;
   const allRawJobs = [];
   for (const title of sub.jobTitles) {
     const collectFn = async () => {
@@ -63,7 +64,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
         limit: 50,
         source: 'jobspy',
         skipCache: false,
-        datePosted,
+        datePosted: datePosted === 'all' ? undefined : datePosted,
       });
       return jobs;
     };
@@ -245,7 +246,8 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       logger.info('Scheduler', `Processing ${userLabel}: ${sub.jobTitles.join(', ')}`);
 
       // Step 1: Collect jobs for each title using user's date preference
-      const datePosted = sub.datePosted || 'month';
+      type DatePostedType = 'today' | '3days' | 'week' | 'month' | 'all';
+      const datePosted = (sub.datePosted || 'month') as DatePostedType;
       const allRawJobs = [];
 
       for (const title of sub.jobTitles) {
@@ -257,7 +259,7 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
             limit: 50, // Limit per title for scheduler
             source: 'jobspy', // Use free source
             skipCache: false, // Use cache aggressively
-            datePosted, // Use user's date preference
+            datePosted: datePosted === 'all' ? undefined : datePosted, // Use user's date preference
           });
           return jobs;
         };

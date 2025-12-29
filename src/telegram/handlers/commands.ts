@@ -494,7 +494,7 @@ Ready to get started?
       return;
     }
 
-    const chatId = sub.user.chatId;
+    const chatId = Number(sub.user.chatId);
 
     // Answer callback immediately and update message
     await ctx.answerCallbackQuery({ text: '🔍 Starting scan...' });
