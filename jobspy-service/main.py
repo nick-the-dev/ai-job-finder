@@ -14,7 +14,7 @@ app = FastAPI(title="JobSpy Scraper API", version="1.0.0")
 class ScrapeRequest(BaseModel):
     search_term: str
     location: str = "USA"
-    site_name: list[str] = ["indeed", "linkedin", "glassdoor", "zip_recruiter"]
+    site_name: list[str] = ["indeed", "linkedin"]  # glassdoor/zip_recruiter disabled - broken upstream
     is_remote: bool = False
     results_wanted: int = 50
     hours_old: Optional[int] = 72  # Jobs posted in last 72 hours
