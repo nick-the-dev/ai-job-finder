@@ -200,6 +200,20 @@ Ready to get started?
     );
   });
 
+  // /clearcache - Clear job query cache (admin command)
+  bot.command('clearcache', async (ctx) => {
+    const db = getDb();
+
+    try {
+      const result = await db.queryCache.deleteMany({});
+      logger.info('Telegram', `Cache cleared: ${result.count} entries deleted by user ${ctx.from?.id}`);
+      await ctx.reply(`✅ Cache cleared! Deleted ${result.count} cached queries.\n\nNext scan will fetch fresh results.`);
+    } catch (error) {
+      logger.error('Telegram', 'Failed to clear cache', error);
+      await ctx.reply('❌ Failed to clear cache. Please try again.');
+    }
+  });
+
   // === Callback Query Handlers for Inline Keyboard ===
 
   // View subscription details
