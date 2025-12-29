@@ -10,6 +10,19 @@ interface MatchEntry {
 }
 
 /**
+ * Safely format a date string, returning empty string if invalid
+ */
+function formatDate(dateValue: string | Date): string {
+  try {
+    const date = new Date(dateValue);
+    if (isNaN(date.getTime())) return '';
+    return date.toISOString().split('T')[0];
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Escape a value for CSV (handle commas, quotes, newlines)
  */
 function escapeCSV(value: string | number | boolean | undefined | null): string {
@@ -54,7 +67,7 @@ function matchesToCSV(matches: MatchEntry[]): string {
     job.salaryMax ?? '',
     escapeCSV(job.salaryCurrency),
     escapeCSV(job.applicationUrl),
-    job.postedDate ? new Date(job.postedDate).toISOString().split('T')[0] : '',
+    job.postedDate ? formatDate(job.postedDate) : '',
     escapeCSV(job.source),
     escapeCSV(match.matchedSkills.join('; ')),
     escapeCSV(match.missingSkills.join('; ')),
