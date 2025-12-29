@@ -55,25 +55,36 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   type DatePostedType = 'today' | '3days' | 'week' | 'month' | 'all';
   const datePosted = (sub.datePosted || 'month') as DatePostedType;
   const allRawJobs = [];
+
   for (const title of sub.jobTitles) {
-    const collectFn = async () => {
-      const jobs = await collector.execute({
-        query: title,
-        location: sub.location ?? undefined,
-        isRemote: sub.isRemote,
-        limit: 3000,
-        source: 'jobspy',
-        skipCache: false,
-        datePosted: datePosted === 'all' ? undefined : datePosted,
-      });
-      return jobs;
-    };
-    const jobs = await jobspyLimit(collectFn);
-    allRawJobs.push(...jobs);
+    try {
+      logger.info('Scheduler', `[Manual] Collecting jobs for: "${title}"`);
+      const collectFn = async () => {
+        const jobs = await collector.execute({
+          query: title,
+          location: sub.location ?? undefined,
+          isRemote: sub.isRemote,
+          limit: 3000,
+          source: 'jobspy',
+          skipCache: false,
+          datePosted: datePosted === 'all' ? undefined : datePosted,
+        });
+        return jobs;
+      };
+      const jobs = await jobspyLimit(collectFn);
+      logger.info('Scheduler', `[Manual] Found ${jobs.length} jobs for "${title}"`);
+      allRawJobs.push(...jobs);
+    } catch (error) {
+      logger.error('Scheduler', `[Manual] Failed to collect jobs for "${title}"`, error);
+      // Continue with other titles
+    }
   }
+
+  logger.info('Scheduler', `[Manual] Total raw jobs collected: ${allRawJobs.length}`);
 
   // Normalize and dedupe
   let normalizedJobs = await normalizer.execute(allRawJobs);
+  logger.info('Scheduler', `[Manual] After dedup: ${normalizedJobs.length} unique jobs`);
 
   // Apply exclusion filters
   const excludedTitles = sub.excludedTitles ?? [];
@@ -251,25 +262,32 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       const allRawJobs = [];
 
       for (const title of sub.jobTitles) {
-        const collectFn = async () => {
-          const jobs = await collector.execute({
-            query: title,
-            location: sub.location ?? undefined,
-            isRemote: sub.isRemote,
-            limit: 3000,
-            source: 'jobspy',
-            skipCache: false,
-            datePosted: datePosted === 'all' ? undefined : datePosted,
-          });
-          return jobs;
-        };
+        try {
+          logger.info('Scheduler', `  Collecting jobs for: "${title}"`);
+          const collectFn = async () => {
+            const jobs = await collector.execute({
+              query: title,
+              location: sub.location ?? undefined,
+              isRemote: sub.isRemote,
+              limit: 3000,
+              source: 'jobspy',
+              skipCache: false,
+              datePosted: datePosted === 'all' ? undefined : datePosted,
+            });
+            return jobs;
+          };
 
-        // Rate limit JobSpy
-        const jobs = await jobspyLimit(collectFn);
-        allRawJobs.push(...jobs);
+          // Rate limit JobSpy
+          const jobs = await jobspyLimit(collectFn);
+          logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}"`);
+          allRawJobs.push(...jobs);
+        } catch (error) {
+          logger.error('Scheduler', `  Failed to collect jobs for "${title}"`, error);
+          // Continue with other titles
+        }
       }
 
-      logger.debug('Scheduler', `  Collected ${allRawJobs.length} raw jobs`);
+      logger.info('Scheduler', `  Total collected: ${allRawJobs.length} raw jobs`);
 
       // Step 2: Normalize and dedupe
       let normalizedJobs = await normalizer.execute(allRawJobs);
