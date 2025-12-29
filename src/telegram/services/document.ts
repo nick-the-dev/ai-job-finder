@@ -2,13 +2,11 @@ import type { Bot } from 'grammy';
 import axios from 'axios';
 import mammoth from 'mammoth';
 
-import { PDFParse } from 'pdf-parse';
-
+// pdf-parse v1 uses CommonJS default export
 async function parsePdf(buffer: Buffer): Promise<string> {
-  const pdfParser = new PDFParse({ data: new Uint8Array(buffer) });
-  const result = await pdfParser.getText();
-  await pdfParser.destroy();
-  return result.text;
+  const pdfParse = (await import('pdf-parse')).default;
+  const data = await pdfParse(buffer);
+  return data.text;
 }
 import type { BotContext } from '../bot.js';
 import { config } from '../../config.js';
