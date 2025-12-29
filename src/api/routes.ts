@@ -112,12 +112,12 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     const duplicates = allRawJobs.length - normalizedJobs.length;
     logger.info('API', `      ↳ ${normalizedJobs.length} unique (${sourcesAfter}) | ${duplicates} duplicates removed`);
 
-    // Step 3: Match jobs against resume (parallel batches of 10)
+    // Step 3: Match jobs against resume (parallel batches of 20)
     const jobsToMatch = normalizedJobs.slice(0, effectiveMatchLimit);
-    const totalBatches = Math.ceil(jobsToMatch.length / 10);
+    const BATCH_SIZE = 20;
+    const totalBatches = Math.ceil(jobsToMatch.length / BATCH_SIZE);
     logger.info('API', `[3/4] Matching ${jobsToMatch.length} jobs against resume (${totalBatches} batches)...`);
     const matches: Array<{ job: NormalizedJob; match: JobMatchResult }> = [];
-    const BATCH_SIZE = 10;
 
     for (let i = 0; i < jobsToMatch.length; i += BATCH_SIZE) {
       const batch = jobsToMatch.slice(i, i + BATCH_SIZE);

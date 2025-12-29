@@ -5,6 +5,11 @@ import { config } from '../config.js';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
+// Retry configuration
+const MAX_RETRIES = 5;
+const BASE_DELAY_MS = 1000;
+const MAX_DELAY_MS = 30000;
+
 interface Message {
   role: 'system' | 'user' | 'assistant';
   content: string;
@@ -13,12 +18,32 @@ interface Message {
 interface LLMOptions {
   temperature?: number;
   maxTokens?: number;
+  maxRetries?: number;
+}
+
+/**
+ * Sleep for a given number of milliseconds
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Calculate exponential backoff delay with jitter
+ */
+function getBackoffDelay(attempt: number, retryAfter?: number): number {
+  if (retryAfter) {
+    return retryAfter * 1000; // Convert to ms
+  }
+  // Exponential backoff: 1s, 2s, 4s, 8s, 16s (capped at MAX_DELAY_MS)
+  const exponentialDelay = BASE_DELAY_MS * Math.pow(2, attempt);
+  const jitter = Math.random() * 500; // Add 0-500ms jitter
+  return Math.min(exponentialDelay + jitter, MAX_DELAY_MS);
 }
 
 /**
  * OpenRouter LLM client with structured output support
- * Note: For models that don't support json_schema response_format,
- * we embed the schema in the prompt instead.
+ * Includes exponential backoff for rate limiting (429 errors)
  */
 export async function callLLM<T>(
   messages: Message[],
@@ -26,10 +51,7 @@ export async function callLLM<T>(
   jsonSchema: object,
   options: LLMOptions = {}
 ): Promise<T> {
-  const { temperature = 0.1, maxTokens = 2000 } = options;
-
-  logger.info('LLM', `Calling ${config.OPENROUTER_MODEL}...`);
-  logger.debug('LLM', 'Messages', { count: messages.length });
+  const { temperature = 0.1, maxTokens = 2000, maxRetries = MAX_RETRIES } = options;
 
   // Add instruction to respond with JSON
   const lastMessage = messages[messages.length - 1];
@@ -43,59 +65,85 @@ Respond ONLY with a valid JSON object. No other text.`,
     },
   ];
 
-  try {
-    const response = await axios.post(
-      OPENROUTER_URL,
-      {
-        model: config.OPENROUTER_MODEL,
-        messages: enhancedMessages,
-        temperature,
-        max_tokens: maxTokens,
-        response_format: { type: 'json_object' },
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${config.OPENROUTER_API_KEY}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://github.com/ai-job-finder',
-          'X-Title': 'AI Job Finder',
-        },
-      }
-    );
+  let lastError: Error | null = null;
 
-    const content = response.data.choices[0]?.message?.content;
-    if (!content) {
-      throw new Error('Empty response from LLM');
-    }
-
-    logger.debug('LLM', 'Raw response', content.substring(0, 300));
-
-    // Parse JSON
-    let parsed: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      parsed = JSON.parse(content);
-    } catch (e) {
-      logger.error('LLM', 'Failed to parse JSON response', content);
-      throw new Error('Invalid JSON from LLM');
-    }
+      if (attempt > 0) {
+        logger.info('LLM', `Retry attempt ${attempt}/${maxRetries}...`);
+      } else {
+        logger.debug('LLM', 'Messages', { count: messages.length });
+      }
 
-    // Validate with Zod
-    const result = schema.safeParse(parsed);
-    if (!result.success) {
-      logger.error('LLM', 'Schema validation failed', result.error.format());
-      throw new Error(`Schema validation failed: ${result.error.message}`);
-    }
+      const response = await axios.post(
+        OPENROUTER_URL,
+        {
+          model: config.OPENROUTER_MODEL,
+          messages: enhancedMessages,
+          temperature,
+          max_tokens: maxTokens,
+          response_format: { type: 'json_object' },
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${config.OPENROUTER_API_KEY}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://github.com/ai-job-finder',
+            'X-Title': 'AI Job Finder',
+          },
+        }
+      );
 
-    logger.info('LLM', 'Response validated successfully');
-    return result.data;
-  } catch (error) {
-    if (axios.isAxiosError(error)) {
-      logger.error('LLM', 'API error', {
-        status: error.response?.status,
-        data: error.response?.data,
-      });
-      throw new Error(`LLM API error: ${error.response?.status}`);
+      const content = response.data.choices[0]?.message?.content;
+      if (!content) {
+        throw new Error('Empty response from LLM');
+      }
+
+      logger.debug('LLM', 'Raw response', content.substring(0, 300));
+
+      // Parse JSON
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content);
+      } catch (e) {
+        logger.error('LLM', 'Failed to parse JSON response', content);
+        throw new Error('Invalid JSON from LLM');
+      }
+
+      // Validate with Zod
+      const result = schema.safeParse(parsed);
+      if (!result.success) {
+        logger.error('LLM', 'Schema validation failed', result.error.format());
+        throw new Error(`Schema validation failed: ${result.error.message}`);
+      }
+
+      return result.data;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        const retryAfter = error.response?.headers?.['retry-after'];
+
+        // Retry on rate limit (429) or server errors (5xx)
+        if (status === 429 || (status && status >= 500)) {
+          if (attempt < maxRetries) {
+            const delay = getBackoffDelay(attempt, retryAfter ? parseInt(retryAfter) : undefined);
+            logger.warn('LLM', `Rate limited (${status}), waiting ${Math.round(delay / 1000)}s before retry...`);
+            await sleep(delay);
+            lastError = new Error(`LLM API error: ${status}`);
+            continue;
+          }
+        }
+
+        logger.error('LLM', 'API error', {
+          status,
+          data: error.response?.data,
+        });
+        throw new Error(`LLM API error: ${status}`);
+      }
+      throw error;
     }
-    throw error;
   }
+
+  // All retries exhausted
+  throw lastError || new Error('LLM request failed after all retries');
 }
