@@ -89,11 +89,9 @@ Provide your analysis in the required JSON format.`;
         JobMatchJsonSchema
       );
 
-      // Log suspiciously low scores for debugging
+      // Log score=0 at debug level (expected for mismatched jobs)
       if (result.score === 0) {
-        logger.warn('Matcher', `Score=0 returned for job: ${job.title} @ ${job.company}`, {
-          descriptionLength: job.description?.length || 0,
-          resumeLength: resumeText?.length || 0,
+        logger.debug('Matcher', `Score=0 for job: ${job.title} @ ${job.company}`, {
           reasoning: result.reasoning,
         });
       }
