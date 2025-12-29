@@ -4,6 +4,8 @@ import type { BotContext } from '../bot.js';
 import { getDb } from '../../db/client.js';
 import { logger } from '../../utils/logger.js';
 import { runSingleSubscriptionSearch } from '../../scheduler/jobs/search-subscriptions.js';
+import { saveMatchesToCSV, generateDownloadToken } from '../../utils/csv.js';
+import { config } from '../../config.js';
 
 export function setupCommands(bot: Bot<BotContext>): void {
   // /start - Welcome message with inline keyboard
@@ -292,11 +294,122 @@ Ready to get started?
       keyboard.text('⏸️ Pause', `sub:pause:${sub.id}`);
     }
     keyboard.row();
+    if (sub._count.sentNotifications > 0) {
+      keyboard.text('📥 Download All', `sub:download:${sub.id}`);
+    }
     keyboard.text('🗑️ Delete', `sub:delete:${sub.id}`);
     keyboard.text('« Back', 'sub:list');
 
     await ctx.answerCallbackQuery();
     await ctx.editMessageText(message, { parse_mode: 'HTML', reply_markup: keyboard });
+  });
+
+  // Download all matches for subscription as CSV
+  bot.callbackQuery(/^sub:download:(.+)$/, async (ctx) => {
+    const subId = ctx.match[1];
+    const db = getDb();
+
+    const sub = await db.searchSubscription.findUnique({
+      where: { id: subId },
+    });
+
+    if (!sub) {
+      await ctx.answerCallbackQuery({ text: 'Subscription not found' });
+      return;
+    }
+
+    // Show loading message
+    await ctx.answerCallbackQuery({ text: '📥 Generating CSV...' });
+    await ctx.editMessageText(
+      '📥 <b>Generating CSV...</b>\n\nPlease wait while I prepare your download.',
+      { parse_mode: 'HTML' }
+    );
+
+    try {
+      // Get all sent notifications for this subscription with job data
+      const sentNotifications = await db.sentNotification.findMany({
+        where: { subscriptionId: sub.id },
+        include: {
+          jobMatch: {
+            include: { job: true },
+          },
+        },
+        orderBy: { sentAt: 'desc' },
+      });
+
+      if (sentNotifications.length === 0) {
+        await ctx.editMessageText(
+          '📭 <b>No matches found</b>\n\nThis subscription has no job matches yet.',
+          {
+            parse_mode: 'HTML',
+            reply_markup: new InlineKeyboard().text('« Back', `sub:view:${subId}`),
+          }
+        );
+        return;
+      }
+
+      // Deduplicate by job ID (same job might be matched multiple times)
+      const seenJobs = new Set<string>();
+      const matches = sentNotifications
+        .filter(({ jobMatch }) => {
+          if (seenJobs.has(jobMatch.jobId)) return false;
+          seenJobs.add(jobMatch.jobId);
+          return true;
+        })
+        .map(({ jobMatch }) => ({
+          job: {
+            contentHash: jobMatch.job.contentHash,
+            title: jobMatch.job.title,
+            company: jobMatch.job.company,
+            description: jobMatch.job.description,
+            location: jobMatch.job.location ?? undefined,
+            isRemote: jobMatch.job.isRemote,
+            salaryMin: jobMatch.job.salaryMin ?? undefined,
+            salaryMax: jobMatch.job.salaryMax ?? undefined,
+            salaryCurrency: jobMatch.job.salaryCurrency ?? undefined,
+            applicationUrl: jobMatch.job.applicationUrl ?? undefined,
+            postedDate: jobMatch.job.postedDate ?? undefined,
+            source: jobMatch.job.source as 'serpapi' | 'jobspy',
+          },
+          match: {
+            score: jobMatch.score,
+            reasoning: jobMatch.reasoning,
+            matchedSkills: jobMatch.matchedSkills,
+            missingSkills: jobMatch.missingSkills,
+            pros: jobMatch.pros,
+            cons: jobMatch.cons,
+          },
+        }));
+
+      // Generate CSV and download token
+      const csvFilename = await saveMatchesToCSV(matches);
+      const downloadToken = await generateDownloadToken(csvFilename);
+
+      const baseUrl = config.APP_URL || `http://localhost:${config.PORT}`;
+      const downloadUrl = `${baseUrl}/download/${downloadToken}`;
+
+      await ctx.editMessageText(
+        `📥 <b>Download Ready</b>\n\n` +
+          `<b>${matches.length}</b> unique job matches from all time.\n\n` +
+          `<a href="${downloadUrl}">📄 Download CSV</a>\n\n` +
+          `<i>Link expires when the file is cleaned up.</i>`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: new InlineKeyboard().text('« Back', `sub:view:${subId}`),
+        }
+      );
+
+      logger.info('Telegram', `Generated CSV download for subscription ${subId}: ${matches.length} matches`);
+    } catch (error) {
+      logger.error('Telegram', `Failed to generate CSV for subscription ${subId}`, error);
+      await ctx.editMessageText(
+        '❌ <b>Download Failed</b>\n\nSomething went wrong. Please try again later.',
+        {
+          parse_mode: 'HTML',
+          reply_markup: new InlineKeyboard().text('« Back', `sub:view:${subId}`),
+        }
+      );
+    }
   });
 
   // Pause subscription
