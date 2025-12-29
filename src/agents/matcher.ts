@@ -100,12 +100,7 @@ Provide your analysis in the required JSON format.`;
 
       return result;
     } catch (error) {
-      logger.error('Matcher', 'Analysis failed', error, {
-        jobTitle: job.title,
-        company: job.company,
-        descriptionLength: job.description?.length || 0,
-        resumeLength: resumeText?.length || 0,
-      });
+      logger.error('Matcher', `Analysis failed for "${job.title}" @ ${job.company} (desc: ${job.description?.length || 0} chars, resume: ${resumeText?.length || 0} chars)`, error);
       throw error;
     }
   }

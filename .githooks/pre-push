@@ -1,0 +1,13 @@
+#!/bin/sh
+# Pre-push hook: Run TypeScript check before pushing
+
+echo "Running TypeScript check..."
+npm run typecheck
+
+if [ $? -ne 0 ]; then
+  echo ""
+  echo "TypeScript check failed! Fix errors before pushing."
+  exit 1
+fi
+
+echo "TypeScript check passed!"

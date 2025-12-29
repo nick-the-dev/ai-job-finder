@@ -27,5 +27,5 @@ RUN npm run build
 EXPOSE 3001
 
 # Run database migrations and start server
-# --accept-data-loss allows dropping constraints without manual confirmation
-CMD ["sh", "-c", "npx prisma db push --skip-generate --accept-data-loss && node dist/index.js"]
+# NOTE: Do NOT use --accept-data-loss - it can wipe user data!
+CMD ["sh", "-c", "npx prisma db push --skip-generate && node dist/index.js"]
