@@ -396,6 +396,16 @@ router.get('/matches/:id', async (req: Request, res: Response, next: NextFunctio
  * Error handling middleware
  */
 export function errorHandler(err: Error, req: Request, res: Response, next: NextFunction) {
+  // Handle JSON parsing errors (malformed request body)
+  if (err instanceof SyntaxError && 'body' in err) {
+    logger.warn('API', 'Invalid JSON in request body', { message: err.message });
+    res.status(400).json({
+      error: 'Bad Request',
+      message: 'Invalid JSON in request body',
+    });
+    return;
+  }
+
   logger.error('API', 'Unhandled error', { message: err.message, stack: err.stack });
   res.status(500).json({
     error: 'Internal server error',
