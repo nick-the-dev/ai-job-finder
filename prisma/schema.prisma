@@ -69,8 +69,6 @@ model JobMatch {
   // Telegram notifications
   sentNotifications SentNotification[]
 
-  // Unique constraint: one match per job+resume combo
-  @@unique([jobId, resumeHash])
   @@map("job_matches")
 }
 

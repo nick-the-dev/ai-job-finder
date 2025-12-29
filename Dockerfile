@@ -14,7 +14,7 @@ COPY prisma ./prisma/
 RUN npx prisma generate
 
 # Cache buster - change this to force rebuild
-ARG BUILD_VERSION=v9
+ARG BUILD_VERSION=v10
 
 # Copy source code
 COPY tsconfig.json ./
@@ -27,4 +27,5 @@ RUN npm run build
 EXPOSE 3001
 
 # Run database migrations and start server
-CMD ["sh", "-c", "npx prisma db push --skip-generate && node dist/index.js"]
+# --accept-data-loss allows dropping constraints without manual confirmation
+CMD ["sh", "-c", "npx prisma db push --skip-generate --accept-data-loss && node dist/index.js"]
