@@ -28,8 +28,11 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
   const startTime = Date.now();
 
   try {
-    const { jobTitles, location, isRemote, resumeText, limit = 5, matchLimit, source = 'serpapi', skipCache = false } = req.body;
-    const effectiveMatchLimit = matchLimit ?? limit; // matchLimit defaults to limit if not specified
+    const { jobTitles, location, resumeText, limit = 5, matchLimit, source = 'serpapi', skipCache = false } = req.body;
+
+    // Auto-detect remote: if location is "Remote", treat as remote search
+    const isRemote = req.body.isRemote ?? (location?.toLowerCase() === 'remote');
+    const effectiveMatchLimit = matchLimit ?? limit;
 
     logger.info('API', '=== Starting job search ===');
     logger.info('API', 'Request', { jobTitles, location, isRemote, limit });
