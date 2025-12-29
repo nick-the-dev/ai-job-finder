@@ -157,7 +157,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           salaryCurrency: job.salaryCurrency ?? undefined,
           applicationUrl: job.applicationUrl ?? undefined,
           postedDate: job.postedDate ?? undefined,
-          source: job.source,
+          source: job.source as 'serpapi' | 'jobspy',
           sourceId: job.sourceId ?? undefined,
         }));
       }
@@ -275,7 +275,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           salaryCurrency: job.salaryCurrency ?? undefined,
           applicationUrl: job.applicationUrl ?? undefined,
           postedDate: job.postedDate ?? undefined,
-          source: job.source,
+          source: job.source as 'serpapi' | 'jobspy',
           sourceId: job.sourceId ?? undefined,
         }));
       }
