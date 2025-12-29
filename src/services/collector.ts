@@ -78,7 +78,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     queryHash: string,
     query: string,
     location: string | undefined,
-    isRemote: boolean,
+    isRemote: boolean | undefined,
     source: string,
     jobCount: number,
     cacheHours: number
@@ -92,7 +92,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
         queryHash,
         query,
         location,
-        isRemote,
+        isRemote: isRemote ?? false, // DB requires boolean, use false for "all"
         source,
         jobCount,
         expiresAt,
@@ -108,8 +108,9 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
   /**
    * Generate hash for query parameters
    */
-  private getQueryHash(query: string, location: string | undefined, isRemote: boolean, source: string): string {
-    const data = JSON.stringify({ query, location, isRemote, source });
+  private getQueryHash(query: string, location: string | undefined, isRemote: boolean | undefined, source: string): string {
+    // Use null in JSON for undefined to distinguish from false
+    const data = JSON.stringify({ query, location, isRemote: isRemote ?? null, source });
     return crypto.createHash('sha256').update(data).digest('hex').substring(0, 16);
   }
 
@@ -120,7 +121,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     const {
       query,
       location,
-      isRemote = false,
+      isRemote, // undefined = all jobs, true = remote only, false = on-site only
       limit = 1000,
       maxPages = DEFAULT_MAX_PAGES,
       skipCache = false,
@@ -142,10 +143,13 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           location: { contains: location.split(',')[0].trim(), mode: 'insensitive' as const }
         } : {};
 
+        // Build remote filter: undefined = all, true = remote only, false = on-site only
+        const remoteFilter = isRemote !== undefined ? { isRemote } : {};
+
         const cachedJobs = await db.job.findMany({
           where: {
             source: 'serpapi',
-            ...(isRemote && { isRemote: true }),
+            ...remoteFilter,
             ...locationFilter,
           },
           orderBy: { lastSeenAt: 'desc' },
@@ -250,7 +254,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     const {
       query,
       location,
-      isRemote = false,
+      isRemote, // undefined = all jobs, true = remote only, false = on-site only
       limit = 100,
       skipCache = false,
       cacheHours = DEFAULT_CACHE_HOURS,
@@ -269,10 +273,13 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           location: { contains: location.split(',')[0].trim(), mode: 'insensitive' as const }
         } : {};
 
+        // Build remote filter: undefined = all, true = remote only, false = on-site only
+        const remoteFilter = isRemote !== undefined ? { isRemote } : {};
+
         const cachedJobs = await db.job.findMany({
           where: {
             source: 'jobspy',
-            ...(isRemote && { isRemote: true }),
+            ...remoteFilter,
             ...locationFilter,
           },
           orderBy: { lastSeenAt: 'desc' },
@@ -324,9 +331,12 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
         search_term: query,
         location: location || 'USA',
         site_name: ['indeed', 'linkedin'],  // glassdoor disabled - location parsing broken
-        is_remote: isRemote,
         results_wanted: limit,
       };
+      // Only add is_remote if explicitly set (undefined = all jobs)
+      if (isRemote !== undefined) {
+        requestBody.is_remote = isRemote;
+      }
       // Only add hours_old if specified (undefined = no limit / all time)
       if (hoursOld !== undefined) {
         requestBody.hours_old = hoursOld;

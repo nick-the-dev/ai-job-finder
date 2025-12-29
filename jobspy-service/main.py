@@ -15,7 +15,7 @@ class ScrapeRequest(BaseModel):
     search_term: str
     location: str = "USA"
     site_name: list[str] = ["indeed", "linkedin"]  # glassdoor/zip_recruiter disabled - broken upstream
-    is_remote: bool = False
+    is_remote: Optional[bool] = None  # None = all jobs, True = remote only, False = on-site only
     results_wanted: int = 50
     hours_old: Optional[int] = 72  # Jobs posted in last 72 hours
     country_indeed: Optional[str] = None  # Auto-detect from location if not provided
@@ -91,17 +91,22 @@ def scrape(request: ScrapeRequest):
     try:
         # Auto-detect country from location if not provided
         country = request.country_indeed or detect_country(request.location)
-        logger.info(f"Scraping jobs: {request.search_term} in {request.location} (country: {country})")
+        remote_filter = f", remote={request.is_remote}" if request.is_remote is not None else ""
+        logger.info(f"Scraping jobs: {request.search_term} in {request.location} (country: {country}{remote_filter})")
 
-        jobs_df = scrape_jobs(
-            site_name=request.site_name,
-            search_term=request.search_term,
-            location=request.location,
-            is_remote=request.is_remote,
-            results_wanted=request.results_wanted,
-            hours_old=request.hours_old,
-            country_indeed=country,
-        )
+        # Build kwargs - only include is_remote if explicitly set
+        scrape_kwargs = {
+            "site_name": request.site_name,
+            "search_term": request.search_term,
+            "location": request.location,
+            "results_wanted": request.results_wanted,
+            "hours_old": request.hours_old,
+            "country_indeed": country,
+        }
+        if request.is_remote is not None:
+            scrape_kwargs["is_remote"] = request.is_remote
+
+        jobs_df = scrape_jobs(**scrape_kwargs)
 
         if jobs_df is None or jobs_df.empty:
             logger.info("No jobs found")

@@ -47,16 +47,21 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     const { jobTitles, resumeText, limit = 1000, matchLimit, source = 'serpapi', skipCache = false, datePosted = 'month', widerSearch = false, minScore = 40 } = req.body;
 
     // Handle location and isRemote:
-    // - location: "Remote" alone → remote jobs, no geo filter
+    // - location: "Remote" alone → remote jobs only, no geo filter
     // - location: "USA", isRemote: true → remote jobs for USA-based candidates
-    // - location: "New York" → on-site jobs in New York
+    // - location: "USA", isRemote: false → on-site jobs only in USA
+    // - location: "New York" (no isRemote) → all jobs in New York (remote + on-site)
     const locationIsRemote = req.body.location?.toLowerCase() === 'remote';
     const location = locationIsRemote ? undefined : req.body.location;
-    const isRemote = req.body.isRemote ?? locationIsRemote;
+    // Only filter by remote if explicitly requested or location is "Remote"
+    const isRemote: boolean | undefined = req.body.isRemote !== undefined
+      ? req.body.isRemote
+      : (locationIsRemote ? true : undefined);
 
     const effectiveMatchLimit = matchLimit ?? limit;
 
-    logger.info('API', `=== Search: ${jobTitles.join(', ')} | ${location || 'Any location'} | ${isRemote ? 'Remote' : 'On-site'} | limit=${limit} ===`);
+    const remoteLabel = isRemote === true ? 'Remote only' : isRemote === false ? 'On-site only' : 'All (remote + on-site)';
+    logger.info('API', `=== Search: ${jobTitles.join(', ')} | ${location || 'Any location'} | ${remoteLabel} | limit=${limit} ===`);
 
     if (!jobTitles || !Array.isArray(jobTitles) || jobTitles.length === 0) {
       return res.status(400).json({ error: 'jobTitles array is required' });
