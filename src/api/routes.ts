@@ -47,7 +47,9 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     const allRawJobs = [];
 
     for (const title of jobTitles) {
-      const query = location ? `${title} ${location}` : title;
+      // Don't add "Remote" to query - SerpAPI handles it via ltype parameter
+      const shouldAddLocation = location && location.toLowerCase() !== 'remote';
+      const query = shouldAddLocation ? `${title} ${location}` : title;
       const jobs = await collector.execute({
         query,
         location,
