@@ -294,7 +294,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       const response = await axios.post(`${jobspyUrl}/scrape`, {
         search_term: query,
         location: location || 'USA',
-        site_name: ['indeed', 'linkedin', 'glassdoor'],
+        site_name: ['indeed', 'linkedin'],  // glassdoor disabled - location parsing broken
         is_remote: isRemote,
         results_wanted: limit,
       }, { timeout: 120000 }); // 2 min timeout for scraping
