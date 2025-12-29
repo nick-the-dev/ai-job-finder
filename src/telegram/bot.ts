@@ -103,25 +103,31 @@ export async function initBot(app: Express): Promise<void> {
     return;
   }
 
-  const telegramBot = getBot();
+  try {
+    const telegramBot = getBot();
 
-  // Test bot connection
-  const me = await telegramBot.api.getMe();
-  logger.info('Telegram', `Bot connected: @${me.username}`);
+    // Test bot connection
+    const me = await telegramBot.api.getMe();
+    logger.info('Telegram', `Bot connected: @${me.username}`);
 
-  if (config.TELEGRAM_WEBHOOK_URL) {
-    // Webhook mode (production)
-    app.post('/telegram/webhook', getWebhookHandler());
+    if (config.TELEGRAM_WEBHOOK_URL) {
+      // Webhook mode (production)
+      app.post('/telegram/webhook', getWebhookHandler());
 
-    await telegramBot.api.setWebhook(config.TELEGRAM_WEBHOOK_URL, {
-      secret_token: config.TELEGRAM_WEBHOOK_SECRET,
-    });
+      await telegramBot.api.setWebhook(config.TELEGRAM_WEBHOOK_URL, {
+        secret_token: config.TELEGRAM_WEBHOOK_SECRET,
+      });
 
-    logger.info('Telegram', `Webhook set to ${config.TELEGRAM_WEBHOOK_URL}`);
-  } else {
-    // Polling mode (development)
-    telegramBot.start();
-    logger.info('Telegram', 'Bot started in polling mode');
+      logger.info('Telegram', `Webhook set to ${config.TELEGRAM_WEBHOOK_URL}`);
+    } else {
+      // Polling mode (development)
+      telegramBot.start();
+      logger.info('Telegram', 'Bot started in polling mode');
+    }
+  } catch (error) {
+    logger.error('Telegram', 'Failed to initialize bot', error);
+    // Don't crash the server - continue without Telegram
+    logger.warn('Telegram', 'Continuing without Telegram bot');
   }
 }
 
