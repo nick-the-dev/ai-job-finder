@@ -14,6 +14,8 @@ import {
   startCollectionWorker,
   startMatchingWorker,
 } from './queue/index.js';
+import { adminRouter } from './admin/index.js';
+import { startCleanupScheduler, stopCleanupScheduler } from './observability/index.js';
 
 const app = express();
 
@@ -63,6 +65,9 @@ app.use((req, res, next) => {
   next();
 });
 
+// Admin routes (with built-in security middleware)
+app.use('/admin', adminRouter);
+
 // Routes
 app.use('/', router);
 
@@ -73,6 +78,7 @@ app.use(errorHandler);
 async function shutdown(signal: string) {
   logger.info('Server', `${signal} received, shutting down...`);
   stopScheduler();
+  stopCleanupScheduler();
   await stopBot();
   await closeQueues();
   await disconnectRedis();
@@ -119,6 +125,9 @@ async function start() {
     // Initialize scheduler for hourly job searches
     initScheduler();
 
+    // Start observability cleanup scheduler
+    startCleanupScheduler();
+
     // Start listening
     app.listen(config.PORT, () => {
       logger.info('Server', `Listening on port ${config.PORT}`);
@@ -130,6 +139,11 @@ async function start() {
       logger.info('Server', '  GET  /matches - List job matches');
       if (config.TELEGRAM_BOT_TOKEN) {
         logger.info('Server', '  POST /telegram/webhook - Telegram bot webhook');
+      }
+      if (config.ADMIN_API_KEY) {
+        logger.info('Server', '  GET  /admin   - Admin dashboard (requires X-Admin-Key header)');
+      } else {
+        logger.info('Server', '  Admin dashboard disabled (no ADMIN_API_KEY set)');
       }
     });
   } catch (error) {

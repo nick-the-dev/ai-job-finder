@@ -37,6 +37,10 @@ const envSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_WEBHOOK_URL: z.string().url().optional(),
   TELEGRAM_WEBHOOK_SECRET: z.string().optional(),
+
+  // Observability & Admin
+  OBSERVABILITY_RETENTION_DAYS: z.coerce.number().default(30),
+  ADMIN_API_KEY: z.string().min(32).optional(), // Min 32 chars for security
 });
 
 function loadConfig() {

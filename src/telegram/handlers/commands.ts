@@ -6,6 +6,7 @@ import { logger } from '../../utils/logger.js';
 import { runSingleSubscriptionSearch } from '../../scheduler/jobs/search-subscriptions.js';
 import { saveMatchesToCSV, generateDownloadToken } from '../../utils/csv.js';
 import { config } from '../../config.js';
+import { getPersonalStats, getMarketInsights, getResumeTips } from '../../observability/index.js';
 
 export function setupCommands(bot: Bot<BotContext>): void {
   // /start - Welcome message with inline keyboard
@@ -216,6 +217,125 @@ Ready to get started?
     }
   });
 
+  // /stats - Personal performance stats
+  bot.command('stats', async (ctx) => {
+    if (!ctx.telegramUser) {
+      await ctx.reply('Something went wrong. Please try again.');
+      return;
+    }
+
+    const db = getDb();
+    const subs = await db.searchSubscription.findMany({
+      where: { userId: ctx.telegramUser.id, isActive: true },
+      select: { id: true, jobTitles: true, isPaused: true },
+    });
+
+    if (subs.length === 0) {
+      await ctx.reply(
+        'No active subscriptions found.\n\nUse /subscribe to create one and start tracking stats!',
+        { reply_markup: new InlineKeyboard().text('➕ Create Subscription', 'sub:new') }
+      );
+      return;
+    }
+
+    if (subs.length === 1) {
+      // Single subscription - show stats directly
+      await showStatsForSubscription(ctx, subs[0].id);
+    } else {
+      // Multiple subscriptions - show picker
+      let message = '<b>📊 Select a subscription to view stats:</b>\n\n';
+
+      const keyboard = new InlineKeyboard();
+      for (let i = 0; i < subs.length; i++) {
+        const sub = subs[i];
+        const label = `${i + 1}. ${sub.jobTitles[0].substring(0, 20)}${sub.isPaused ? ' ⏸️' : ''}`;
+        keyboard.text(label, `insight:stats:${sub.id}`);
+        if ((i + 1) % 2 === 0 || i === subs.length - 1) keyboard.row();
+      }
+      keyboard.text('📋 My Subscriptions', 'sub:list');
+
+      await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
+    }
+  });
+
+  // /market - Job market insights
+  bot.command('market', async (ctx) => {
+    if (!ctx.telegramUser) {
+      await ctx.reply('Something went wrong. Please try again.');
+      return;
+    }
+
+    const db = getDb();
+    const subs = await db.searchSubscription.findMany({
+      where: { userId: ctx.telegramUser.id, isActive: true },
+      select: { id: true, jobTitles: true, isPaused: true },
+    });
+
+    if (subs.length === 0) {
+      await ctx.reply(
+        'No active subscriptions found.\n\nUse /subscribe to create one and start gathering market insights!',
+        { reply_markup: new InlineKeyboard().text('➕ Create Subscription', 'sub:new') }
+      );
+      return;
+    }
+
+    if (subs.length === 1) {
+      await showMarketForSubscription(ctx, subs[0].id);
+    } else {
+      let message = '<b>📈 Select a subscription to view market insights:</b>\n\n';
+
+      const keyboard = new InlineKeyboard();
+      for (let i = 0; i < subs.length; i++) {
+        const sub = subs[i];
+        const label = `${i + 1}. ${sub.jobTitles[0].substring(0, 20)}${sub.isPaused ? ' ⏸️' : ''}`;
+        keyboard.text(label, `insight:market:${sub.id}`);
+        if ((i + 1) % 2 === 0 || i === subs.length - 1) keyboard.row();
+      }
+      keyboard.text('📋 My Subscriptions', 'sub:list');
+
+      await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
+    }
+  });
+
+  // /tips - Resume improvement tips
+  bot.command('tips', async (ctx) => {
+    if (!ctx.telegramUser) {
+      await ctx.reply('Something went wrong. Please try again.');
+      return;
+    }
+
+    const db = getDb();
+    const subs = await db.searchSubscription.findMany({
+      where: { userId: ctx.telegramUser.id, isActive: true },
+      select: { id: true, jobTitles: true, isPaused: true },
+    });
+
+    if (subs.length === 0) {
+      await ctx.reply(
+        'No active subscriptions found.\n\nUse /subscribe to create one and I\'ll analyze your matches for tips!',
+        { reply_markup: new InlineKeyboard().text('➕ Create Subscription', 'sub:new') }
+      );
+      return;
+    }
+
+    if (subs.length === 1) {
+      await showTipsForSubscription(ctx, subs[0].id);
+    } else {
+      let message = '<b>💡 Select a subscription to get resume tips:</b>\n\n';
+
+      const keyboard = new InlineKeyboard();
+      for (let i = 0; i < subs.length; i++) {
+        const sub = subs[i];
+        const label = `${i + 1}. ${sub.jobTitles[0].substring(0, 20)}${sub.isPaused ? ' ⏸️' : ''}`;
+        keyboard.text(label, `insight:tips:${sub.id}`);
+        if ((i + 1) % 2 === 0 || i === subs.length - 1) keyboard.row();
+      }
+      keyboard.text('📋 My Subscriptions', 'sub:list');
+
+      await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
+    }
+  });
+
   // === Callback Query Handlers for Inline Keyboard ===
 
   // View subscription details
@@ -294,9 +414,11 @@ Ready to get started?
       keyboard.text('⏸️ Pause', `sub:pause:${sub.id}`);
     }
     keyboard.row();
+    keyboard.text('📊 Insights', `insight:menu:${sub.id}`);
     if (sub._count.sentNotifications > 0) {
-      keyboard.text('📥 Download All', `sub:download:${sub.id}`);
+      keyboard.text('📥 Download', `sub:download:${sub.id}`);
     }
+    keyboard.row();
     keyboard.text('🗑️ Delete', `sub:delete:${sub.id}`);
     keyboard.text('« Back', 'sub:list');
 
@@ -723,4 +845,275 @@ Ready to get started?
         .text('➕ New', 'sub:new'),
     });
   });
+
+  // === Insight Callback Handlers ===
+
+  // Stats for specific subscription
+  bot.callbackQuery(/^insight:stats:(.+)$/, async (ctx) => {
+    const subId = ctx.match[1];
+    await ctx.answerCallbackQuery();
+    await showStatsForSubscription(ctx, subId, true);
+  });
+
+  // Market insights for specific subscription
+  bot.callbackQuery(/^insight:market:(.+)$/, async (ctx) => {
+    const subId = ctx.match[1];
+    await ctx.answerCallbackQuery();
+    await showMarketForSubscription(ctx, subId, true);
+  });
+
+  // Tips for specific subscription
+  bot.callbackQuery(/^insight:tips:(.+)$/, async (ctx) => {
+    const subId = ctx.match[1];
+    await ctx.answerCallbackQuery();
+    await showTipsForSubscription(ctx, subId, true);
+  });
+
+  // Insights menu for subscription
+  bot.callbackQuery(/^insight:menu:(.+)$/, async (ctx) => {
+    const subId = ctx.match[1];
+    await ctx.answerCallbackQuery();
+
+    const db = getDb();
+    const sub = await db.searchSubscription.findUnique({
+      where: { id: subId },
+      select: { jobTitles: true },
+    });
+
+    if (!sub) return;
+
+    const message = `<b>📊 Insights: ${sub.jobTitles[0]}</b>\n\nWhat would you like to see?`;
+
+    const keyboard = new InlineKeyboard()
+      .text('📊 My Stats', `insight:stats:${subId}`)
+      .text('📈 Market', `insight:market:${subId}`)
+      .row()
+      .text('💡 Resume Tips', `insight:tips:${subId}`)
+      .row()
+      .text('« Back to Subscription', `sub:view:${subId}`);
+
+    await ctx.editMessageText(message, { parse_mode: 'HTML', reply_markup: keyboard });
+  });
+}
+
+// Helper function to show stats for a subscription
+async function showStatsForSubscription(
+  ctx: BotContext,
+  subscriptionId: string,
+  isEdit = false
+): Promise<void> {
+  const stats = await getPersonalStats(subscriptionId);
+
+  if (!stats) {
+    const message = 'No stats available yet. Run a scan first!';
+    const keyboard = new InlineKeyboard().text('📋 My Subscriptions', 'sub:list');
+    if (isEdit) {
+      await ctx.editMessageText(message, { reply_markup: keyboard });
+    } else {
+      await ctx.reply(message, { reply_markup: keyboard });
+    }
+    return;
+  }
+
+  // Format activity sparkline (last 7 days)
+  const activityDays = stats.activity.slice(-7);
+  const maxJobs = Math.max(...activityDays.map(d => d.jobs), 1);
+  const sparkline = activityDays.map(d => {
+    const ratio = d.jobs / maxJobs;
+    if (ratio > 0.75) return '█';
+    if (ratio > 0.5) return '▆';
+    if (ratio > 0.25) return '▃';
+    if (ratio > 0) return '▁';
+    return '·';
+  }).join('');
+
+  let message = `<b>📊 Your Performance Stats</b>\n\n`;
+
+  message += `<b>Search:</b> ${stats.subscription.jobTitles.slice(0, 2).join(', ')}\n`;
+  message += `<b>Min Score:</b> ${stats.subscription.minScore}\n\n`;
+
+  message += `<b>📈 Last 7 Days</b>\n`;
+  message += `Jobs scanned: <b>${stats.summary.totalJobsScanned}</b>\n`;
+  message += `Matches found: <b>${stats.summary.totalMatches}</b>\n`;
+  message += `Match rate: <b>${stats.summary.matchRate}%</b>\n`;
+  message += `Avg score: <b>${stats.summary.avgScore}</b>\n`;
+  message += `Notifications: <b>${stats.summary.notificationsSent}</b>\n\n`;
+
+  message += `<b>📊 Score Distribution</b>\n`;
+  message += `🟢 Excellent (90+): ${stats.scoreDistribution.excellent}\n`;
+  message += `🔵 Strong (70-89): ${stats.scoreDistribution.strong}\n`;
+  message += `🟡 Moderate (50-69): ${stats.scoreDistribution.moderate}\n`;
+  message += `🔴 Weak (<50): ${stats.scoreDistribution.weak}\n\n`;
+
+  if (stats.skills.topMatched.length > 0) {
+    message += `<b>✅ Top Matched Skills</b>\n`;
+    message += stats.skills.topMatched.map(s => `• ${s}`).join('\n') + '\n\n';
+  }
+
+  if (stats.skills.topMissing.length > 0) {
+    message += `<b>⚠️ Commonly Missing</b>\n`;
+    message += stats.skills.topMissing.map(s => `• ${s}`).join('\n') + '\n\n';
+  }
+
+  message += `<b>📅 Activity (7d):</b> <code>${sparkline}</code>`;
+
+  const keyboard = new InlineKeyboard()
+    .text('📈 Market', `insight:market:${subscriptionId}`)
+    .text('💡 Tips', `insight:tips:${subscriptionId}`)
+    .row()
+    .text('« Subscription', `sub:view:${subscriptionId}`)
+    .text('📋 All Subs', 'sub:list');
+
+  if (isEdit) {
+    await ctx.editMessageText(message, { parse_mode: 'HTML', reply_markup: keyboard });
+  } else {
+    await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
+  }
+}
+
+// Helper function to show market insights for a subscription
+async function showMarketForSubscription(
+  ctx: BotContext,
+  subscriptionId: string,
+  isEdit = false
+): Promise<void> {
+  const insights = await getMarketInsights(subscriptionId);
+
+  if (!insights) {
+    const message = 'No market data available yet. Run a scan to collect data!';
+    const keyboard = new InlineKeyboard().text('📋 My Subscriptions', 'sub:list');
+    if (isEdit) {
+      await ctx.editMessageText(message, { reply_markup: keyboard });
+    } else {
+      await ctx.reply(message, { reply_markup: keyboard });
+    }
+    return;
+  }
+
+  let message = `<b>📈 Job Market Insights</b>\n\n`;
+
+  // Salary info
+  if (insights.salary.min || insights.salary.max) {
+    const formatSalary = (n: number) => `$${Math.round(n / 1000)}k`;
+    if (insights.salary.min && insights.salary.max) {
+      message += `<b>💰 Avg Salary Range</b>\n`;
+      message += `${formatSalary(insights.salary.min)} - ${formatSalary(insights.salary.max)}\n\n`;
+    }
+  }
+
+  message += `<b>🌍 Remote Jobs:</b> ${insights.remoteRatio}%\n`;
+  message += `<b>📊 Total Jobs:</b> ${insights.totalJobs}\n\n`;
+
+  // Top companies
+  if (insights.topCompanies && insights.topCompanies.length > 0) {
+    message += `<b>🏢 Top Hiring Companies</b>\n`;
+    for (const { company, count } of insights.topCompanies.slice(0, 5)) {
+      message += `• ${company} (${count})\n`;
+    }
+    message += '\n';
+  }
+
+  // Top skills (if available)
+  if ('topSkills' in insights && insights.topSkills && (insights.topSkills as Array<{skill: string, count: number}>).length > 0) {
+    message += `<b>🔧 In-Demand Skills</b>\n`;
+    for (const { skill, count } of (insights.topSkills as Array<{skill: string, count: number}>).slice(0, 8)) {
+      message += `• ${skill} (${count})\n`;
+    }
+    message += '\n';
+  }
+
+  // Top locations (if available)
+  if ('topLocations' in insights && insights.topLocations && (insights.topLocations as Array<{location: string, count: number}>).length > 0) {
+    message += `<b>📍 Top Locations</b>\n`;
+    for (const { location, count } of (insights.topLocations as Array<{location: string, count: number}>).slice(0, 5)) {
+      message += `• ${location} (${count})\n`;
+    }
+    message += '\n';
+  }
+
+  const sourceLabel = insights.dataSource === 'snapshot' ? 'Market snapshot' : 'Live data';
+  message += `<i>Source: ${sourceLabel}</i>`;
+
+  const keyboard = new InlineKeyboard()
+    .text('📊 Stats', `insight:stats:${subscriptionId}`)
+    .text('💡 Tips', `insight:tips:${subscriptionId}`)
+    .row()
+    .text('« Subscription', `sub:view:${subscriptionId}`)
+    .text('📋 All Subs', 'sub:list');
+
+  if (isEdit) {
+    await ctx.editMessageText(message, { parse_mode: 'HTML', reply_markup: keyboard });
+  } else {
+    await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
+  }
+}
+
+// Helper function to show resume tips for a subscription
+async function showTipsForSubscription(
+  ctx: BotContext,
+  subscriptionId: string,
+  isEdit = false
+): Promise<void> {
+  const tips = await getResumeTips(subscriptionId);
+
+  if (!tips) {
+    const message = 'No tips available yet. Run some scans to collect match data!';
+    const keyboard = new InlineKeyboard().text('📋 My Subscriptions', 'sub:list');
+    if (isEdit) {
+      await ctx.editMessageText(message, { reply_markup: keyboard });
+    } else {
+      await ctx.reply(message, { reply_markup: keyboard });
+    }
+    return;
+  }
+
+  let message = `<b>💡 Resume Improvement Tips</b>\n\n`;
+
+  // Score comparison
+  const scoreDiff = tips.avgScore - tips.platformAvgScore;
+  const scoreEmoji = scoreDiff >= 5 ? '🟢' : scoreDiff >= -5 ? '🟡' : '🔴';
+  message += `<b>📊 Your Performance</b>\n`;
+  message += `${scoreEmoji} Your avg score: <b>${tips.avgScore}</b>\n`;
+  message += `Platform avg: ${tips.platformAvgScore}\n`;
+  message += `Based on ${tips.matchCount} job matches\n\n`;
+
+  // Skill gaps
+  if (tips.skillGaps.length > 0) {
+    message += `<b>⚠️ Skills to Add</b>\n`;
+    message += `<i>Frequently requested but missing from your resume:</i>\n\n`;
+    for (const gap of tips.skillGaps) {
+      const priority = gap.missingPercent > 70 ? '🔴' : gap.missingPercent > 40 ? '🟡' : '🟢';
+      message += `${priority} <b>${gap.skill}</b> - ${gap.missingPercent}% of jobs\n`;
+    }
+    message += '\n';
+  }
+
+  // Top matched (positive reinforcement)
+  if (tips.topMatched.length > 0) {
+    message += `<b>✅ Your Strengths</b>\n`;
+    message += `These skills are matching well:\n`;
+    message += tips.topMatched.map(s => `• ${s}`).join('\n') + '\n\n';
+  }
+
+  // Action tips
+  if (tips.tips.length > 0) {
+    message += `<b>📝 Recommendations</b>\n`;
+    for (const tip of tips.tips.filter(t => t.type !== 'score_comparison').slice(0, 3)) {
+      const icon = tip.priority === 'high' ? '🔴' : tip.priority === 'medium' ? '🟡' : '💬';
+      message += `${icon} ${tip.message}\n\n`;
+    }
+  }
+
+  const keyboard = new InlineKeyboard()
+    .text('📊 Stats', `insight:stats:${subscriptionId}`)
+    .text('📈 Market', `insight:market:${subscriptionId}`)
+    .row()
+    .text('« Subscription', `sub:view:${subscriptionId}`)
+    .text('📋 All Subs', 'sub:list');
+
+  if (isEdit) {
+    await ctx.editMessageText(message, { parse_mode: 'HTML', reply_markup: keyboard });
+  } else {
+    await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
+  }
 }

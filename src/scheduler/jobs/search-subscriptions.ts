@@ -5,6 +5,7 @@ import { MatcherAgent } from '../../agents/matcher.js';
 import { sendMatchSummary } from '../../telegram/services/notification.js';
 import { logger } from '../../utils/logger.js';
 import { queueService, PRIORITY } from '../../queue/index.js';
+import { RunTracker, updateSkillStats, createMarketSnapshot } from '../../observability/index.js';
 import type { NormalizedJob, JobMatchResult } from '../../core/types.js';
 
 // Services (reuse singleton pattern)
@@ -42,6 +43,9 @@ export interface MatchItem {
 export async function runSingleSubscriptionSearch(subscriptionId: string): Promise<SingleSearchResult> {
   const db = getDb();
 
+  // Start tracking the run
+  const runId = await RunTracker.start(subscriptionId, 'manual');
+
   const sub = await db.searchSubscription.findUnique({
     where: { id: subscriptionId },
     include: {
@@ -57,6 +61,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   });
 
   if (!sub || !sub.isActive) {
+    await RunTracker.fail(runId, new Error('Subscription not found or inactive'));
     throw new Error('Subscription not found or inactive');
   }
 
@@ -75,6 +80,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
 
   logger.info('Scheduler', `[Manual] Scanning for ${userLabel}: ${sub.jobTitles.join(', ')}`);
 
+  try {
   // Collect jobs for each title using user's date preference
   type DatePostedType = 'today' | '3days' | 'week' | 'month' | 'all';
   const datePosted = (sub.datePosted || 'month') as DatePostedType;
@@ -240,6 +246,13 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     }
   }
 
+  // Update run stats mid-execution
+  await RunTracker.update(runId, {
+    jobsCollected: allRawJobs.length,
+    jobsAfterDedup: normalizedJobs.length,
+    jobsMatched: newMatches.length,
+  });
+
   let notificationsSent = 0;
 
   if (newMatches.length > 0) {
@@ -256,15 +269,40 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     notificationsSent = newMatches.length;
   }
 
+  // Collect skill data for analytics
+  const allMatchedSkills = newMatches.flatMap(m => m.match.matchedSkills ?? []);
+  const allMissingSkills = newMatches.flatMap(m => m.match.missingSkills ?? []);
+  if (allMatchedSkills.length > 0 || allMissingSkills.length > 0) {
+    await updateSkillStats(subscriptionId, allMatchedSkills, allMissingSkills);
+  }
+
+  // Create market snapshot for analytics
+  if (normalizedJobs.length > 0) {
+    await createMarketSnapshot(sub.jobTitles, sub.location, sub.isRemote, normalizedJobs);
+  }
+
   // Update last search timestamp
   await db.searchSubscription.update({
     where: { id: sub.id },
     data: { lastSearchAt: new Date() },
   });
 
+  // Complete the run tracking
+  await RunTracker.complete(runId, {
+    jobsCollected: allRawJobs.length,
+    jobsAfterDedup: normalizedJobs.length,
+    jobsMatched: newMatches.length,
+    notificationsSent,
+  });
+
   logger.info('Scheduler', `[Manual] Results: ${newMatches.length} new | ${stats.skippedAlreadySent} already sent | ${stats.skippedBelowScore} below threshold | ${stats.skippedCrossSubDuplicates} cross-sub skipped`);
 
   return { matchesFound: newMatches.length, notificationsSent, stats, jobsProcessed: normalizedJobs.length };
+
+  } catch (error) {
+    await RunTracker.fail(runId, error);
+    throw error;
+  }
 }
 
 export async function runSubscriptionSearches(): Promise<SearchResult> {
@@ -299,6 +337,9 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
   let totalNotifications = 0;
 
   for (const sub of subscriptions) {
+    // Start tracking the run for each subscription
+    const runId = await RunTracker.start(sub.id, 'scheduled');
+
     try {
       const userLabel = sub.user.username
         ? `@${sub.user.username}`
@@ -507,6 +548,7 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       logger.info('Scheduler', `  Results: ${newMatches.length} new | ${stats.skippedAlreadySent} already sent | ${stats.skippedBelowScore} below threshold | ${stats.skippedCrossSubDuplicates} cross-sub skipped`);
       totalMatchesFound += newMatches.length;
 
+      let notificationsSent = 0;
       if (newMatches.length > 0) {
         newMatches.sort((a, b) => b.match.score - a.match.score);
 
@@ -519,6 +561,7 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
             });
           }
 
+          notificationsSent = newMatches.length;
           totalNotifications += newMatches.length;
           logger.info('Scheduler', `  Sent ${newMatches.length} notifications to ${userLabel}`);
         } catch (error) {
@@ -526,12 +569,33 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         }
       }
 
+      // Collect skill data for analytics
+      const allMatchedSkills = newMatches.flatMap(m => m.match.matchedSkills ?? []);
+      const allMissingSkills = newMatches.flatMap(m => m.match.missingSkills ?? []);
+      if (allMatchedSkills.length > 0 || allMissingSkills.length > 0) {
+        await updateSkillStats(sub.id, allMatchedSkills, allMissingSkills);
+      }
+
+      // Create market snapshot for analytics
+      if (normalizedJobs.length > 0) {
+        await createMarketSnapshot(sub.jobTitles, sub.location, sub.isRemote, normalizedJobs);
+      }
+
       // Update last search timestamp
       await db.searchSubscription.update({
         where: { id: sub.id },
         data: { lastSearchAt: new Date() },
       });
+
+      // Complete the run tracking
+      await RunTracker.complete(runId, {
+        jobsCollected: allRawJobs.length,
+        jobsAfterDedup: normalizedJobs.length,
+        jobsMatched: newMatches.length,
+        notificationsSent,
+      });
     } catch (error) {
+      await RunTracker.fail(runId, error);
       logger.error(
         'Scheduler',
         `Failed to process subscription for user ${sub.user.telegramId}`,

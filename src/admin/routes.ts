@@ -1,0 +1,551 @@
+import { Router, Request, Response, NextFunction } from 'express';
+import { getDb } from '../db/client.js';
+import { config } from '../config.js';
+import { logger } from '../utils/logger.js';
+import { generateDashboardHtml } from './dashboard.js';
+
+const router = Router();
+
+// Simple in-memory rate limiter
+const rateLimiter = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT = 30; // requests per minute
+const RATE_WINDOW = 60 * 1000; // 1 minute
+
+function getRateLimitKey(req: Request): string {
+  return req.ip || req.headers['x-forwarded-for']?.toString() || 'unknown';
+}
+
+function checkRateLimit(key: string): boolean {
+  const now = Date.now();
+  const entry = rateLimiter.get(key);
+
+  if (!entry || now > entry.resetAt) {
+    rateLimiter.set(key, { count: 1, resetAt: now + RATE_WINDOW });
+    return true;
+  }
+
+  if (entry.count >= RATE_LIMIT) {
+    return false;
+  }
+
+  entry.count++;
+  return true;
+}
+
+// Cleanup old rate limit entries periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of rateLimiter.entries()) {
+    if (now > entry.resetAt) {
+      rateLimiter.delete(key);
+    }
+  }
+}, 60 * 1000);
+
+function computeStatus(isActive: boolean, isPaused: boolean): string {
+  if (!isActive) return 'inactive';
+  if (isPaused) return 'paused';
+  return 'active';
+}
+
+// Security middleware
+function requireAdminKey(req: Request, res: Response, next: NextFunction): void {
+  // Check if admin is configured
+  if (!config.ADMIN_API_KEY) {
+    logger.warn('Admin', 'Admin access attempted but ADMIN_API_KEY not configured');
+    res.status(503).json({ error: 'Admin dashboard not configured' });
+    return;
+  }
+
+  // Check rate limit
+  const rateLimitKey = getRateLimitKey(req);
+  if (!checkRateLimit(rateLimitKey)) {
+    logger.warn('Admin', `Rate limit exceeded for ${rateLimitKey}`);
+    res.status(429).json({ error: 'Too many requests. Try again later.' });
+    return;
+  }
+
+  // Validate admin key
+  const providedKey = req.header('X-Admin-Key');
+  if (providedKey !== config.ADMIN_API_KEY) {
+    logger.warn('Admin', `Invalid admin key attempt from ${rateLimitKey}`);
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  logger.debug('Admin', `Admin access granted to ${rateLimitKey}`);
+  next();
+}
+
+// Apply security middleware to all routes
+router.use(requireAdminKey);
+
+// GET /admin - HTML Dashboard
+router.get('/', async (_req: Request, res: Response) => {
+  try {
+    const html = await generateDashboardHtml();
+    res.type('html').send(html);
+  } catch (error) {
+    logger.error('Admin', 'Failed to generate dashboard', error);
+    res.status(500).json({ error: 'Failed to generate dashboard' });
+  }
+});
+
+// GET /admin/api/overview - Platform summary
+router.get('/api/overview', async (_req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const now = new Date();
+    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+    const [
+      totalUsers,
+      activeToday,
+      newThisWeek,
+      totalSubscriptions,
+      activeSubscriptions,
+      pausedSubscriptions,
+      jobsScanned24h,
+      matchesFound24h,
+      notificationsSent24h,
+      recentRuns,
+      failedRuns24h,
+    ] = await Promise.all([
+      db.telegramUser.count(),
+      db.telegramUser.count({ where: { lastActiveAt: { gte: oneDayAgo } } }),
+      db.telegramUser.count({ where: { createdAt: { gte: oneWeekAgo } } }),
+      db.searchSubscription.count(),
+      db.searchSubscription.count({ where: { isActive: true, isPaused: false } }),
+      db.searchSubscription.count({ where: { isActive: true, isPaused: true } }),
+      db.subscriptionRun.aggregate({
+        where: { startedAt: { gte: oneDayAgo } },
+        _sum: { jobsCollected: true },
+      }),
+      db.subscriptionRun.aggregate({
+        where: { startedAt: { gte: oneDayAgo } },
+        _sum: { jobsMatched: true },
+      }),
+      db.subscriptionRun.aggregate({
+        where: { startedAt: { gte: oneDayAgo } },
+        _sum: { notificationsSent: true },
+      }),
+      db.subscriptionRun.count({ where: { startedAt: { gte: oneDayAgo } } }),
+      db.subscriptionRun.count({
+        where: { startedAt: { gte: oneDayAgo }, status: 'failed' },
+      }),
+    ]);
+
+    res.json({
+      users: {
+        total: totalUsers,
+        activeToday,
+        newThisWeek,
+      },
+      subscriptions: {
+        total: totalSubscriptions,
+        active: activeSubscriptions,
+        paused: pausedSubscriptions,
+      },
+      activity24h: {
+        jobsScanned: jobsScanned24h._sum.jobsCollected ?? 0,
+        matchesFound: matchesFound24h._sum.jobsMatched ?? 0,
+        notificationsSent: notificationsSent24h._sum.notificationsSent ?? 0,
+        totalRuns: recentRuns,
+        failedRuns: failedRuns24h,
+      },
+      timestamp: now.toISOString(),
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to get overview', error);
+    res.status(500).json({ error: 'Failed to get overview' });
+  }
+});
+
+// GET /admin/api/users - All users with subscription stats
+router.get('/api/users', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const offset = (page - 1) * limit;
+
+    const [users, total] = await Promise.all([
+      db.telegramUser.findMany({
+        skip: offset,
+        take: limit,
+        orderBy: { lastActiveAt: 'desc' },
+        select: {
+          id: true,
+          telegramId: true,
+          username: true,
+          firstName: true,
+          createdAt: true,
+          lastActiveAt: true,
+          _count: {
+            select: { subscriptions: true },
+          },
+        },
+      }),
+      db.telegramUser.count(),
+    ]);
+
+    // Get subscription stats for each user
+    const usersWithStats = await Promise.all(
+      users.map(async (user) => {
+        const activeSubsCount = await db.searchSubscription.count({
+          where: { userId: user.id, isActive: true, isPaused: false },
+        });
+        return {
+          ...user,
+          telegramId: user.telegramId.toString(), // Convert BigInt to string for JSON
+          activeSubscriptions: activeSubsCount,
+        };
+      })
+    );
+
+    res.json({
+      users: usersWithStats,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to get users', error);
+    res.status(500).json({ error: 'Failed to get users' });
+  }
+});
+
+// GET /admin/api/users/:id - User detail with all subscriptions
+router.get('/api/users/:id', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const user = await db.telegramUser.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        telegramId: true,
+        username: true,
+        firstName: true,
+        createdAt: true,
+        lastActiveAt: true,
+        subscriptions: {
+          select: {
+            id: true,
+            jobTitles: true,
+            location: true,
+            isRemote: true,
+            isActive: true,
+            isPaused: true,
+            minScore: true,
+            createdAt: true,
+            nextRunAt: true,
+            _count: {
+              select: {
+                sentNotifications: true,
+              },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+      },
+    });
+
+    if (!user) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    // Convert BigInt and add computed status
+    const result = {
+      ...user,
+      telegramId: user.telegramId.toString(),
+      subscriptions: user.subscriptions.map((sub) => ({
+        ...sub,
+        status: computeStatus(sub.isActive, sub.isPaused),
+      })),
+    };
+
+    res.json(result);
+  } catch (error) {
+    logger.error('Admin', 'Failed to get user', error);
+    res.status(500).json({ error: 'Failed to get user' });
+  }
+});
+
+// GET /admin/api/subscriptions - All subscriptions with performance
+router.get('/api/subscriptions', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const offset = (page - 1) * limit;
+    const statusFilter = req.query.status as string | undefined;
+
+    // Build where clause based on status filter
+    let where = {};
+    if (statusFilter === 'active') {
+      where = { isActive: true, isPaused: false };
+    } else if (statusFilter === 'paused') {
+      where = { isActive: true, isPaused: true };
+    } else if (statusFilter === 'inactive') {
+      where = { isActive: false };
+    }
+
+    const [subscriptions, total] = await Promise.all([
+      db.searchSubscription.findMany({
+        where,
+        skip: offset,
+        take: limit,
+        orderBy: { nextRunAt: 'asc' },
+        select: {
+          id: true,
+          jobTitles: true,
+          location: true,
+          isRemote: true,
+          isActive: true,
+          isPaused: true,
+          minScore: true,
+          createdAt: true,
+          nextRunAt: true,
+          user: {
+            select: {
+              id: true,
+              username: true,
+              telegramId: true,
+            },
+          },
+          _count: {
+            select: {
+              sentNotifications: true,
+            },
+          },
+        },
+      }),
+      db.searchSubscription.count({ where }),
+    ]);
+
+    // Get recent run stats for each subscription
+    const subsWithStats = await Promise.all(
+      subscriptions.map(async (sub) => {
+        const recentRuns = await db.subscriptionRun.findMany({
+          where: { subscriptionId: sub.id },
+          orderBy: { startedAt: 'desc' },
+          take: 1,
+          select: {
+            status: true,
+            startedAt: true,
+            jobsCollected: true,
+            jobsMatched: true,
+          },
+        });
+
+        const lastRun = recentRuns[0] || null;
+        return {
+          ...sub,
+          status: computeStatus(sub.isActive, sub.isPaused),
+          user: {
+            ...sub.user,
+            telegramId: sub.user.telegramId.toString(),
+          },
+          lastRun,
+        };
+      })
+    );
+
+    res.json({
+      subscriptions: subsWithStats,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to get subscriptions', error);
+    res.status(500).json({ error: 'Failed to get subscriptions' });
+  }
+});
+
+// GET /admin/api/subscriptions/:id - Subscription detail + run history
+router.get('/api/subscriptions/:id', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const subscription = await db.searchSubscription.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        jobTitles: true,
+        location: true,
+        isRemote: true,
+        isActive: true,
+        isPaused: true,
+        minScore: true,
+        createdAt: true,
+        nextRunAt: true,
+        resumeName: true,
+        user: {
+          select: {
+            id: true,
+            username: true,
+            telegramId: true,
+          },
+        },
+        _count: {
+          select: {
+            sentNotifications: true,
+          },
+        },
+      },
+    });
+
+    if (!subscription) {
+      res.status(404).json({ error: 'Subscription not found' });
+      return;
+    }
+
+    // Get recent runs
+    const runs = await db.subscriptionRun.findMany({
+      where: { subscriptionId: req.params.id },
+      orderBy: { startedAt: 'desc' },
+      take: 20,
+      select: {
+        id: true,
+        triggerType: true,
+        status: true,
+        startedAt: true,
+        completedAt: true,
+        durationMs: true,
+        jobsCollected: true,
+        jobsAfterDedup: true,
+        jobsMatched: true,
+        notificationsSent: true,
+        errorMessage: true,
+      },
+    });
+
+    // Get skill stats
+    const skillStats = await db.skillStats.findMany({
+      where: { subscriptionId: req.params.id },
+      orderBy: { demandCount: 'desc' },
+      take: 20,
+    });
+
+    res.json({
+      ...subscription,
+      status: computeStatus(subscription.isActive, subscription.isPaused),
+      user: {
+        ...subscription.user,
+        telegramId: subscription.user.telegramId.toString(),
+      },
+      runs,
+      skillStats,
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to get subscription', error);
+    res.status(500).json({ error: 'Failed to get subscription' });
+  }
+});
+
+// GET /admin/api/runs - Execution history
+router.get('/api/runs', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
+    const offset = (page - 1) * limit;
+    const status = req.query.status as string | undefined;
+
+    const where = status ? { status } : {};
+
+    const [runs, total] = await Promise.all([
+      db.subscriptionRun.findMany({
+        where,
+        skip: offset,
+        take: limit,
+        orderBy: { startedAt: 'desc' },
+        select: {
+          id: true,
+          triggerType: true,
+          status: true,
+          startedAt: true,
+          completedAt: true,
+          durationMs: true,
+          jobsCollected: true,
+          jobsAfterDedup: true,
+          jobsMatched: true,
+          notificationsSent: true,
+          errorMessage: true,
+          subscription: {
+            select: {
+              id: true,
+              jobTitles: true,
+              user: {
+                select: {
+                  username: true,
+                },
+              },
+            },
+          },
+        },
+      }),
+      db.subscriptionRun.count({ where }),
+    ]);
+
+    res.json({
+      runs,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to get runs', error);
+    res.status(500).json({ error: 'Failed to get runs' });
+  }
+});
+
+// GET /admin/api/errors - Recent failures
+router.get('/api/errors', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
+
+    const errors = await db.subscriptionRun.findMany({
+      where: { status: 'failed' },
+      orderBy: { startedAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        triggerType: true,
+        startedAt: true,
+        errorMessage: true,
+        errorStack: true,
+        subscription: {
+          select: {
+            id: true,
+            jobTitles: true,
+            user: {
+              select: {
+                username: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    res.json({ errors });
+  } catch (error) {
+    logger.error('Admin', 'Failed to get errors', error);
+    res.status(500).json({ error: 'Failed to get errors' });
+  }
+});
+
+export { router as adminRouter };

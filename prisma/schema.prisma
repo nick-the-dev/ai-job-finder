@@ -199,6 +199,10 @@ model SearchSubscription {
   // Track sent notifications
   sentNotifications SentNotification[]
 
+  // Observability relations
+  runs        SubscriptionRun[]
+  skillStats  SkillStats[]
+
   @@map("search_subscriptions")
 }
 
@@ -223,4 +227,78 @@ model DownloadToken {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@map("download_tokens")
+}
+
+// ============================================================
+// OBSERVABILITY MODELS
+// ============================================================
+
+// Track each subscription execution (scheduled or manual)
+model SubscriptionRun {
+  id              String   @id @default(uuid())
+  subscriptionId  String   @map("subscription_id")
+  subscription    SearchSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  triggerType     String   @map("trigger_type")  // "scheduled" | "manual"
+  status          String   // "running" | "completed" | "failed"
+
+  startedAt       DateTime @default(now()) @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  durationMs      Int?     @map("duration_ms")
+
+  // Metrics
+  jobsCollected     Int    @default(0) @map("jobs_collected")
+  jobsAfterDedup    Int    @default(0) @map("jobs_after_dedup")
+  jobsMatched       Int    @default(0) @map("jobs_matched")
+  notificationsSent Int    @default(0) @map("notifications_sent")
+
+  // Error tracking
+  errorMessage    String?  @map("error_message")
+  errorStack      String?  @map("error_stack")
+
+  @@index([subscriptionId, startedAt])
+  @@index([status])
+  @@index([startedAt])
+  @@map("subscription_runs")
+}
+
+// Aggregate skill data for insights (updated per search)
+model SkillStats {
+  id              String   @id @default(uuid())
+  subscriptionId  String   @map("subscription_id")
+  subscription    SearchSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  skill           String
+  matchedCount    Int      @default(0) @map("matched_count")   // Times this skill matched
+  missingCount    Int      @default(0) @map("missing_count")   // Times this skill was missing
+  demandCount     Int      @default(0) @map("demand_count")    // Times seen in job requirements
+
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([subscriptionId, skill])
+  @@index([subscriptionId])
+  @@map("skill_stats")
+}
+
+// Market data snapshots (aggregated daily)
+model MarketSnapshot {
+  id              String   @id @default(uuid())
+  date            DateTime @default(now())
+
+  // Query context
+  jobTitles       String[] @map("job_titles")
+  location        String?
+  isRemote        Boolean  @map("is_remote")
+
+  // Aggregated data
+  totalJobs       Int      @map("total_jobs")
+  avgSalaryMin    Int?     @map("avg_salary_min")
+  avgSalaryMax    Int?     @map("avg_salary_max")
+  remoteCount     Int      @map("remote_count")
+  topCompanies    Json     @map("top_companies")    // [{company, count}]
+  topSkills       Json     @map("top_skills")       // [{skill, count}]
+  topLocations    Json     @map("top_locations")    // [{location, count}]
+
+  @@index([date])
+  @@map("market_snapshots")
 }
