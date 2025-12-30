@@ -38,11 +38,12 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
   // Use normalized locations if available
   if (normalizedLocations && normalizedLocations.length > 0) {
     const physicalLocations = LocationNormalizerAgent.getPhysicalLocations(normalizedLocations);
-    const hasRemote = LocationNormalizerAgent.hasRemote(normalizedLocations);
+    const hasWorldwideRemote = LocationNormalizerAgent.hasWorldwideRemote(normalizedLocations);
+    const countrySpecificRemote = LocationNormalizerAgent.getCountrySpecificRemote(normalizedLocations);
 
     for (const title of jobTitles) {
-      // Search for remote jobs if user wants remote
-      if (hasRemote) {
+      // Search for worldwide remote jobs (no location filter)
+      if (hasWorldwideRemote) {
         try {
           logger.info('Scheduler', `  Collecting remote jobs for: "${title}"`);
           const jobs = await queueService.enqueueCollection({
@@ -57,6 +58,31 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
           allRawJobs.push(...jobs);
         } catch (error) {
           logger.error('Scheduler', `  Failed to collect remote jobs for "${title}"`, error);
+        }
+      }
+
+      // Search for country-specific remote jobs (e.g., "Remote in Canada")
+      for (const loc of countrySpecificRemote) {
+        const variants = loc.searchVariants.slice(0, 2);
+        if (variants.length === 0) variants.push(loc.country);
+
+        for (const variant of variants) {
+          try {
+            logger.info('Scheduler', `  Collecting remote jobs for: "${title}" in "${variant}"`);
+            const jobs = await queueService.enqueueCollection({
+              query: title,
+              location: variant,
+              isRemote: true, // Remote jobs within this country
+              limit,
+              source: 'jobspy',
+              skipCache,
+              datePosted: datePosted === 'all' ? undefined : datePosted,
+            }, priority);
+            logger.info('Scheduler', `  Found ${jobs.length} remote jobs for "${title}" in "${variant}"`);
+            allRawJobs.push(...jobs);
+          } catch (error) {
+            logger.error('Scheduler', `  Failed to collect remote jobs for "${title}" in "${variant}"`, error);
+          }
         }
       }
 

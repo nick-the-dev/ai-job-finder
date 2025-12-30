@@ -53,20 +53,23 @@ Each location object must have:
 
 RULES:
 1. Parse multiple locations from comma-separated, "and", or "or" delimited input
-2. "Remote", "remote only", "work from home", "WFH" → type: "remote" with display: "Remote" and country: "Worldwide"
-3. When user says "X or Remote", parse as TWO separate locations (one physical, one remote)
-4. Include useful searchVariants for job board compatibility:
+2. "Remote", "remote only", "work from home", "WFH" (with no country context) → type: "remote" with display: "Remote" and country: "Worldwide"
+3. "Remote in [country]", "Remote [country]", "[country] remote" → type: "remote" with country set to that country (NOT "Worldwide")
+   - This means the user wants remote jobs from/in that specific country
+   - Example: "Remote in Canada" → type: "remote", country: "Canada", display: "Canada (Remote)"
+4. When user says "X or Remote", parse as TWO separate locations (one physical, one remote)
+5. Include useful searchVariants for job board compatibility:
    - "NYC" → searchVariants: ["New York", "NYC", "New York City", "Manhattan"]
    - "SF" → searchVariants: ["San Francisco", "SF", "Bay Area"]
    - "USA" → searchVariants: ["United States", "USA", "US"]
-5. For ambiguous locations (like "Springfield" which exists in 30+ US states), set needsClarification with:
+6. For ambiguous locations (like "Springfield" which exists in 30+ US states), set needsClarification with:
    - question: a clear question asking for clarification
    - options: array of 3-5 most likely options (most populous first)
    - Still return an empty locations array when clarification is needed
-6. For country-wide searches, omit city/state and use country name for searchVariants
-7. For "anywhere", "worldwide", "skip", "any" → return empty locations array (no location filter)
-8. If input seems like a real location but you're not 100% sure it exists, parse it anyway - job boards will handle invalid locations gracefully
-9. IMPORTANT: If input mentions BOTH generic "remote" AND country-specific remote (e.g., "Remote... USA remote"), ask for clarification:
+7. For country-wide searches, omit city/state and use country name for searchVariants
+8. For "anywhere", "worldwide", "skip", "any" → return empty locations array (no location filter)
+9. If input seems like a real location but you're not 100% sure it exists, parse it anyway - job boards will handle invalid locations gracefully
+10. IMPORTANT: If input mentions BOTH generic "remote" AND country-specific remote (e.g., "Remote... USA remote"), ask for clarification:
    - User might want: global remote + on-site locations
    - Or: ONLY country-specific remote + on-site (no global remote)
    - Or: All three options (global remote + country-specific remote + on-site)
@@ -107,6 +110,22 @@ Input: "anywhere"
 Output:
 {
   "locations": []
+}
+
+Input: "Remote in Canada"
+Output:
+{
+  "locations": [
+    { "raw": "Remote in Canada", "display": "Canada (Remote)", "country": "Canada", "searchVariants": ["Canada", "CA"], "type": "remote" }
+  ]
+}
+
+Input: "USA remote"
+Output:
+{
+  "locations": [
+    { "raw": "USA remote", "display": "USA (Remote)", "country": "USA", "searchVariants": ["United States", "USA", "US"], "type": "remote" }
+  ]
 }
 
 Input: "Canada or remote"
@@ -191,7 +210,8 @@ Output:
       return 'Anywhere';
     }
 
-    const remoteLocations = locations.filter(l => l.type === 'remote');
+    const worldwideRemote = locations.filter(l => l.type === 'remote' && l.country === 'Worldwide');
+    const countrySpecificRemote = locations.filter(l => l.type === 'remote' && l.country !== 'Worldwide');
     const physicalLocations = locations.filter(l => l.type === 'physical');
 
     const parts: string[] = [];
@@ -200,7 +220,13 @@ Output:
       parts.push(loc.display);
     }
 
-    if (remoteLocations.length > 0) {
+    // Show country-specific remote with the display name (e.g., "Canada (Remote)")
+    for (const loc of countrySpecificRemote) {
+      parts.push(loc.display);
+    }
+
+    // Show worldwide remote as just "Remote"
+    if (worldwideRemote.length > 0) {
       parts.push('Remote');
     }
 
@@ -215,7 +241,8 @@ Output:
       return 'Anywhere';
     }
 
-    const remoteLocations = locations.filter(l => l.type === 'remote');
+    const worldwideRemote = locations.filter(l => l.type === 'remote' && l.country === 'Worldwide');
+    const countrySpecificRemote = locations.filter(l => l.type === 'remote' && l.country !== 'Worldwide');
     const physicalLocations = locations.filter(l => l.type === 'physical');
 
     const parts: string[] = [];
@@ -224,7 +251,13 @@ Output:
       parts.push(loc.display);
     }
 
-    if (remoteLocations.length > 0) {
+    // Show country-specific remote with the display name (e.g., "Canada (Remote)")
+    for (const loc of countrySpecificRemote) {
+      parts.push(loc.display);
+    }
+
+    // Show worldwide remote as just "Remote"
+    if (worldwideRemote.length > 0) {
       parts.push('Remote');
     }
 
@@ -236,10 +269,25 @@ Output:
   }
 
   /**
-   * Check if any location is remote
+   * Check if any location is worldwide remote (not country-specific)
+   */
+  static hasWorldwideRemote(locations: NormalizedLocation[]): boolean {
+    return locations.some(l => l.type === 'remote' && l.country === 'Worldwide');
+  }
+
+  /**
+   * Check if any location is remote (worldwide or country-specific)
    */
   static hasRemote(locations: NormalizedLocation[]): boolean {
     return locations.some(l => l.type === 'remote');
+  }
+
+  /**
+   * Get country-specific remote locations (e.g., "Remote in Canada")
+   * These need to be searched WITH the country + isRemote: true
+   */
+  static getCountrySpecificRemote(locations: NormalizedLocation[]): NormalizedLocation[] {
+    return locations.filter(l => l.type === 'remote' && l.country !== 'Worldwide');
   }
 
   /**
@@ -258,19 +306,37 @@ Output:
       return true;
     }
 
-    // Remote jobs match if we have a remote location in the list
-    if (job.isRemote && LocationNormalizerAgent.hasRemote(locations)) {
+    const jobLocationLower = (job.location || '').toLowerCase();
+
+    // Worldwide remote jobs match any remote in our list
+    if (job.isRemote && LocationNormalizerAgent.hasWorldwideRemote(locations)) {
       return true;
+    }
+
+    // Check country-specific remote (e.g., "Remote in Canada")
+    const countrySpecificRemote = LocationNormalizerAgent.getCountrySpecificRemote(locations);
+    if (job.isRemote && countrySpecificRemote.length > 0) {
+      // Job must be remote AND in one of the specified countries
+      for (const loc of countrySpecificRemote) {
+        for (const variant of loc.searchVariants) {
+          if (jobLocationLower.includes(variant.toLowerCase())) {
+            return true;
+          }
+        }
+        // Also check country name directly
+        if (jobLocationLower.includes(loc.country.toLowerCase())) {
+          return true;
+        }
+      }
     }
 
     // Check physical locations
     const physicalLocations = LocationNormalizerAgent.getPhysicalLocations(locations);
-    if (physicalLocations.length === 0) {
-      // Only remote locations in list, no match for non-remote job
+    if (physicalLocations.length === 0 && countrySpecificRemote.length === 0) {
+      // Only worldwide remote in list, no match for non-remote job
       return job.isRemote === true;
     }
 
-    const jobLocationLower = (job.location || '').toLowerCase();
     if (!jobLocationLower) {
       // Job has no location, only match if we have remote in our list
       return LocationNormalizerAgent.hasRemote(locations);
