@@ -25,6 +25,7 @@ interface UserRow {
 interface SubscriptionRow {
   id: string;
   jobTitles: string[];
+  location: string | null;
   status: string;
   username: string | null;
   notificationCount: number;
@@ -146,6 +147,7 @@ async function getSubscriptionsData(): Promise<SubscriptionRow[]> {
     select: {
       id: true,
       jobTitles: true,
+      location: true,
       isActive: true,
       isPaused: true,
       nextRunAt: true,
@@ -164,6 +166,7 @@ async function getSubscriptionsData(): Promise<SubscriptionRow[]> {
       return {
         id: s.id,
         jobTitles: s.jobTitles,
+        location: s.location,
         status: computeStatus(s.isActive, s.isPaused),
         username: s.user.username,
         notificationCount: s._count.sentNotifications,
@@ -420,6 +423,7 @@ export async function generateDashboardHtml(): Promise<string> {
           <tr>
             <th>User</th>
             <th>Job Titles</th>
+            <th>Location</th>
             <th>Status</th>
             <th>Notifications</th>
             <th>Last Run</th>
@@ -433,6 +437,7 @@ export async function generateDashboardHtml(): Promise<string> {
             <tr>
               <td>${escapeHtml(s.username) || '<em>No username</em>'}</td>
               <td class="truncate" title="${escapeHtml(s.jobTitles.join(', '))}">${escapeHtml(s.jobTitles.slice(0, 2).join(', '))}${s.jobTitles.length > 2 ? '...' : ''}</td>
+              <td class="truncate" title="${escapeHtml(s.location)}">${escapeHtml(s.location) || '<em>Any</em>'}</td>
               <td>${statusBadge(s.status)}</td>
               <td>${s.notificationCount}</td>
               <td>${s.lastRunStatus ? statusBadge(s.lastRunStatus) : '-'} ${formatTimeAgo(s.lastRunAt)}</td>
