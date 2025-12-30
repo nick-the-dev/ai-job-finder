@@ -73,8 +73,16 @@ export class QueueService {
       }
     );
 
-    const result = await waitWithTimeout<RawJob[]>(job, COLLECTION_TIMEOUT);
-    return result;
+    try {
+      const result = await waitWithTimeout<RawJob[]>(job, COLLECTION_TIMEOUT);
+      return result;
+    } catch (error) {
+      // Log timeout errors with context for debugging
+      if (error instanceof Error && error.message.includes('timed out')) {
+        logger.error('QueueService', `[${requestId}] Collection timed out for "${params.query}" (location: ${params.location || 'any'})`, error);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -132,7 +140,15 @@ export class QueueService {
       timeout: MATCHING_TIMEOUT, // Bull job timeout
     });
 
-    return await waitWithTimeout(queueJob, MATCHING_TIMEOUT);
+    try {
+      return await waitWithTimeout(queueJob, MATCHING_TIMEOUT);
+    } catch (error) {
+      // Log timeout errors with context for debugging
+      if (error instanceof Error && error.message.includes('timed out')) {
+        logger.error('QueueService', `[${requestId}] Matching timed out for job: "${job.title}" at ${job.company}`, error);
+      }
+      throw error;
+    }
   }
 
   /**
