@@ -91,7 +91,7 @@ Ready to get started?
     });
 
     await ctx.reply(
-      '<b>Step 1/8: Job Titles</b>\n\n' +
+      '<b>Step 1/9: Job Titles</b>\n\n' +
         'What job titles are you looking for?\n\n' +
         'Send a comma-separated list, e.g.:\n' +
         '<i>"Backend Engineer, Senior Developer, DevOps"</i>',
@@ -739,7 +739,7 @@ Ready to get started?
 
     await ctx.answerCallbackQuery();
     await ctx.editMessageText(
-      '<b>Step 1/8: Job Titles</b>\n\n' +
+      '<b>Step 1/9: Job Titles</b>\n\n' +
         'What job titles are you looking for?\n\n' +
         'Send a comma-separated list, e.g.:\n' +
         '<i>"Backend Engineer, Senior Developer, DevOps"</i>',
