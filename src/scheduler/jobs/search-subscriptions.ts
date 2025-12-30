@@ -6,7 +6,7 @@ import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
 import { sendMatchSummary } from '../../telegram/services/notification.js';
 import { logger } from '../../utils/logger.js';
 import { queueService, PRIORITY, type Priority } from '../../queue/index.js';
-import { RunTracker, updateSkillStats, createMarketSnapshot } from '../../observability/index.js';
+import { RunTracker, updateSkillStats, createMarketSnapshot, type ErrorContext } from '../../observability/index.js';
 import type { NormalizedJob, JobMatchResult, RawJob } from '../../core/types.js';
 import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
 
@@ -219,12 +219,22 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
 
   logger.info('Scheduler', `[Manual] Scanning for ${userLabel}: ${sub.jobTitles.join(', ')}`);
 
+  // Track current context for error reporting
+  let errorContext: ErrorContext = {
+    stage: 'collection',
+    partialResults: { jobsCollected: 0, jobsNormalized: 0, jobsMatched: 0 },
+  };
+
   try {
   // Parse normalized locations from JSON field
   const normalizedLocations = sub.normalizedLocations as NormalizedLocation[] | null;
   const datePosted = (sub.datePosted || 'month') as DatePostedType;
 
-  // Collect jobs using multi-location aware helper
+  // Stage 1: Collection
+  errorContext.stage = 'collection';
+  errorContext.query = sub.jobTitles.join(', ');
+  errorContext.location = sub.location ?? (normalizedLocations ? LocationNormalizerAgent.formatForDisplaySingleLine(normalizedLocations) : undefined);
+
   const allRawJobs = await collectJobsForSubscription({
     jobTitles: sub.jobTitles,
     normalizedLocations,
@@ -236,10 +246,13 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     priority: PRIORITY.MANUAL_SCAN,
   });
 
+  errorContext.partialResults!.jobsCollected = allRawJobs.length;
   logger.info('Scheduler', `[Manual] Total raw jobs collected: ${allRawJobs.length}`);
 
-  // Normalize and dedupe
+  // Stage 2: Normalization
+  errorContext.stage = 'normalization';
   let normalizedJobs = await normalizer.execute(allRawJobs);
+  errorContext.partialResults!.jobsNormalized = normalizedJobs.length;
   logger.info('Scheduler', `[Manual] After dedup: ${normalizedJobs.length} unique jobs`);
 
   // Apply exclusion filters
@@ -268,11 +281,16 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     logger.info('Scheduler', `[Manual] Filtered ${locationFiltered} jobs by location`);
   }
 
-  // Match jobs and track stats
+  // Stage 3: Matching
+  errorContext.stage = 'matching';
   const newMatches: MatchItem[] = [];
   const stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 };
 
   for (const job of normalizedJobs) {
+    // Update context for each job being matched
+    errorContext.jobTitle = job.title;
+    errorContext.company = job.company;
+
     try {
       const existingJob = await db.job.findUnique({
         where: { contentHash: job.contentHash },
@@ -355,10 +373,15 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
       if (isPreviouslyMatched) stats.previouslyMatchedOther++;
 
       newMatches.push({ job, match: matchResult, matchId: jobMatchId, isPreviouslyMatched });
+      errorContext.partialResults!.jobsMatched = newMatches.length;
     } catch (error) {
       logger.error('Scheduler', `[Manual] Failed to process job: ${job.title}`, error);
     }
   }
+
+  // Clear job-specific context after matching loop
+  delete errorContext.jobTitle;
+  delete errorContext.company;
 
   // Update run stats mid-execution
   await RunTracker.update(runId, {
@@ -370,6 +393,8 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   let notificationsSent = 0;
 
   if (newMatches.length > 0) {
+    // Stage 4: Notification
+    errorContext.stage = 'notification';
     newMatches.sort((a, b) => b.match.score - a.match.score);
 
     await sendMatchSummary(sub.user.chatId, newMatches, stats);
@@ -417,7 +442,17 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   return { matchesFound: newMatches.length, notificationsSent, stats, jobsProcessed: normalizedJobs.length };
 
   } catch (error) {
-    await RunTracker.fail(runId, error);
+    // Capture additional debug info before failing
+    errorContext.subscriptionId = subscriptionId;
+    errorContext.userId = sub.userId;
+    errorContext.username = sub.user.username ?? undefined;
+    errorContext.jobTitles = sub.jobTitles;
+    errorContext.minScore = sub.minScore;
+    errorContext.datePosted = sub.datePosted;
+    errorContext.triggerType = 'manual';
+    errorContext.timestamp = new Date().toISOString();
+
+    await RunTracker.fail(runId, error, errorContext);
     throw error;
   }
 }
@@ -457,6 +492,17 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
     // Start tracking the run for each subscription
     const runId = await RunTracker.start(sub.id, 'scheduled');
 
+    // Track context for error reporting
+    const errorContext: ErrorContext = {
+      stage: 'collection',
+      subscriptionId: sub.id,
+      userId: sub.userId,
+      username: sub.user.username ?? undefined,
+      jobTitles: sub.jobTitles,
+      triggerType: 'scheduled',
+      partialResults: { jobsCollected: 0, jobsNormalized: 0, jobsMatched: 0 },
+    };
+
     try {
       const userLabel = sub.user.username
         ? `@${sub.user.username}`
@@ -477,7 +523,14 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       const normalizedLocations = sub.normalizedLocations as NormalizedLocation[] | null;
       const datePosted = (sub.datePosted || 'month') as DatePostedType;
 
-      // Step 1: Collect jobs using multi-location aware helper
+      // Update context with location info
+      errorContext.query = sub.jobTitles.join(', ');
+      errorContext.location = sub.location ?? (normalizedLocations ? LocationNormalizerAgent.formatForDisplaySingleLine(normalizedLocations) : undefined);
+      errorContext.minScore = sub.minScore;
+      errorContext.datePosted = sub.datePosted;
+
+      // Stage 1: Collection
+      errorContext.stage = 'collection';
       const allRawJobs = await collectJobsForSubscription({
         jobTitles: sub.jobTitles,
         normalizedLocations,
@@ -489,10 +542,13 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         priority: PRIORITY.SCHEDULED,
       });
 
+      errorContext.partialResults!.jobsCollected = allRawJobs.length;
       logger.info('Scheduler', `  Total collected: ${allRawJobs.length} raw jobs`);
 
-      // Step 2: Normalize and dedupe
+      // Stage 2: Normalization
+      errorContext.stage = 'normalization';
       let normalizedJobs = await normalizer.execute(allRawJobs);
+      errorContext.partialResults!.jobsNormalized = normalizedJobs.length;
       logger.debug('Scheduler', `  ${normalizedJobs.length} unique jobs after dedup`);
 
       // Step 2.5: Apply exclusion filters
@@ -532,11 +588,15 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         logger.info('Scheduler', `  Filtered ${locationFiltered} jobs by location`);
       }
 
-      // Step 3: Match jobs and track stats
+      // Stage 3: Matching
+      errorContext.stage = 'matching';
       const newMatches: MatchItem[] = [];
       const stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 };
 
       for (const job of normalizedJobs) {
+        errorContext.jobTitle = job.title;
+        errorContext.company = job.company;
+
         try {
           // Check for existing match in DB
           const existingJob = await db.job.findUnique({
@@ -632,16 +692,23 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
           if (isPreviouslyMatched) stats.previouslyMatchedOther++;
 
           newMatches.push({ job, match: matchResult, matchId: jobMatchId, isPreviouslyMatched });
+          errorContext.partialResults!.jobsMatched = newMatches.length;
         } catch (error) {
           logger.error('Scheduler', `  Failed to process job: ${job.title}`, error);
         }
       }
+
+      // Clear job-specific context after matching loop
+      delete errorContext.jobTitle;
+      delete errorContext.company;
 
       logger.info('Scheduler', `  Results: ${newMatches.length} new | ${stats.skippedAlreadySent} already sent | ${stats.skippedBelowScore} below threshold | ${stats.skippedCrossSubDuplicates} cross-sub skipped`);
       totalMatchesFound += newMatches.length;
 
       let notificationsSent = 0;
       if (newMatches.length > 0) {
+        // Stage 4: Notification
+        errorContext.stage = 'notification';
         newMatches.sort((a, b) => b.match.score - a.match.score);
 
         try {
@@ -690,7 +757,8 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         notificationsSent,
       });
     } catch (error) {
-      await RunTracker.fail(runId, error);
+      errorContext.timestamp = new Date().toISOString();
+      await RunTracker.fail(runId, error, errorContext);
       logger.error(
         'Scheduler',
         `Failed to process subscription for user ${sub.user.telegramId}`,

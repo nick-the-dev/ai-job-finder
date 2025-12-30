@@ -256,6 +256,8 @@ model SubscriptionRun {
   // Error tracking
   errorMessage    String?  @map("error_message")
   errorStack      String?  @map("error_stack")
+  failedStage     String?  @map("failed_stage")  // "collection" | "normalization" | "matching" | "notification"
+  errorContext    Json?    @map("error_context") // Structured debug info: {query, location, partialResults, etc.}
 
   @@index([subscriptionId, startedAt])
   @@index([status])

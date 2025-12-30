@@ -1,5 +1,5 @@
 // Observability module exports
-export { RunTracker, type TriggerType, type RunStatus, type RunStats } from './tracker.js';
+export { RunTracker, type TriggerType, type RunStatus, type RunStats, type FailedStage, type ErrorContext } from './tracker.js';
 export {
   updateSkillStats,
   createMarketSnapshot,

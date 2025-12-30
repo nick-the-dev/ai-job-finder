@@ -11,6 +11,25 @@ export interface RunStats {
   notificationsSent?: number;
 }
 
+export type FailedStage = 'collection' | 'normalization' | 'matching' | 'notification';
+
+export interface ErrorContext {
+  stage: FailedStage;
+  query?: string;           // Which job title was being searched
+  location?: string;        // Which location was being searched
+  jobTitle?: string;        // Which job was being processed (for matching)
+  company?: string;         // Which company (for matching)
+  partialResults?: {        // What we got before failure
+    jobsCollected?: number;
+    jobsNormalized?: number;
+    jobsMatched?: number;
+  };
+  queueJobId?: string;      // Bull queue job ID
+  requestId?: string;       // Request correlation ID
+  retryAttempt?: number;    // Which attempt this was
+  [key: string]: unknown;   // Allow additional context
+}
+
 /**
  * Tracks subscription run execution for observability
  */
@@ -86,9 +105,9 @@ export class RunTracker {
   }
 
   /**
-   * Mark run as failed with error details
+   * Mark run as failed with error details and context
    */
-  static async fail(runId: string, error: unknown): Promise<void> {
+  static async fail(runId: string, error: unknown, context?: ErrorContext): Promise<void> {
     const db = getDb();
 
     const run = await db.subscriptionRun.findUnique({
@@ -114,10 +133,16 @@ export class RunTracker {
         durationMs,
         errorMessage,
         errorStack,
+        failedStage: context?.stage,
+        errorContext: context ? JSON.parse(JSON.stringify(context)) : undefined,
       },
     });
 
-    logger.debug('RunTracker', `Failed run ${runId} after ${durationMs}ms: ${errorMessage}`);
+    // Log with context for immediate visibility
+    const contextStr = context
+      ? ` [stage: ${context.stage}${context.query ? `, query: "${context.query}"` : ''}${context.location ? `, location: "${context.location}"` : ''}]`
+      : '';
+    logger.error('RunTracker', `Failed run ${runId} after ${durationMs}ms${contextStr}: ${errorMessage}`);
   }
 
   /**
