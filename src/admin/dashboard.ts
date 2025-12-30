@@ -42,6 +42,12 @@ interface RecentRun {
   startedAt: Date;
   durationMs: number | null;
   jobsMatched: number;
+  jobsCollected: number;
+  notificationsSent: number;
+  // Error details for failed runs
+  failedStage: string | null;
+  errorMessage: string | null;
+  errorContext: Record<string, unknown> | null;
 }
 
 function computeStatus(isActive: boolean, isPaused: boolean): string {
@@ -180,14 +186,19 @@ async function getSubscriptionsData(): Promise<SubscriptionRow[]> {
 async function getRecentRuns(): Promise<RecentRun[]> {
   const db = getDb();
   const runs = await db.subscriptionRun.findMany({
-    take: 20,
+    take: 50,
     orderBy: { startedAt: 'desc' },
     select: {
       id: true,
       status: true,
       startedAt: true,
       durationMs: true,
+      jobsCollected: true,
       jobsMatched: true,
+      notificationsSent: true,
+      failedStage: true,
+      errorMessage: true,
+      errorContext: true,
       subscription: {
         select: {
           jobTitles: true,
@@ -204,7 +215,12 @@ async function getRecentRuns(): Promise<RecentRun[]> {
     status: r.status,
     startedAt: r.startedAt,
     durationMs: r.durationMs,
+    jobsCollected: r.jobsCollected,
     jobsMatched: r.jobsMatched,
+    notificationsSent: r.notificationsSent,
+    failedStage: r.failedStage,
+    errorMessage: r.errorMessage,
+    errorContext: r.errorContext as Record<string, unknown> | null,
   }));
 }
 
@@ -347,6 +363,17 @@ export async function generateDashboardHtml(): Promise<string> {
       color: #64748b;
       margin-top: 10px;
     }
+
+    .failed-row:hover { background: #2d1b1b !important; }
+    .failed-row td:first-child::before {
+      content: '▶ ';
+      color: #64748b;
+      font-size: 10px;
+    }
+    .failed-row.expanded td:first-child::before {
+      content: '▼ ';
+    }
+    .error-details:hover { background: transparent !important; }
   </style>
 </head>
 <body>
@@ -456,7 +483,9 @@ export async function generateDashboardHtml(): Promise<string> {
             <th>User</th>
             <th>Subscription</th>
             <th>Status</th>
+            <th>Collected</th>
             <th>Matches</th>
+            <th>Sent</th>
             <th>Duration</th>
             <th>Time</th>
           </tr>
@@ -464,15 +493,46 @@ export async function generateDashboardHtml(): Promise<string> {
         <tbody>
           ${recentRuns
             .map(
-              (r) => `
-            <tr>
+              (r, i) => `
+            <tr class="${r.status === 'failed' ? 'failed-row' : ''}" ${r.status === 'failed' ? `onclick="toggleError(${i})"` : ''} style="${r.status === 'failed' ? 'cursor:pointer' : ''}">
               <td>${escapeHtml(r.username) || '<em>No username</em>'}</td>
               <td class="truncate" title="${escapeHtml(r.subJobTitles.join(', '))}">${escapeHtml(r.subJobTitles.slice(0, 2).join(', '))}${r.subJobTitles.length > 2 ? '...' : ''}</td>
-              <td>${statusBadge(r.status)}</td>
+              <td>${statusBadge(r.status)}${r.failedStage ? ` <span style="color:#94a3b8;font-size:11px">@ ${escapeHtml(r.failedStage)}</span>` : ''}</td>
+              <td>${r.jobsCollected}</td>
               <td>${r.jobsMatched}</td>
+              <td>${r.notificationsSent}</td>
               <td>${r.durationMs ? `${(r.durationMs / 1000).toFixed(1)}s` : '-'}</td>
               <td>${formatTimeAgo(r.startedAt)}</td>
             </tr>
+            ${r.status === 'failed' ? `
+            <tr id="error-${i}" class="error-details" style="display:none">
+              <td colspan="8" style="background:#1a1a2e;padding:15px">
+                <div style="color:#ef4444;font-weight:500;margin-bottom:8px">Error: ${escapeHtml(r.errorMessage)}</div>
+                ${r.errorContext ? `
+                <div style="font-size:12px;color:#94a3b8">
+                  <div style="margin-bottom:10px">
+                    <strong>Stage:</strong> ${escapeHtml(r.failedStage)} |
+                    <strong>Query:</strong> ${escapeHtml((r.errorContext.query as string) || '-')} |
+                    <strong>Location:</strong> ${escapeHtml((r.errorContext.location as string) || '-')}
+                  </div>
+                  ${r.errorContext.partialResults ? `
+                  <div style="margin-bottom:10px">
+                    <strong>Progress before failure:</strong>
+                    ${(r.errorContext.partialResults as Record<string, number>).jobsCollected ?? 0} collected,
+                    ${(r.errorContext.partialResults as Record<string, number>).jobsNormalized ?? 0} normalized,
+                    ${(r.errorContext.partialResults as Record<string, number>).jobsMatched ?? 0} matched
+                  </div>
+                  ` : ''}
+                  ${r.errorContext.jobTitle ? `<div><strong>Failed on job:</strong> ${escapeHtml((r.errorContext.jobTitle as string))} at ${escapeHtml((r.errorContext.company as string) || '-')}</div>` : ''}
+                  <details style="margin-top:10px">
+                    <summary style="cursor:pointer;color:#64748b">Full context (JSON)</summary>
+                    <pre style="background:#0f172a;padding:10px;border-radius:4px;margin-top:5px;overflow-x:auto;font-size:11px;max-height:200px;overflow-y:auto">${escapeHtml(JSON.stringify(r.errorContext, null, 2))}</pre>
+                  </details>
+                </div>
+                ` : '<div style="color:#64748b;font-size:12px">No additional context available</div>'}
+              </td>
+            </tr>
+            ` : ''}
           `
             )
             .join('')}
@@ -489,6 +549,18 @@ export async function generateDashboardHtml(): Promise<string> {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       document.getElementById(name).classList.add('active');
       document.querySelector('[onclick="showSection(\\'' + name + '\\')"]').classList.add('active');
+    }
+
+    function toggleError(index) {
+      const errorRow = document.getElementById('error-' + index);
+      const parentRow = errorRow.previousElementSibling;
+      if (errorRow.style.display === 'none') {
+        errorRow.style.display = 'table-row';
+        parentRow.classList.add('expanded');
+      } else {
+        errorRow.style.display = 'none';
+        parentRow.classList.remove('expanded');
+      }
     }
   </script>
 </body>
