@@ -258,7 +258,7 @@ QUEUE_LLM_CONCURRENCY=5         # Max concurrent LLM calls
 QUEUE_FALLBACK_ENABLED=true     # Fallback to in-process p-limit if Redis unavailable
 
 # Scheduling
-SUBSCRIPTION_INTERVAL_HOURS=2   # Hours between subscription runs
+SUBSCRIPTION_INTERVAL_HOURS=1   # Hours between subscription runs
 
 # Server
 PORT=3001
