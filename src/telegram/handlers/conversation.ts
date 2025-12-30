@@ -5,11 +5,15 @@ import type { BotContext } from '../bot.js';
 import { getDb } from '../../db/client.js';
 import { logger } from '../../utils/logger.js';
 import { runSingleSubscriptionSearch } from '../../scheduler/jobs/search-subscriptions.js';
+import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
+import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
 
 interface ConversationData {
   jobTitles?: string[];
-  location?: string;
-  isRemote?: boolean;
+  location?: string;              // DEPRECATED: kept for backwards compatibility
+  isRemote?: boolean;             // DEPRECATED: kept for backwards compatibility
+  normalizedLocations?: NormalizedLocation[];  // New structured locations
+  pendingLocationText?: string;   // User's location input awaiting confirmation
   resumeText?: string;
   resumeName?: string;
   minScore?: number;
@@ -40,7 +44,194 @@ function getResumeHash(text: string): string {
   return crypto.createHash('sha256').update(text).digest('hex').substring(0, 16);
 }
 
+/**
+ * Show location confirmation message with parsed locations
+ */
+async function showLocationConfirmation(
+  ctx: BotContext,
+  db: ReturnType<typeof getDb>,
+  data: ConversationData,
+  locations: NormalizedLocation[]
+): Promise<void> {
+  if (!ctx.telegramUser) return;
+
+  // Format locations for display
+  let locationDisplay: string;
+  if (locations.length === 0) {
+    locationDisplay = 'Anywhere';
+  } else {
+    const lines = locations.map(loc => {
+      if (loc.type === 'remote') {
+        return '• Remote';
+      }
+      return `• ${loc.display}`;
+    });
+    locationDisplay = lines.join('\n');
+  }
+
+  // Save locations and move to confirmation state
+  await db.telegramUser.update({
+    where: { id: ctx.telegramUser.id },
+    data: {
+      conversationState: 'awaiting_location_confirmation',
+      conversationData: { ...data, normalizedLocations: locations },
+    },
+  });
+
+  const keyboard = new InlineKeyboard()
+    .text('✓ Looks good', 'loc_confirm')
+    .text('✎ Change', 'loc_change');
+
+  await ctx.reply(
+    `<b>I'll search in:</b>\n${locationDisplay}\n`,
+    { parse_mode: 'HTML', reply_markup: keyboard }
+  );
+}
+
 export function setupConversation(bot: Bot<BotContext>): void {
+  // Handle location confirmation callback
+  bot.callbackQuery('loc_confirm', async (ctx) => {
+    if (!ctx.telegramUser) return;
+
+    const db = getDb();
+    const data = (ctx.telegramUser.conversationData as ConversationData) || {};
+
+    // Also set legacy fields for backwards compatibility
+    const hasRemote = data.normalizedLocations?.some(l => l.type === 'remote') ?? false;
+    const physicalLocations = data.normalizedLocations?.filter(l => l.type === 'physical') ?? [];
+    const legacyLocation = physicalLocations.length > 0
+      ? physicalLocations.map(l => l.display).join(', ')
+      : undefined;
+
+    await db.telegramUser.update({
+      where: { id: ctx.telegramUser.id },
+      data: {
+        conversationState: 'awaiting_resume',
+        conversationData: {
+          ...data,
+          // Legacy fields for backwards compatibility
+          location: legacyLocation,
+          isRemote: hasRemote,
+        },
+      },
+    });
+
+    const locationDisplay = LocationNormalizerAgent.formatForDisplay(data.normalizedLocations || []);
+
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(
+      `<b>📍 Location:</b>\n${locationDisplay}\n\n` +
+        '<b>Step 3/7: Resume</b>\n\n' +
+        'Now I need your resume to match you with jobs.\n\n' +
+        'You can:\n' +
+        '- <b>Upload</b> a PDF or DOCX file\n' +
+        '- <b>Paste</b> your resume text directly here',
+      { parse_mode: 'HTML' }
+    );
+  });
+
+  // Handle location change callback
+  bot.callbackQuery('loc_change', async (ctx) => {
+    if (!ctx.telegramUser) return;
+
+    const db = getDb();
+    const data = (ctx.telegramUser.conversationData as ConversationData) || {};
+
+    await db.telegramUser.update({
+      where: { id: ctx.telegramUser.id },
+      data: {
+        conversationState: 'awaiting_location',
+        conversationData: {
+          ...data,
+          normalizedLocations: undefined,
+          pendingLocationText: undefined,
+        },
+      },
+    });
+
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(
+      'No problem! Enter your locations again:\n\n' +
+        '<b>Examples:</b>\n' +
+        '• <code>NYC, Boston</code> - multiple cities\n' +
+        '• <code>Remote</code> - remote jobs only\n' +
+        '• <code>SF or Remote</code> - either SF area or remote',
+      { parse_mode: 'HTML' }
+    );
+  });
+
+  // Handle location clarification callback
+  bot.callbackQuery(/^loc_clarify:(\d+)$/, async (ctx) => {
+    if (!ctx.telegramUser) return;
+
+    const db = getDb();
+    const data = ctx.telegramUser.conversationData as ConversationData & { _clarificationOptions?: string[] };
+    const optionIndex = parseInt(ctx.match[1], 10);
+    const options = data._clarificationOptions || [];
+    const selectedOption = options[optionIndex];
+
+    if (!selectedOption) {
+      await ctx.answerCallbackQuery({ text: 'Invalid option' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(`<i>Selected: ${selectedOption}</i>`, { parse_mode: 'HTML' });
+
+    // Re-parse with the clarification
+    try {
+      const normalizer = new LocationNormalizerAgent();
+      const result = await normalizer.execute({
+        text: data.pendingLocationText || '',
+        clarification: selectedOption,
+      });
+
+      if (result.needsClarification) {
+        // Still needs more clarification
+        const keyboard = new InlineKeyboard();
+        result.needsClarification.options.forEach((option, idx) => {
+          keyboard.text(option, `loc_clarify:${idx}`).row();
+        });
+
+        await db.telegramUser.update({
+          where: { id: ctx.telegramUser.id },
+          data: {
+            conversationData: {
+              ...data,
+              _clarificationOptions: result.needsClarification.options,
+            },
+          },
+        });
+
+        await ctx.reply(
+          `<b>${result.needsClarification.question}</b>`,
+          { parse_mode: 'HTML', reply_markup: keyboard }
+        );
+        return;
+      }
+
+      // Clean up temp data and show confirmation
+      const cleanData = { ...data };
+      delete (cleanData as Record<string, unknown>)._clarificationOptions;
+
+      await showLocationConfirmation(ctx as BotContext, db, cleanData, result.locations);
+    } catch (error) {
+      logger.error('Telegram', 'Location clarification callback failed', error);
+      await ctx.reply(
+        'Sorry, I had trouble understanding. Let\'s try again.\n\n' +
+          'Where should I search for jobs?'
+      );
+
+      await db.telegramUser.update({
+        where: { id: ctx.telegramUser.id },
+        data: {
+          conversationState: 'awaiting_location',
+          conversationData: { ...data, pendingLocationText: undefined, _clarificationOptions: undefined },
+        },
+      });
+    }
+  });
+
   // Handle text messages for conversation flow
   bot.on('message:text', async (ctx) => {
     if (!ctx.telegramUser) return;
@@ -79,54 +270,214 @@ export function setupConversation(bot: Bot<BotContext>): void {
           `<b>Got it!</b> Searching for: ${titles.join(', ')}\n\n` +
             '<b>Step 2/7: Location</b>\n\n' +
             'Where should I search for jobs?\n\n' +
-            'Options:\n' +
-            '- Send <b>"Remote"</b> for remote-only jobs\n' +
-            '- Send a location like <b>"USA"</b>, <b>"New York"</b>, <b>"London"</b>\n' +
-            '- Send <b>"Skip"</b> for any location',
+            '<b>Examples:</b>\n' +
+            '• <code>New York</code> - single city\n' +
+            '• <code>NYC, Boston, Austin</code> - multiple cities\n' +
+            '• <code>Remote</code> - remote jobs only\n' +
+            '• <code>SF or Remote</code> - either SF area or remote\n' +
+            '• <code>USA</code> - anywhere in USA\n' +
+            '• <code>Anywhere</code> - no location filter\n\n' +
+            'Just type naturally!',
           { parse_mode: 'HTML' }
         );
         break;
       }
 
       case 'awaiting_location': {
-        let location: string | undefined;
-        let isRemote = false;
-
         const lowerText = text.toLowerCase();
-        if (lowerText === 'skip' || lowerText === 'any') {
-          location = undefined;
-          isRemote = false;
-        } else if (lowerText === 'remote') {
-          location = undefined;
-          isRemote = true;
-        } else {
-          location = text;
-          isRemote = false;
+
+        // Handle quick keywords without LLM
+        if (lowerText === 'skip' || lowerText === 'any' || lowerText === 'anywhere' || lowerText === 'worldwide') {
+          await db.telegramUser.update({
+            where: { id: ctx.telegramUser.id },
+            data: {
+              conversationState: 'awaiting_resume',
+              conversationData: { ...data, normalizedLocations: [], location: undefined, isRemote: false },
+            },
+          });
+
+          await ctx.reply(
+            `<b>📍 Location:</b> Anywhere\n\n` +
+              '<b>Step 3/7: Resume</b>\n\n' +
+              'Now I need your resume to match you with jobs.\n\n' +
+              'You can:\n' +
+              '- <b>Upload</b> a PDF or DOCX file\n' +
+              '- <b>Paste</b> your resume text directly here',
+            { parse_mode: 'HTML' }
+          );
+          break;
         }
 
+        // Use LLM to parse location
+        await ctx.reply('🔍 <i>Parsing your location...</i>', { parse_mode: 'HTML' });
+
+        try {
+          const normalizer = new LocationNormalizerAgent();
+          const result = await normalizer.execute({ text });
+
+          if (result.needsClarification) {
+            // Need to ask user for clarification
+            const keyboard = new InlineKeyboard();
+            result.needsClarification.options.forEach((option, idx) => {
+              keyboard.text(option, `loc_clarify:${idx}`).row();
+            });
+
+            await db.telegramUser.update({
+              where: { id: ctx.telegramUser.id },
+              data: {
+                conversationState: 'awaiting_location_clarification',
+                // Use JSON-compatible format for Prisma
+                conversationData: JSON.parse(JSON.stringify({
+                  ...data,
+                  pendingLocationText: text,
+                  // Store options for callback handling
+                  _clarificationOptions: result.needsClarification.options,
+                })),
+              },
+            });
+
+            await ctx.reply(
+              `<b>${result.needsClarification.question}</b>`,
+              { parse_mode: 'HTML', reply_markup: keyboard }
+            );
+            break;
+          }
+
+          // Parsed successfully, show confirmation
+          await showLocationConfirmation(ctx, db, data, result.locations);
+        } catch (error) {
+          logger.error('Telegram', 'Location parsing failed', error);
+          await ctx.reply(
+            'Sorry, I had trouble parsing that location. Please try again with a simpler format.\n\n' +
+              'Examples: <code>NYC</code>, <code>Remote</code>, <code>USA</code>',
+            { parse_mode: 'HTML' }
+          );
+        }
+        break;
+      }
+
+      case 'awaiting_location_clarification': {
+        // User typed a text response instead of using buttons
+        // Treat as clarification and re-parse
+        const pendingText = data.pendingLocationText || '';
+
+        try {
+          const normalizer = new LocationNormalizerAgent();
+          const result = await normalizer.execute({
+            text: pendingText,
+            clarification: text,
+          });
+
+          if (result.needsClarification) {
+            // Still needs clarification - show options again
+            const keyboard = new InlineKeyboard();
+            result.needsClarification.options.forEach((option, idx) => {
+              keyboard.text(option, `loc_clarify:${idx}`).row();
+            });
+
+            await ctx.reply(
+              `<b>${result.needsClarification.question}</b>`,
+              { parse_mode: 'HTML', reply_markup: keyboard }
+            );
+            break;
+          }
+
+          await showLocationConfirmation(ctx, db, data, result.locations);
+        } catch (error) {
+          logger.error('Telegram', 'Location clarification failed', error);
+          // Reset to location step
+          await db.telegramUser.update({
+            where: { id: ctx.telegramUser.id },
+            data: {
+              conversationState: 'awaiting_location',
+              conversationData: { ...data, pendingLocationText: undefined },
+            },
+          });
+
+          await ctx.reply(
+            'Sorry, I had trouble understanding. Let\'s try again.\n\n' +
+              'Where should I search for jobs?',
+            { parse_mode: 'HTML' }
+          );
+        }
+        break;
+      }
+
+      case 'awaiting_location_confirmation': {
+        // User typed something instead of using buttons - treat as new location input
+        // Reset to location parsing with the new text
         await db.telegramUser.update({
           where: { id: ctx.telegramUser.id },
           data: {
-            conversationState: 'awaiting_resume',
-            conversationData: { ...data, location, isRemote },
+            conversationState: 'awaiting_location',
+            conversationData: { ...data, normalizedLocations: undefined, pendingLocationText: undefined },
           },
         });
 
-        const locationText = isRemote
-          ? 'Remote only'
-          : location
-            ? location
-            : 'Any location';
+        // Re-trigger the awaiting_location handler by calling it directly
+        // This is a bit of a hack, but avoids code duplication
+        const lowerText = text.toLowerCase();
 
-        await ctx.reply(
-          `<b>Location:</b> ${locationText}\n\n` +
-            '<b>Step 3/7: Resume</b>\n\n' +
-            'Now I need your resume to match you with jobs.\n\n' +
-            'You can:\n' +
-            '- <b>Upload</b> a PDF or DOCX file\n' +
-            '- <b>Paste</b> your resume text directly here',
-          { parse_mode: 'HTML' }
-        );
+        if (lowerText === 'skip' || lowerText === 'any' || lowerText === 'anywhere' || lowerText === 'worldwide') {
+          await db.telegramUser.update({
+            where: { id: ctx.telegramUser.id },
+            data: {
+              conversationState: 'awaiting_resume',
+              conversationData: { ...data, normalizedLocations: [], location: undefined, isRemote: false },
+            },
+          });
+
+          await ctx.reply(
+            `<b>📍 Location:</b> Anywhere\n\n` +
+              '<b>Step 3/7: Resume</b>\n\n' +
+              'Now I need your resume to match you with jobs.\n\n' +
+              'You can:\n' +
+              '- <b>Upload</b> a PDF or DOCX file\n' +
+              '- <b>Paste</b> your resume text directly here',
+            { parse_mode: 'HTML' }
+          );
+          break;
+        }
+
+        await ctx.reply('🔍 <i>Parsing your location...</i>', { parse_mode: 'HTML' });
+
+        try {
+          const normalizer = new LocationNormalizerAgent();
+          const result = await normalizer.execute({ text });
+
+          if (result.needsClarification) {
+            const keyboard = new InlineKeyboard();
+            result.needsClarification.options.forEach((option, idx) => {
+              keyboard.text(option, `loc_clarify:${idx}`).row();
+            });
+
+            await db.telegramUser.update({
+              where: { id: ctx.telegramUser.id },
+              data: {
+                conversationState: 'awaiting_location_clarification',
+                conversationData: JSON.parse(JSON.stringify({
+                  ...data,
+                  pendingLocationText: text,
+                  _clarificationOptions: result.needsClarification.options,
+                })),
+              },
+            });
+
+            await ctx.reply(
+              `<b>${result.needsClarification.question}</b>`,
+              { parse_mode: 'HTML', reply_markup: keyboard }
+            );
+            break;
+          }
+
+          await showLocationConfirmation(ctx, db, data, result.locations);
+        } catch (error) {
+          logger.error('Telegram', 'Location parsing failed', error);
+          await ctx.reply(
+            'Sorry, I had trouble parsing that location. Please try again.',
+            { parse_mode: 'HTML' }
+          );
+        }
         break;
       }
 
@@ -383,23 +734,27 @@ async function createSubscription(
     }
 
     // Create new subscription (multiple allowed)
+    // Note: normalizedLocations added via schema but Prisma client types may need regeneration
+    const subscriptionData = {
+      userId: ctx.telegramUser.id,
+      jobTitles: data.jobTitles,
+      location: data.location,
+      isRemote: data.isRemote ?? true,
+      normalizedLocations: data.normalizedLocations ?? null,  // New structured locations
+      minScore: data.minScore ?? 60,
+      datePosted: data.datePosted ?? 'month',
+      resumeText: data.resumeText,
+      resumeHash,
+      resumeName: data.resumeName,
+      resumeUploadedAt: new Date(),
+      excludedTitles: data.excludedTitles ?? [],
+      excludedCompanies: data.excludedCompanies ?? [],
+      isActive: true,
+      isPaused: false,
+    };
     const subscription = await db.searchSubscription.create({
-      data: {
-        userId: ctx.telegramUser.id,
-        jobTitles: data.jobTitles,
-        location: data.location,
-        isRemote: data.isRemote ?? true,
-        minScore: data.minScore ?? 60,
-        datePosted: data.datePosted ?? 'month',
-        resumeText: data.resumeText,
-        resumeHash,
-        resumeName: data.resumeName,
-        resumeUploadedAt: new Date(),
-        excludedTitles: data.excludedTitles ?? [],
-        excludedCompanies: data.excludedCompanies ?? [],
-        isActive: true,
-        isPaused: false,
-      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      data: subscriptionData as any,
     });
 
     // Clear conversation state
@@ -411,11 +766,14 @@ async function createSubscription(
       },
     });
 
-    const locationText = data.isRemote
-      ? 'Remote only'
-      : data.location
-        ? data.location
-        : 'Any location';
+    // Format location for display
+    const locationText = data.normalizedLocations?.length
+      ? LocationNormalizerAgent.formatForDisplaySingleLine(data.normalizedLocations)
+      : data.isRemote
+        ? 'Remote only'
+        : data.location
+          ? data.location
+          : 'Any location';
 
     const dateRangeText = DATE_RANGE_LABELS[data.datePosted ?? 'month'] || 'Last month';
     const excludedTitlesText = data.excludedTitles?.length

@@ -215,6 +215,7 @@ function SubscriptionsTable({ subscriptions }: { subscriptions: Subscription[] }
         <TableRow>
           <TableHead>User</TableHead>
           <TableHead>Job Titles</TableHead>
+          <TableHead>Location</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Notifications</TableHead>
           <TableHead>Last Run</TableHead>
@@ -228,6 +229,9 @@ function SubscriptionsTable({ subscriptions }: { subscriptions: Subscription[] }
             <TableCell className="max-w-[200px] truncate" title={sub.jobTitles.join(', ')}>
               {sub.jobTitles.slice(0, 2).join(', ')}
               {sub.jobTitles.length > 2 && '...'}
+            </TableCell>
+            <TableCell className="max-w-[150px] truncate" title={sub.location || 'Any'}>
+              {sub.location || <span className="text-muted-foreground">Any</span>}
             </TableCell>
             <TableCell><StatusBadge status={sub.status} /></TableCell>
             <TableCell>{sub._count.sentNotifications}</TableCell>
@@ -246,7 +250,7 @@ function SubscriptionsTable({ subscriptions }: { subscriptions: Subscription[] }
         ))}
         {subscriptions.length === 0 && (
           <TableRow>
-            <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
+            <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
               No subscriptions found
             </TableCell>
           </TableRow>

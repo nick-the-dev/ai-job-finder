@@ -174,8 +174,9 @@ model SearchSubscription {
 
   // Search parameters
   jobTitles       String[] @map("job_titles")
-  location        String?
-  isRemote        Boolean  @default(true) @map("is_remote")
+  location        String?                               // DEPRECATED: use normalizedLocations
+  isRemote        Boolean  @default(true) @map("is_remote")  // DEPRECATED: use normalizedLocations
+  normalizedLocations  Json?  @map("normalized_locations")   // NormalizedLocation[] - structured location data
   minScore        Int      @default(60) @map("min_score")
   datePosted      String   @default("month") @map("date_posted") // today, 3days, week, month, all
   resumeText      String   @map("resume_text")

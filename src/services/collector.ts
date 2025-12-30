@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { getDb } from '../db/client.js';
 import type { RawJob } from '../core/types.js';
 import type { IService } from '../core/interfaces.js';
+import type { Job } from '@prisma/client';
 
 interface CollectorInput {
   query: string;      // Job title + location
@@ -158,7 +159,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
         logger.info('Collector', `[SerpAPI] Cache hit: ${cachedJobs.length} jobs for "${query}" in "${location || 'any'}"`);
 
-        return cachedJobs.map(job => ({
+        return cachedJobs.map((job: Job) => ({
           title: job.title,
           company: job.company,
           description: job.description,
@@ -288,7 +289,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
         logger.info('Collector', `[JobSpy] Cache hit: ${cachedJobs.length} jobs for "${query}" in "${location || 'any'}"`);
 
-        return cachedJobs.map(job => ({
+        return cachedJobs.map((job: Job) => ({
           title: job.title,
           company: job.company,
           description: job.description,

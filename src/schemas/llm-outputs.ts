@@ -128,3 +128,80 @@ export const QueryExpansionJsonSchema = {
   },
   required: ['expandedQueries', 'resumeSuggestedTitles'],
 } as const;
+
+/**
+ * Schema for normalized location
+ */
+export const NormalizedLocationSchema = z.object({
+  raw: z.string().describe('Original user input fragment'),
+  display: z.string().describe('Formatted display name (e.g., "New York, NY, USA")'),
+  city: z.string().optional().describe('City name if applicable'),
+  state: z.string().optional().describe('State/province/region if applicable'),
+  country: z.string().describe('Country name or code'),
+  searchVariants: z.array(z.string()).describe('Alternative names for job board searches'),
+  type: z.enum(['physical', 'remote']).describe('Location type'),
+});
+
+export type NormalizedLocation = z.infer<typeof NormalizedLocationSchema>;
+
+/**
+ * Schema for location parse result from LLM
+ */
+export const LocationParseResultSchema = z.object({
+  locations: z.array(NormalizedLocationSchema)
+    .describe('Parsed and normalized locations'),
+  needsClarification: z.object({
+    question: z.string().describe('Question to ask the user'),
+    options: z.array(z.string()).describe('Options for the user to choose from'),
+  }).optional().describe('If ambiguous input, contains clarification question'),
+});
+
+export type LocationParseResult = z.infer<typeof LocationParseResultSchema>;
+
+/**
+ * JSON Schema for location parsing LLM structured output
+ */
+export const LocationParseJsonSchema = {
+  type: 'object',
+  properties: {
+    locations: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          raw: { type: 'string', description: 'Original user input fragment' },
+          display: { type: 'string', description: 'Formatted display name' },
+          city: { type: 'string', description: 'City name if applicable' },
+          state: { type: 'string', description: 'State/province/region if applicable' },
+          country: { type: 'string', description: 'Country name' },
+          searchVariants: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Alternative names for job board searches',
+          },
+          type: {
+            type: 'string',
+            enum: ['physical', 'remote'],
+            description: 'Location type',
+          },
+        },
+        required: ['raw', 'display', 'country', 'searchVariants', 'type'],
+      },
+      description: 'Parsed and normalized locations',
+    },
+    needsClarification: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'Question to ask the user' },
+        options: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Options for the user to choose from',
+        },
+      },
+      required: ['question', 'options'],
+      description: 'If ambiguous input, contains clarification question',
+    },
+  },
+  required: ['locations'],
+} as const;
