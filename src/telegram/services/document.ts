@@ -118,7 +118,7 @@ export function setupDocumentHandler(bot: Bot<BotContext>): void {
 
       await ctx.reply(
         `<b>Resume extracted!</b> (${resumeText.length} characters)\n\n` +
-          '<b>Step 4/6: Minimum Match Score</b>\n\n' +
+          '<b>Step 4/8: Minimum Match Score</b>\n\n' +
           "I'll only notify you about jobs with a score >= this value.\n\n" +
           '<b>Score ranges:</b>\n' +
           '- 90-100: Perfect match\n' +

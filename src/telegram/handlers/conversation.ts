@@ -145,7 +145,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
     await ctx.answerCallbackQuery();
     await ctx.editMessageText(
       `<b>📍 Location:</b>\n${locationDisplay}\n\n` +
-        '<b>Step 3/7: Resume</b>\n\n' +
+        '<b>Step 3/8: Resume</b>\n\n' +
         'Now I need your resume to match you with jobs.\n\n' +
         'You can:\n' +
         '- <b>Upload</b> a PDF or DOCX file\n' +
@@ -289,7 +289,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Got it!</b> Searching for: ${titles.join(', ')}\n\n` +
-            '<b>Step 2/7: Location</b>\n\n' +
+            '<b>Step 2/8: Location</b>\n\n' +
             'Where should I search for jobs?\n\n' +
             '<b>Examples:</b>\n' +
             '• <code>New York</code> - single city\n' +
@@ -319,7 +319,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
           await ctx.reply(
             `<b>📍 Location:</b> Anywhere\n\n` +
-              '<b>Step 3/7: Resume</b>\n\n' +
+              '<b>Step 3/8: Resume</b>\n\n' +
               'Now I need your resume to match you with jobs.\n\n' +
               'You can:\n' +
               '- <b>Upload</b> a PDF or DOCX file\n' +
@@ -443,7 +443,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
           await ctx.reply(
             `<b>📍 Location:</b> Anywhere\n\n` +
-              '<b>Step 3/7: Resume</b>\n\n' +
+              '<b>Step 3/8: Resume</b>\n\n' +
               'Now I need your resume to match you with jobs.\n\n' +
               'You can:\n' +
               '- <b>Upload</b> a PDF or DOCX file\n' +
@@ -513,7 +513,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Resume received!</b> (${text.length} characters)\n\n` +
-            '<b>Step 4/7: Minimum Match Score</b>\n\n' +
+            '<b>Step 4/8: Minimum Match Score</b>\n\n' +
             "I'll only notify you about jobs with a score >= this value.\n\n" +
             '<b>Score ranges:</b>\n' +
             '- 90-100: Perfect match\n' +
@@ -552,7 +552,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Min Score:</b> ${minScore}\n\n` +
-            '<b>Step 5/7: Job Posting Date Range</b>\n\n' +
+            '<b>Step 5/8: Job Posting Date Range</b>\n\n' +
             'How far back should I search for jobs?\n\n' +
             '1️⃣ Last 24 hours\n' +
             '2️⃣ Last 3 days\n' +
@@ -591,7 +591,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Date Range:</b> ${DATE_RANGE_LABELS[datePosted]}\n\n` +
-            '<b>Step 6/7: Excluded Job Titles (Optional)</b>\n\n' +
+            '<b>Step 6/8: Excluded Job Titles (Optional)</b>\n\n' +
             'Any job title keywords to exclude?\n\n' +
             'Examples: <b>"Manager, Director, Lead"</b>\n' +
             '(Jobs with these words in the title will be skipped)\n\n' +
@@ -626,11 +626,11 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Excluded Titles:</b> ${excludedText}\n\n` +
-            '<b>Step 7/7: Excluded Companies (Optional)</b>\n\n' +
+            '<b>Step 7/8: Excluded Companies (Optional)</b>\n\n' +
             'Any companies to exclude?\n\n' +
             'Examples: <b>"Amazon, Meta, Google"</b>\n' +
             '(Jobs from these companies will be skipped)\n\n' +
-            'Send company names separated by commas, or <b>"Skip"</b> to finish',
+            'Send company names separated by commas, or <b>"Skip"</b> to continue',
           { parse_mode: 'HTML' }
         );
         break;
