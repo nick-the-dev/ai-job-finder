@@ -251,7 +251,46 @@ function UsersTable({ users }: { users: User[] }) {
   );
 }
 
+function SubscriptionRow({ sub }: { sub: Subscription }) {
+  const isActive = sub.status === 'active' || sub.status === 'paused';
+
+  return (
+    <TableRow className={!isActive ? 'opacity-60' : ''}>
+      <TableCell className="font-medium">{sub.user.username || 'No name'}</TableCell>
+      <TableCell>
+        <TruncatedCell value={sub.jobTitles.join(', ')} maxWidth={200} />
+      </TableCell>
+      <TableCell>
+        {sub.location ? (
+          <TruncatedCell value={sub.location} maxWidth={150} />
+        ) : (
+          <span className="text-muted-foreground">Any</span>
+        )}
+      </TableCell>
+      <TableCell><StatusBadge status={sub.status} /></TableCell>
+      <TableCell>{sub._count.sentNotifications}</TableCell>
+      <TableCell>
+        {sub.lastRun ? (
+          <span className="flex items-center gap-2">
+            <StatusBadge status={sub.lastRun.status} />
+            <span className="text-muted-foreground">{formatTimeAgo(sub.lastRun.startedAt)}</span>
+          </span>
+        ) : (
+          <span className="text-muted-foreground">-</span>
+        )}
+      </TableCell>
+      <TableCell className="text-muted-foreground">
+        {isActive ? formatNextRun(sub.nextRunAt) : '-'}
+      </TableCell>
+    </TableRow>
+  );
+}
+
 function SubscriptionsTable({ subscriptions }: { subscriptions: Subscription[] }) {
+  // Separate active/paused from inactive
+  const activeSubs = subscriptions.filter(s => s.status === 'active' || s.status === 'paused');
+  const inactiveSubs = subscriptions.filter(s => s.status === 'inactive');
+
   return (
     <Table>
       <TableHeader>
@@ -266,33 +305,20 @@ function SubscriptionsTable({ subscriptions }: { subscriptions: Subscription[] }
         </TableRow>
       </TableHeader>
       <TableBody>
-        {subscriptions.map((sub) => (
-          <TableRow key={sub.id}>
-            <TableCell className="font-medium">{sub.user.username || 'No name'}</TableCell>
-            <TableCell>
-              <TruncatedCell value={sub.jobTitles.join(', ')} maxWidth={200} />
+        {activeSubs.map((sub) => (
+          <SubscriptionRow key={sub.id} sub={sub} />
+        ))}
+        {activeSubs.length > 0 && inactiveSubs.length > 0 && (
+          <TableRow>
+            <TableCell colSpan={7} className="bg-muted/30 py-2 text-center">
+              <span className="text-xs text-muted-foreground uppercase tracking-wider">
+                Inactive Subscriptions ({inactiveSubs.length})
+              </span>
             </TableCell>
-            <TableCell>
-              {sub.location ? (
-                <TruncatedCell value={sub.location} maxWidth={150} />
-              ) : (
-                <span className="text-muted-foreground">Any</span>
-              )}
-            </TableCell>
-            <TableCell><StatusBadge status={sub.status} /></TableCell>
-            <TableCell>{sub._count.sentNotifications}</TableCell>
-            <TableCell>
-              {sub.lastRun ? (
-                <span className="flex items-center gap-2">
-                  <StatusBadge status={sub.lastRun.status} />
-                  <span className="text-muted-foreground">{formatTimeAgo(sub.lastRun.startedAt)}</span>
-                </span>
-              ) : (
-                <span className="text-muted-foreground">-</span>
-              )}
-            </TableCell>
-            <TableCell className="text-muted-foreground">{formatNextRun(sub.nextRunAt)}</TableCell>
           </TableRow>
+        )}
+        {inactiveSubs.map((sub) => (
+          <SubscriptionRow key={sub.id} sub={sub} />
         ))}
         {subscriptions.length === 0 && (
           <TableRow>

@@ -96,8 +96,9 @@ src/
 │   ├── collector.ts      # JobSpy/SerpAPI job collection (JobSpy primary)
 │   └── normalizer.ts     # Job deduplication & normalization
 ├── agents/
-│   ├── matcher.ts        # LLM-based job matching (score 1-100)
-│   └── query-expander.ts # LLM-based query expansion for wider search
+│   ├── matcher.ts            # LLM-based job matching (score 1-100)
+│   ├── query-expander.ts     # LLM-based query expansion for wider search
+│   └── location-normalizer.ts # LLM-based location parsing & normalization
 ├── llm/
 │   └── client.ts         # OpenRouter client with structured outputs
 ├── api/
@@ -153,7 +154,56 @@ src/
 
 ### Services vs Agents
 - **Services**: No LLM, deterministic (CollectorService, NormalizerService)
-- **Agents**: Use LLM, require verification (MatcherAgent)
+- **Agents**: Use LLM, require verification (MatcherAgent, QueryExpanderAgent, LocationNormalizerAgent)
+
+### Agent Architecture
+
+This codebase uses a **simple custom agent pattern** - NOT LangGraph or LangChain. Each agent:
+1. Takes structured input
+2. Calls LLM with a specific prompt
+3. Validates output with Zod schemas
+4. Returns typed results
+
+**Why not LangGraph/LangChain?**
+- Our agents are single-turn (no complex state machines)
+- Zod validation is simpler and more reliable than framework abstractions
+- Direct OpenRouter calls give full control over prompts and retries
+- Less abstraction = easier debugging
+
+**Available Agents:**
+| Agent | Purpose |
+|-------|---------|
+| `MatcherAgent` | Score jobs against resume (1-100) |
+| `QueryExpanderAgent` | Expand job titles with synonyms |
+| `LocationNormalizerAgent` | Parse natural location input |
+
+### Location Normalization
+
+Users can input locations naturally, and the LLM parses them into structured data:
+
+```
+Input:  "NYC, Boston, and remote"
+Output: [
+  { display: "New York, NY, USA", type: "physical", searchVariants: ["New York", "NYC"] },
+  { display: "Boston, MA, USA", type: "physical", searchVariants: ["Boston"] },
+  { display: "Remote", type: "remote" }
+]
+```
+
+**Features:**
+- Multi-location support ("NYC, LA, and Austin")
+- Remote job filtering ("Remote" or "SF or Remote")
+- Ambiguity clarification (asks user if input is unclear)
+- Search variant expansion (NYC → "New York", "NYC", "New York City")
+
+**Data flow:**
+1. User enters location text in Telegram
+2. `LocationNormalizerAgent.parse()` calls LLM
+3. If ambiguous → bot asks clarifying question
+4. User confirms parsed locations
+5. Stored as `normalizedLocations` JSON in database
+6. Collector searches each location + variants
+7. Results filtered to match user's locations
 
 ### Job Match Score (1-100)
 - 90-100: Perfect match
