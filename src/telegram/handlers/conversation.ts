@@ -4,6 +4,7 @@ import type { Bot } from 'grammy';
 import type { BotContext } from '../bot.js';
 import { getDb } from '../../db/client.js';
 import { logger } from '../../utils/logger.js';
+import { runSingleSubscriptionSearch } from '../../scheduler/jobs/search-subscriptions.js';
 
 interface ConversationData {
   jobTitles?: string[];
@@ -375,10 +376,8 @@ async function createSubscription(
       ? data.excludedCompanies.join(', ')
       : 'None';
 
-    // Build inline keyboard with scan option
+    // Build inline keyboard
     const keyboard = new InlineKeyboard()
-      .text('🔍 Start Scanning Now', `sub:scan:${subscription.id}`)
-      .row()
       .text('📋 My Subscriptions', 'sub:list')
       .text('➕ Add Another', 'sub:new');
 
@@ -391,8 +390,8 @@ async function createSubscription(
         `<b>Resume:</b> ${data.resumeName || 'Uploaded'}\n` +
         `<b>Excluded Titles:</b> ${excludedTitlesText}\n` +
         `<b>Excluded Companies:</b> ${excludedCompaniesText}\n\n` +
-        "I'll search for jobs every hour and notify you when I find matches.\n\n" +
-        '<b>Would you like to start scanning now?</b>',
+        '🔍 <b>Starting your first scan now...</b>\n' +
+        "I'll notify you when I find matches, and continue searching every hour.",
       { parse_mode: 'HTML', reply_markup: keyboard }
     );
 
@@ -400,6 +399,33 @@ async function createSubscription(
       'Telegram',
       `User ${ctx.telegramUser.telegramId} created subscription: ${data.jobTitles.join(', ')}`
     );
+
+    // Auto-start the first search (fire-and-forget)
+    const chatId = Number(ctx.telegramUser.chatId);
+    runSingleSubscriptionSearch(subscription.id)
+      .then(async (result) => {
+        if (result.notificationsSent > 0) {
+          await ctx.api.sendMessage(
+            chatId,
+            `✅ <b>First scan complete!</b>\n\n` +
+              `Found <b>${result.matchesFound}</b> matches.\n` +
+              `Sent <b>${result.notificationsSent}</b> notifications.\n\n` +
+              'Check above for your job matches!',
+            { parse_mode: 'HTML' }
+          );
+        } else {
+          await ctx.api.sendMessage(
+            chatId,
+            `✅ <b>First scan complete!</b>\n\n` +
+              `No matches found at this time.\n\n` +
+              "I'll keep searching every hour and notify you when I find something.",
+            { parse_mode: 'HTML' }
+          );
+        }
+      })
+      .catch((error) => {
+        logger.error('Telegram', `Auto-scan failed for new subscription ${subscription.id}`, error);
+      });
   } catch (error) {
     logger.error('Telegram', 'Failed to create subscription', error);
     await ctx.reply(
