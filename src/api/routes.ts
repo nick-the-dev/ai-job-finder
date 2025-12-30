@@ -8,6 +8,7 @@ import { MatcherAgent } from '../agents/matcher.js';
 import { QueryExpanderAgent } from '../agents/query-expander.js';
 import { saveMatchesToCSV, generateDownloadToken, validateDownloadToken, getExportFile } from '../utils/csv.js';
 import { queueService, PRIORITY, getQueueStatus, isRedisConnected } from '../queue/index.js';
+import { checkWebhookHealth } from '../telegram/bot.js';
 import type { RawJob, NormalizedJob, JobMatchResult, SearchResult } from '../core/types.js';
 
 /**
@@ -51,6 +52,25 @@ router.get('/queue/status', async (req: Request, res: Response, next: NextFuncti
     res.json({
       status: 'active',
       queues: queueStatus,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /telegram/status - Telegram webhook health check and diagnostics
+ */
+router.get('/telegram/status', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    logger.info('API', 'Telegram webhook status check');
+
+    const healthy = await checkWebhookHealth();
+
+    res.json({
+      healthy,
+      message: healthy ? 'Webhook is configured and responsive' : 'Webhook issue detected - check logs for details',
+      checkedAt: new Date().toISOString(),
     });
   } catch (error) {
     next(error);
