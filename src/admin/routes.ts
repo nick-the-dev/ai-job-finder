@@ -121,9 +121,8 @@ router.get('/api/overview', async (_req: Request, res: Response) => {
         where: { startedAt: { gte: oneDayAgo } },
         _sum: { jobsCollected: true },
       }),
-      db.subscriptionRun.aggregate({
-        where: { startedAt: { gte: oneDayAgo } },
-        _sum: { jobsMatched: true },
+      db.jobMatch.count({
+        where: { createdAt: { gte: oneDayAgo } },
       }),
       db.subscriptionRun.aggregate({
         where: { startedAt: { gte: oneDayAgo } },
@@ -148,7 +147,7 @@ router.get('/api/overview', async (_req: Request, res: Response) => {
       },
       activity24h: {
         jobsScanned: jobsScanned24h._sum.jobsCollected ?? 0,
-        matchesFound: matchesFound24h._sum.jobsMatched ?? 0,
+        matchesFound: matchesFound24h,
         notificationsSent: notificationsSent24h._sum.notificationsSent ?? 0,
         totalRuns: recentRuns,
         failedRuns: failedRuns24h,

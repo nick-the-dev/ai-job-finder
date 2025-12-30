@@ -7,6 +7,29 @@ import { runSingleSubscriptionSearch } from '../../scheduler/jobs/search-subscri
 import { saveMatchesToCSV, generateDownloadToken } from '../../utils/csv.js';
 import { config } from '../../config.js';
 import { getPersonalStats, getMarketInsights, getResumeTips } from '../../observability/index.js';
+import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
+import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
+
+/**
+ * Format location for display in subscription list/details.
+ * Uses normalizedLocations if available, falls back to legacy location/isRemote.
+ */
+function formatLocationDisplay(
+  normalizedLocations: unknown,
+  legacyLocation: string | null,
+  legacyIsRemote: boolean
+): string {
+  // Try to use normalized locations first
+  if (normalizedLocations && Array.isArray(normalizedLocations) && normalizedLocations.length > 0) {
+    return LocationNormalizerAgent.formatForDisplaySingleLine(normalizedLocations as NormalizedLocation[]);
+  }
+
+  // Fall back to legacy format
+  if (legacyIsRemote) {
+    return '🌍 Remote';
+  }
+  return legacyLocation || 'Anywhere';
+}
 
 export function setupCommands(bot: Bot<BotContext>): void {
   // /start - Welcome message with inline keyboard
@@ -102,12 +125,12 @@ Ready to get started?
     for (let i = 0; i < subs.length; i++) {
       const sub = subs[i];
       const status = sub.isPaused ? '⏸️ Paused' : '✅ Active';
-      const location = sub.isRemote ? '🌍 Remote' : sub.location || 'Any';
+      const location = formatLocationDisplay(sub.normalizedLocations, sub.location, sub.isRemote);
 
       message += `<b>${i + 1}. ${sub.jobTitles.slice(0, 2).join(', ')}</b>`;
       if (sub.jobTitles.length > 2) message += ` +${sub.jobTitles.length - 2}`;
       message += '\n';
-      message += `   ${status} | ${location} | Score ≥${sub.minScore}\n`;
+      message += `   ${status} | 📍 ${location} | Score ≥${sub.minScore}\n`;
       message += `   📬 ${sub._count.sentNotifications} notifications sent\n\n`;
     }
 
@@ -354,7 +377,7 @@ Ready to get started?
     }
 
     const status = sub.isPaused ? '⏸️ Paused' : '✅ Active';
-    const location = sub.isRemote ? '🌍 Remote' : sub.location || 'Any';
+    const location = formatLocationDisplay(sub.normalizedLocations, sub.location, sub.isRemote);
     const lastSearch = sub.lastSearchAt
       ? sub.lastSearchAt.toLocaleDateString()
       : 'Never';
@@ -663,12 +686,12 @@ Ready to get started?
     for (let i = 0; i < subs.length; i++) {
       const sub = subs[i];
       const status = sub.isPaused ? '⏸️ Paused' : '✅ Active';
-      const location = sub.isRemote ? '🌍 Remote' : sub.location || 'Any';
+      const location = formatLocationDisplay(sub.normalizedLocations, sub.location, sub.isRemote);
 
       message += `<b>${i + 1}. ${sub.jobTitles.slice(0, 2).join(', ')}</b>`;
       if (sub.jobTitles.length > 2) message += ` +${sub.jobTitles.length - 2}`;
       message += '\n';
-      message += `   ${status} | ${location} | Score ≥${sub.minScore}\n`;
+      message += `   ${status} | 📍 ${location} | Score ≥${sub.minScore}\n`;
       message += `   📬 ${sub._count.sentNotifications} notifications sent\n\n`;
     }
 

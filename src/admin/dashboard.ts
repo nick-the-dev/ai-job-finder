@@ -79,9 +79,8 @@ async function getOverviewData(): Promise<OverviewData> {
       where: { startedAt: { gte: oneDayAgo } },
       _sum: { jobsCollected: true },
     }),
-    db.subscriptionRun.aggregate({
-      where: { startedAt: { gte: oneDayAgo } },
-      _sum: { jobsMatched: true },
+    db.jobMatch.count({
+      where: { createdAt: { gte: oneDayAgo } },
     }),
     db.subscriptionRun.aggregate({
       where: { startedAt: { gte: oneDayAgo } },
@@ -98,7 +97,7 @@ async function getOverviewData(): Promise<OverviewData> {
     subscriptions: { total: totalSubscriptions, active: activeSubscriptions, paused: pausedSubscriptions },
     activity24h: {
       jobsScanned: jobsScanned24h._sum.jobsCollected ?? 0,
-      matchesFound: matchesFound24h._sum.jobsMatched ?? 0,
+      matchesFound: matchesFound24h,
       notificationsSent: notificationsSent24h._sum.notificationsSent ?? 0,
       totalRuns,
       failedRuns: failedRuns24h,

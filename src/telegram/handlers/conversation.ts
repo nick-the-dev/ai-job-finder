@@ -326,13 +326,12 @@ export function setupConversation(bot: Bot<BotContext>): void {
               where: { id: ctx.telegramUser.id },
               data: {
                 conversationState: 'awaiting_location_clarification',
-                // Use JSON-compatible format for Prisma
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 conversationData: JSON.parse(JSON.stringify({
                   ...data,
                   pendingLocationText: text,
-                  // Store options for callback handling
                   _clarificationOptions: result.needsClarification.options,
-                })),
+                })) as any,
               },
             });
 
@@ -455,11 +454,12 @@ export function setupConversation(bot: Bot<BotContext>): void {
               where: { id: ctx.telegramUser.id },
               data: {
                 conversationState: 'awaiting_location_clarification',
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 conversationData: JSON.parse(JSON.stringify({
                   ...data,
                   pendingLocationText: text,
                   _clarificationOptions: result.needsClarification.options,
-                })),
+                })) as any,
               },
             });
 

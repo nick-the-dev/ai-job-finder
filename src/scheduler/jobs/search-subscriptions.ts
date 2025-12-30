@@ -2,15 +2,154 @@ import crypto from 'crypto';
 import { getDb } from '../../db/client.js';
 import { NormalizerService } from '../../services/normalizer.js';
 import { MatcherAgent } from '../../agents/matcher.js';
+import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
 import { sendMatchSummary } from '../../telegram/services/notification.js';
 import { logger } from '../../utils/logger.js';
-import { queueService, PRIORITY } from '../../queue/index.js';
+import { queueService, PRIORITY, type Priority } from '../../queue/index.js';
 import { RunTracker, updateSkillStats, createMarketSnapshot } from '../../observability/index.js';
-import type { NormalizedJob, JobMatchResult } from '../../core/types.js';
+import type { NormalizedJob, JobMatchResult, RawJob } from '../../core/types.js';
+import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
 
 // Services (reuse singleton pattern)
 const normalizer = new NormalizerService();
 const matcher = new MatcherAgent();
+
+type DatePostedType = 'today' | '3days' | 'week' | 'month' | 'all';
+
+interface CollectionParams {
+  jobTitles: string[];
+  normalizedLocations: NormalizedLocation[] | null;
+  legacyLocation: string | null;
+  legacyIsRemote: boolean;
+  datePosted: DatePostedType;
+  limit: number;
+  skipCache: boolean;
+  priority: Priority;
+}
+
+/**
+ * Collect jobs for a subscription, supporting multi-location search.
+ * Uses normalizedLocations if available, falls back to legacy location/isRemote.
+ */
+async function collectJobsForSubscription(params: CollectionParams): Promise<RawJob[]> {
+  const { jobTitles, normalizedLocations, legacyLocation, legacyIsRemote, datePosted, limit, skipCache, priority } = params;
+  const allRawJobs: RawJob[] = [];
+
+  // Use normalized locations if available
+  if (normalizedLocations && normalizedLocations.length > 0) {
+    const physicalLocations = LocationNormalizerAgent.getPhysicalLocations(normalizedLocations);
+    const hasRemote = LocationNormalizerAgent.hasRemote(normalizedLocations);
+
+    for (const title of jobTitles) {
+      // Search for remote jobs if user wants remote
+      if (hasRemote) {
+        try {
+          logger.info('Scheduler', `  Collecting remote jobs for: "${title}"`);
+          const jobs = await queueService.enqueueCollection({
+            query: title,
+            isRemote: true,
+            limit,
+            source: 'jobspy',
+            skipCache,
+            datePosted: datePosted === 'all' ? undefined : datePosted,
+          }, priority);
+          logger.info('Scheduler', `  Found ${jobs.length} remote jobs for "${title}"`);
+          allRawJobs.push(...jobs);
+        } catch (error) {
+          logger.error('Scheduler', `  Failed to collect remote jobs for "${title}"`, error);
+        }
+      }
+
+      // Search for each physical location using first 2 searchVariants
+      for (const loc of physicalLocations) {
+        const variants = loc.searchVariants.slice(0, 2);
+        if (variants.length === 0) variants.push(loc.display);
+
+        for (const variant of variants) {
+          try {
+            logger.info('Scheduler', `  Collecting jobs for: "${title}" in "${variant}"`);
+            const jobs = await queueService.enqueueCollection({
+              query: title,
+              location: variant,
+              isRemote: false, // Physical locations only
+              limit,
+              source: 'jobspy',
+              skipCache,
+              datePosted: datePosted === 'all' ? undefined : datePosted,
+            }, priority);
+            logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}" in "${variant}"`);
+            allRawJobs.push(...jobs);
+          } catch (error) {
+            logger.error('Scheduler', `  Failed to collect jobs for "${title}" in "${variant}"`, error);
+          }
+        }
+      }
+    }
+  } else {
+    // Legacy mode: single location
+    for (const title of jobTitles) {
+      try {
+        logger.info('Scheduler', `  Collecting jobs for: "${title}"`);
+        const jobs = await queueService.enqueueCollection({
+          query: title,
+          location: legacyLocation ?? undefined,
+          isRemote: legacyIsRemote,
+          limit,
+          source: 'jobspy',
+          skipCache,
+          datePosted: datePosted === 'all' ? undefined : datePosted,
+        }, priority);
+        logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}"`);
+        allRawJobs.push(...jobs);
+      } catch (error) {
+        logger.error('Scheduler', `  Failed to collect jobs for "${title}"`, error);
+      }
+    }
+  }
+
+  return allRawJobs;
+}
+
+/**
+ * Filter jobs by location using normalized locations or legacy location.
+ */
+function filterJobsByLocation(
+  jobs: NormalizedJob[],
+  normalizedLocations: NormalizedLocation[] | null,
+  legacyLocation: string | null
+): NormalizedJob[] {
+  // Use normalized locations if available
+  if (normalizedLocations && normalizedLocations.length > 0) {
+    // No location filter if locations array is empty (user selected "Anywhere")
+    // Already handled: normalizedLocations.length > 0
+
+    return jobs.filter(job =>
+      LocationNormalizerAgent.matchesJob(normalizedLocations, {
+        location: job.location,
+        isRemote: job.isRemote,
+      })
+    );
+  }
+
+  // Legacy location filter
+  if (legacyLocation) {
+    const locationParts = legacyLocation.toLowerCase().split(/[,\s]+/).filter(p => p.length > 2);
+    return jobs.filter(job => {
+      // Always include remote jobs
+      if (job.isRemote) return true;
+
+      // Check if job location matches any part
+      const jobLocationLower = (job.location || '').toLowerCase();
+      for (const part of locationParts) {
+        if (jobLocationLower.includes(part)) return true;
+      }
+      return false;
+    });
+  }
+
+  // No location filter
+  return jobs;
+}
 
 interface SearchResult {
   usersProcessed: number;
@@ -81,30 +220,21 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   logger.info('Scheduler', `[Manual] Scanning for ${userLabel}: ${sub.jobTitles.join(', ')}`);
 
   try {
-  // Collect jobs for each title using user's date preference
-  type DatePostedType = 'today' | '3days' | 'week' | 'month' | 'all';
+  // Parse normalized locations from JSON field
+  const normalizedLocations = sub.normalizedLocations as NormalizedLocation[] | null;
   const datePosted = (sub.datePosted || 'month') as DatePostedType;
-  const allRawJobs = [];
 
-  for (const title of sub.jobTitles) {
-    try {
-      logger.info('Scheduler', `[Manual] Collecting jobs for: "${title}"`);
-      const jobs = await queueService.enqueueCollection({
-        query: title,
-        location: sub.location ?? undefined,
-        isRemote: sub.isRemote,
-        limit: 3000,
-        source: 'jobspy',
-        skipCache: true, // Manual scans always fetch fresh results
-        datePosted: datePosted === 'all' ? undefined : datePosted,
-      }, PRIORITY.MANUAL_SCAN);
-      logger.info('Scheduler', `[Manual] Found ${jobs.length} jobs for "${title}"`);
-      allRawJobs.push(...jobs);
-    } catch (error) {
-      logger.error('Scheduler', `[Manual] Failed to collect jobs for "${title}"`, error);
-      // Continue with other titles
-    }
-  }
+  // Collect jobs using multi-location aware helper
+  const allRawJobs = await collectJobsForSubscription({
+    jobTitles: sub.jobTitles,
+    normalizedLocations,
+    legacyLocation: sub.location,
+    legacyIsRemote: sub.isRemote,
+    datePosted,
+    limit: 3000,
+    skipCache: true, // Manual scans always fetch fresh results
+    priority: PRIORITY.MANUAL_SCAN,
+  });
 
   logger.info('Scheduler', `[Manual] Total raw jobs collected: ${allRawJobs.length}`);
 
@@ -130,28 +260,12 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     });
   }
 
-  // Apply location filter if user specified a location
-  if (sub.location) {
-    const beforeLocationFilter = normalizedJobs.length;
-    // Extract key parts from user's location (e.g., "Toronto, Ontario, Canada" -> ["toronto", "ontario", "canada"])
-    const locationParts = sub.location.toLowerCase().split(/[,\s]+/).filter(p => p.length > 2);
-
-    normalizedJobs = normalizedJobs.filter((job) => {
-      // Always include remote jobs - they can work from user's location
-      if (job.isRemote) return true;
-
-      // Check if job location contains any part of user's location
-      const jobLocationLower = (job.location || '').toLowerCase();
-      for (const part of locationParts) {
-        if (jobLocationLower.includes(part)) return true;
-      }
-      return false;
-    });
-
-    const filtered = beforeLocationFilter - normalizedJobs.length;
-    if (filtered > 0) {
-      logger.info('Scheduler', `[Manual] Filtered ${filtered} jobs outside "${sub.location}"`);
-    }
+  // Apply location filter using normalized locations or legacy location
+  const beforeLocationFilter = normalizedJobs.length;
+  normalizedJobs = filterJobsByLocation(normalizedJobs, normalizedLocations, sub.location);
+  const locationFiltered = beforeLocationFilter - normalizedJobs.length;
+  if (locationFiltered > 0) {
+    logger.info('Scheduler', `[Manual] Filtered ${locationFiltered} jobs by location`);
   }
 
   // Match jobs and track stats
@@ -356,30 +470,21 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       );
       const skipDupes = sub.user.skipCrossSubDuplicates;
 
-      // Step 1: Collect jobs for each title using user's date preference
-      type DatePostedType = 'today' | '3days' | 'week' | 'month' | 'all';
+      // Parse normalized locations from JSON field
+      const normalizedLocations = sub.normalizedLocations as NormalizedLocation[] | null;
       const datePosted = (sub.datePosted || 'month') as DatePostedType;
-      const allRawJobs = [];
 
-      for (const title of sub.jobTitles) {
-        try {
-          logger.info('Scheduler', `  Collecting jobs for: "${title}"`);
-          const jobs = await queueService.enqueueCollection({
-            query: title,
-            location: sub.location ?? undefined,
-            isRemote: sub.isRemote,
-            limit: 3000,
-            source: 'jobspy',
-            skipCache: false,
-            datePosted: datePosted === 'all' ? undefined : datePosted,
-          }, PRIORITY.SCHEDULED);
-          logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}"`);
-          allRawJobs.push(...jobs);
-        } catch (error) {
-          logger.error('Scheduler', `  Failed to collect jobs for "${title}"`, error);
-          // Continue with other titles
-        }
-      }
+      // Step 1: Collect jobs using multi-location aware helper
+      const allRawJobs = await collectJobsForSubscription({
+        jobTitles: sub.jobTitles,
+        normalizedLocations,
+        legacyLocation: sub.location,
+        legacyIsRemote: sub.isRemote,
+        datePosted,
+        limit: 3000,
+        skipCache: false,
+        priority: PRIORITY.SCHEDULED,
+      });
 
       logger.info('Scheduler', `  Total collected: ${allRawJobs.length} raw jobs`);
 
@@ -416,28 +521,12 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         }
       }
 
-      // Step 2.6: Apply location filter if user specified a location
-      if (sub.location) {
-        const beforeLocationFilter = normalizedJobs.length;
-        // Extract key parts from user's location (e.g., "Toronto, Ontario, Canada" -> ["toronto", "ontario", "canada"])
-        const locationParts = sub.location.toLowerCase().split(/[,\s]+/).filter(p => p.length > 2);
-
-        normalizedJobs = normalizedJobs.filter((job) => {
-          // Always include remote jobs - they can work from user's location
-          if (job.isRemote) return true;
-
-          // Check if job location contains any part of user's location
-          const jobLocationLower = (job.location || '').toLowerCase();
-          for (const part of locationParts) {
-            if (jobLocationLower.includes(part)) return true;
-          }
-          return false;
-        });
-
-        const filtered = beforeLocationFilter - normalizedJobs.length;
-        if (filtered > 0) {
-          logger.info('Scheduler', `  Filtered ${filtered} jobs outside "${sub.location}"`);
-        }
+      // Step 2.6: Apply location filter using normalized locations or legacy location
+      const beforeLocationFilter = normalizedJobs.length;
+      normalizedJobs = filterJobsByLocation(normalizedJobs, normalizedLocations, sub.location);
+      const locationFiltered = beforeLocationFilter - normalizedJobs.length;
+      if (locationFiltered > 0) {
+        logger.info('Scheduler', `  Filtered ${locationFiltered} jobs by location`);
       }
 
       // Step 3: Match jobs and track stats
