@@ -84,9 +84,10 @@ async function showLocationConfirmation(
     locationDisplay = 'Anywhere';
   } else {
     const lines = dedupedLocations.map(loc => {
-      if (loc.type === 'remote') {
+      if (loc.type === 'remote' && loc.country === 'Worldwide') {
         return '• Remote';
       }
+      // For country-specific remote (e.g., "Canada (Remote)") or physical, use display name
       return `• ${loc.display}`;
     });
     locationDisplay = lines.join('\n');
