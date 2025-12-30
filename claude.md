@@ -35,6 +35,11 @@ npm run dev
 | `/jobs` | GET | List all collected jobs |
 | `/matches` | GET | List all job matches with scores |
 | `/queue/status` | GET | Queue monitoring (waiting/active/completed counts) |
+| `/admin` | GET | Admin dashboard (requires `ADMIN_API_KEY` header) |
+| `/admin/api/overview` | GET | Dashboard overview stats |
+| `/admin/api/users` | GET | List users with subscription counts |
+| `/admin/api/subscriptions` | GET | List all subscriptions |
+| `/admin/api/runs` | GET | Recent subscription runs with error details |
 
 ## Example: Search Jobs
 
@@ -119,13 +124,22 @@ src/
 │       ├── collection.ts # JobSpy/SerpAPI worker (concurrency: 2)
 │       └── matching.ts   # LLM matching worker (concurrency: 5)
 ├── scheduler/
-│   ├── cron.ts           # Per-minute scheduler for subscriptions
+│   ├── cron.ts           # Per-minute scheduler + stuck run cleanup
 │   └── jobs/
 │       └── search-subscriptions.ts  # Subscription search logic
 ├── telegram/
 │   ├── bot.ts            # Telegram bot initialization
 │   ├── handlers/         # Command and callback handlers
 │   └── services/         # Notification services
+├── observability/        # Run tracking and analytics
+│   ├── index.ts          # Module exports
+│   ├── tracker.ts        # RunTracker for subscription execution
+│   ├── analytics.ts      # Skill stats and market insights
+│   └── cleanup.ts        # Old data cleanup scheduler
+├── admin/                # Admin dashboard
+│   ├── index.ts          # Module exports
+│   ├── routes.ts         # Admin API routes (auth protected)
+│   └── dashboard.ts      # HTML dashboard generator
 ├── schemas/
 │   └── llm-outputs.ts    # Zod schemas for LLM responses
 └── utils/
@@ -249,6 +263,9 @@ SUBSCRIPTION_INTERVAL_HOURS=1   # Hours between subscription runs
 # Server
 PORT=3001
 LOG_LEVEL=info  # debug | info | warn | error (default: info)
+
+# Admin Dashboard
+ADMIN_API_KEY=your-secret-key  # Required for /admin access
 ```
 
 ## Data Sources
@@ -376,6 +393,110 @@ The new per-subscription approach:
 - Manual scans get priority (jump the queue)
 - No waiting for other users' jobs
 
+## Observability
+
+The system tracks every subscription run for debugging and analytics.
+
+### Run Tracking
+
+Every subscription execution (scheduled or manual) creates a `SubscriptionRun` record:
+
+```typescript
+// Start tracking
+const runId = await RunTracker.start(subscriptionId, 'scheduled');
+
+// Update progress
+await RunTracker.update(runId, { jobsCollected: 50 });
+
+// Complete with final stats
+await RunTracker.complete(runId, { jobsCollected: 50, jobsMatched: 5, notificationsSent: 3 });
+
+// Or fail with error context
+await RunTracker.fail(runId, error, {
+  stage: 'collection',
+  query: 'Software Engineer',
+  location: 'Remote',
+  partialResults: { jobsCollected: 0 }
+});
+```
+
+### Error Context
+
+When runs fail, structured context is captured for debugging:
+
+| Field | Description |
+|-------|-------------|
+| `stage` | Where it failed: `collection`, `normalization`, `matching`, `notification` |
+| `query` | Job title being searched |
+| `location` | Location being searched |
+| `jobTitle` / `company` | Specific job being processed (for matching failures) |
+| `partialResults` | Progress before failure (collected/normalized/matched counts) |
+| `queueJobId` | Bull queue job ID |
+| `requestId` | Request correlation ID |
+
+### Stuck Run Cleanup
+
+A cron job runs every 5 minutes to detect and fail stuck runs:
+- Runs with `status: 'running'` for >10 minutes are marked as failed
+- Prevents zombie runs from blocking the system
+- Logs cleanup actions for visibility
+
+### Preventing Duplicate Runs
+
+In-memory tracking prevents the same subscription from running twice:
+```typescript
+if (!markSubscriptionRunning(subscriptionId)) {
+  return; // Already running, skip
+}
+try {
+  await processSubscription(subscriptionId);
+} finally {
+  markSubscriptionFinished(subscriptionId);
+}
+```
+
+## Admin Dashboard
+
+Access the admin dashboard at `/admin` with the `ADMIN_API_KEY` header.
+
+### Features
+
+**Overview Cards:**
+- Total users, active today, new this week
+- Subscription counts (total, active, paused)
+- 24h activity (jobs scanned, matches, notifications)
+- Failed runs count with failure rate
+
+**Tabs:**
+- **Users**: List of users with subscription counts and activity
+- **Subscriptions**: All subscriptions with status, last/next run times
+- **Runs**: Recent subscription runs with expandable error details
+
+### Viewing Failed Runs
+
+Click on any failed run row to expand error details showing:
+- Error message
+- Failed stage (collection/normalization/matching/notification)
+- Query and location being searched
+- Progress before failure
+- Specific job being processed (for matching failures)
+- Full JSON context for deep debugging
+
+### API Access
+
+All admin endpoints require the `ADMIN_API_KEY` header:
+
+```bash
+# Get dashboard HTML
+curl -H "ADMIN_API_KEY: your-key" http://localhost:3001/admin
+
+# Get overview data as JSON
+curl -H "ADMIN_API_KEY: your-key" http://localhost:3001/admin/api/overview
+
+# Get recent runs with error context
+curl -H "ADMIN_API_KEY: your-key" http://localhost:3001/admin/api/runs
+```
+
 ## Pre-Deploy Checklist
 
 Before deploying schema or dependency changes:
@@ -406,3 +527,17 @@ npx prisma db execute --stdin <<< "SELECT COUNT(*) FROM job_matches;"
 - **Prisma requires Node 20+** for client generation
 - If you see corrupted Prisma output or CLI errors, check `node --version`
 - Use `nvm use 20` before running `npx prisma generate` or `npx prisma db push`
+
+### After Every Task Completion
+**ALWAYS update documentation** when completing tasks that:
+- Add new features or endpoints
+- Change architecture or data flow
+- Add new environment variables
+- Modify database schema
+- Add new observability/debugging capabilities
+
+Update these files as needed:
+1. `CLAUDE.md` - Technical docs for AI assistants and developers
+2. `README.md` - User-facing docs (if applicable)
+
+This ensures the codebase remains self-documenting and future development is easier.
