@@ -45,6 +45,25 @@ function getResumeHash(text: string): string {
 }
 
 /**
+ * Build clarification message with numbered options and simple number buttons
+ * This avoids truncated button text on mobile
+ * Includes "Other" option for custom text input
+ */
+function buildClarificationUI(question: string, options: string[]): { message: string; keyboard: InlineKeyboard } {
+  // Build message with numbered options
+  const optionLines = options.map((opt, idx) => `<b>${idx + 1}.</b> ${opt}`);
+  const message = `<b>${question}</b>\n\n${optionLines.join('\n')}\n\n<i>Or type your own clarification below:</i>`;
+
+  // Build keyboard with simple number buttons in a row
+  const keyboard = new InlineKeyboard();
+  options.forEach((_, idx) => {
+    keyboard.text(`${idx + 1}`, `loc_clarify:${idx}`);
+  });
+
+  return { message, keyboard };
+}
+
+/**
  * Show location confirmation message with parsed locations
  */
 async function showLocationConfirmation(
@@ -190,11 +209,11 @@ export function setupConversation(bot: Bot<BotContext>): void {
       });
 
       if (result.needsClarification) {
-        // Still needs more clarification
-        const keyboard = new InlineKeyboard();
-        result.needsClarification.options.forEach((option, idx) => {
-          keyboard.text(option, `loc_clarify:${idx}`).row();
-        });
+        // Still needs more clarification - use numbered UI
+        const { message, keyboard } = buildClarificationUI(
+          result.needsClarification.question,
+          result.needsClarification.options
+        );
 
         await db.telegramUser.update({
           where: { id: ctx.telegramUser.id },
@@ -206,10 +225,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
           },
         });
 
-        await ctx.reply(
-          `<b>${result.needsClarification.question}</b>`,
-          { parse_mode: 'HTML', reply_markup: keyboard }
-        );
+        await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
         return;
       }
 
@@ -319,11 +335,11 @@ export function setupConversation(bot: Bot<BotContext>): void {
           const result = await normalizer.execute({ text });
 
           if (result.needsClarification) {
-            // Need to ask user for clarification
-            const keyboard = new InlineKeyboard();
-            result.needsClarification.options.forEach((option, idx) => {
-              keyboard.text(option, `loc_clarify:${idx}`).row();
-            });
+            // Need to ask user for clarification - use numbered UI
+            const { message, keyboard } = buildClarificationUI(
+              result.needsClarification.question,
+              result.needsClarification.options
+            );
 
             await db.telegramUser.update({
               where: { id: ctx.telegramUser.id },
@@ -338,10 +354,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
               },
             });
 
-            await ctx.reply(
-              `<b>${result.needsClarification.question}</b>`,
-              { parse_mode: 'HTML', reply_markup: keyboard }
-            );
+            await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
             break;
           }
 
@@ -371,16 +384,13 @@ export function setupConversation(bot: Bot<BotContext>): void {
           });
 
           if (result.needsClarification) {
-            // Still needs clarification - show options again
-            const keyboard = new InlineKeyboard();
-            result.needsClarification.options.forEach((option, idx) => {
-              keyboard.text(option, `loc_clarify:${idx}`).row();
-            });
-
-            await ctx.reply(
-              `<b>${result.needsClarification.question}</b>`,
-              { parse_mode: 'HTML', reply_markup: keyboard }
+            // Still needs clarification - use numbered UI
+            const { message, keyboard } = buildClarificationUI(
+              result.needsClarification.question,
+              result.needsClarification.options
             );
+
+            await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
             break;
           }
 
@@ -448,10 +458,11 @@ export function setupConversation(bot: Bot<BotContext>): void {
           const result = await normalizer.execute({ text });
 
           if (result.needsClarification) {
-            const keyboard = new InlineKeyboard();
-            result.needsClarification.options.forEach((option, idx) => {
-              keyboard.text(option, `loc_clarify:${idx}`).row();
-            });
+            // Need to ask user for clarification - use numbered UI
+            const { message, keyboard } = buildClarificationUI(
+              result.needsClarification.question,
+              result.needsClarification.options
+            );
 
             await db.telegramUser.update({
               where: { id: ctx.telegramUser.id },
@@ -466,10 +477,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
               },
             });
 
-            await ctx.reply(
-              `<b>${result.needsClarification.question}</b>`,
-              { parse_mode: 'HTML', reply_markup: keyboard }
-            );
+            await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
             break;
           }
 
