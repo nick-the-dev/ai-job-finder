@@ -20,6 +20,8 @@ interface SearchResult {
 interface SingleSearchResult {
   matchesFound: number;
   notificationsSent: number;
+  stats: MatchStats;
+  jobsProcessed: number;
 }
 
 export interface MatchStats {
@@ -262,7 +264,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
 
   logger.info('Scheduler', `[Manual] Results: ${newMatches.length} new | ${stats.skippedAlreadySent} already sent | ${stats.skippedBelowScore} below threshold | ${stats.skippedCrossSubDuplicates} cross-sub skipped`);
 
-  return { matchesFound: newMatches.length, notificationsSent };
+  return { matchesFound: newMatches.length, notificationsSent, stats, jobsProcessed: normalizedJobs.length };
 }
 
 export async function runSubscriptionSearches(): Promise<SearchResult> {

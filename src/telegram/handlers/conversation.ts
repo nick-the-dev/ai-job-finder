@@ -467,10 +467,25 @@ async function createSubscription(
             { parse_mode: 'HTML' }
           );
         } else {
+          // Build explanation of why no matches
+          const { stats, jobsProcessed } = result;
+          const reasons: string[] = [];
+          if (jobsProcessed === 0) {
+            reasons.push('No jobs found for your search criteria');
+          } else {
+            if (stats.skippedBelowScore > 0) reasons.push(`${stats.skippedBelowScore} below score threshold`);
+            if (stats.skippedAlreadySent > 0) reasons.push(`${stats.skippedAlreadySent} already sent`);
+            if (stats.skippedCrossSubDuplicates > 0) reasons.push(`${stats.skippedCrossSubDuplicates} matched via other subscription`);
+          }
+
+          const reasonText = reasons.length > 0
+            ? `\n<i>(${reasons.join(', ')})</i>`
+            : '';
+
           await ctx.api.sendMessage(
             chatId,
             `✅ <b>First scan complete!</b>\n\n` +
-              `No matches found at this time.\n\n` +
+              `Processed <b>${jobsProcessed}</b> jobs, no new matches.${reasonText}\n\n` +
               "I'll keep searching every hour and notify you when I find something.",
             { parse_mode: 'HTML' }
           );
