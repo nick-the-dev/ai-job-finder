@@ -525,7 +525,8 @@ Ready to get started?
             pros: jobMatch.pros,
             cons: jobMatch.cons,
           },
-        }));
+        }))
+        .sort((a, b) => b.match.score - a.match.score);
 
       // Generate CSV and download token with content stored in database
       const { filename: csvFilename, content: csvContent } = await saveMatchesToCSV(matches);
