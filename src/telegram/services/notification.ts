@@ -5,6 +5,13 @@ import { logger } from '../../utils/logger.js';
 import { saveMatchesToCSV, generateDownloadToken } from '../../utils/csv.js';
 import { config } from '../../config.js';
 
+// Subscription context for notifications
+export interface SubscriptionContext {
+  jobTitles: string[];
+  location?: string | null;
+  isRemote?: boolean;
+}
+
 const MAX_MESSAGE_LENGTH = 3500; // Telegram limit is 4096, leave buffer
 
 function escapeHtml(text: string): string {
@@ -24,6 +31,20 @@ function formatScore(score: number): string {
   if (score >= 70) return `${score} (Strong)`;
   if (score >= 50) return `${score} (Moderate)`;
   return `${score} (Weak)`;
+}
+
+function formatSubscriptionLabel(ctx: SubscriptionContext): string {
+  const titles = ctx.jobTitles.slice(0, 2).join(', ');
+  const moreTitles = ctx.jobTitles.length > 2 ? ` +${ctx.jobTitles.length - 2}` : '';
+
+  let location = '';
+  if (ctx.isRemote) {
+    location = ctx.location ? `${ctx.location} (Remote)` : 'Remote';
+  } else if (ctx.location) {
+    location = ctx.location;
+  }
+
+  return location ? `${titles}${moreTitles} · ${location}` : `${titles}${moreTitles}`;
 }
 
 function formatSalary(job: NormalizedJob, match: JobMatchResult): string {
@@ -111,14 +132,19 @@ ${escapeHtml(truncate(match.reasoning || 'No reasoning provided', 300))}
 export async function sendMatchSummary(
   chatId: bigint,
   matches: MatchItem[],
-  stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 }
+  stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 },
+  subscriptionContext?: SubscriptionContext
 ): Promise<void> {
   if (matches.length === 0) return;
 
   const bot = getBot();
   const sorted = [...matches].sort((a, b) => b.match.score - a.match.score);
 
+  // Build header with subscription context if available
   let message = `<b>Found ${matches.length} New Job Match${matches.length > 1 ? 'es' : ''}!</b>\n`;
+  if (subscriptionContext) {
+    message += `<i>${escapeHtml(formatSubscriptionLabel(subscriptionContext))}</i>\n`;
+  }
 
   // Show skipped stats (compact)
   const skipped: string[] = [];

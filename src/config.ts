@@ -17,7 +17,7 @@ const envSchema = z.object({
   QUEUE_FALLBACK_ENABLED: z.coerce.boolean().default(true),
 
   // Scheduling
-  SUBSCRIPTION_INTERVAL_HOURS: z.coerce.number().default(1),
+  SUBSCRIPTION_INTERVAL_HOURS: z.coerce.number().default(2),
 
   // OpenRouter
   OPENROUTER_API_KEY: z.string().min(1),

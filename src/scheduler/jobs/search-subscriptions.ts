@@ -3,7 +3,7 @@ import { getDb } from '../../db/client.js';
 import { NormalizerService } from '../../services/normalizer.js';
 import { MatcherAgent } from '../../agents/matcher.js';
 import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
-import { sendMatchSummary } from '../../telegram/services/notification.js';
+import { sendMatchSummary, type SubscriptionContext } from '../../telegram/services/notification.js';
 import { logger, createSubscriptionLogger, type SubscriptionLogger } from '../../utils/logger.js';
 import { queueService, PRIORITY, type Priority } from '../../queue/index.js';
 import { RunTracker, updateSkillStats, createMarketSnapshot, type ErrorContext } from '../../observability/index.js';
@@ -504,7 +504,16 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
       })),
     });
 
-    await sendMatchSummary(sub.user.chatId, newMatches, stats);
+    // Build subscription context for notification header
+    const subscriptionContext: SubscriptionContext = {
+      jobTitles: sub.jobTitles,
+      location: normalizedLocations
+        ? LocationNormalizerAgent.formatForDisplaySingleLine(normalizedLocations)
+        : sub.location,
+      isRemote: sub.isRemote,
+    };
+
+    await sendMatchSummary(sub.user.chatId, newMatches, stats, subscriptionContext);
 
     // Use createMany with skipDuplicates to handle concurrent runs safely
     const created = await db.sentNotification.createMany({
@@ -903,8 +912,17 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
           })),
         });
 
+        // Build subscription context for notification header
+        const subscriptionContext: SubscriptionContext = {
+          jobTitles: sub.jobTitles,
+          location: normalizedLocations
+            ? LocationNormalizerAgent.formatForDisplaySingleLine(normalizedLocations)
+            : sub.location,
+          isRemote: sub.isRemote,
+        };
+
         try {
-          await sendMatchSummary(sub.user.chatId, newMatches, stats);
+          await sendMatchSummary(sub.user.chatId, newMatches, stats, subscriptionContext);
 
           // Use createMany with skipDuplicates to handle concurrent runs safely
           const created = await db.sentNotification.createMany({
