@@ -6,7 +6,13 @@ AI-powered job aggregation and matching system that collects jobs from multiple 
 
 ## Quick Start
 
+**Requirements:** Node.js 20+ (required for Prisma)
+
 ```bash
+# Ensure Node 20+ (required for Prisma client generation)
+node --version  # Should be v20.x or higher
+nvm use 20      # If using nvm
+
 # Start database
 docker compose up -d
 
@@ -395,3 +401,8 @@ npx prisma db execute --stdin <<< "SELECT COUNT(*) FROM job_matches;"
 1. **ALWAYS run `npm run build`** before committing/pushing to catch TypeScript errors
 2. Schema changes may break code (e.g., removing `@@unique` removes composite key types)
 3. If build fails on deploy, check Dokploy logs for the actual error message
+
+### Node Version
+- **Prisma requires Node 20+** for client generation
+- If you see corrupted Prisma output or CLI errors, check `node --version`
+- Use `nvm use 20` before running `npx prisma generate` or `npx prisma db push`

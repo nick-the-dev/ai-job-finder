@@ -45,6 +45,34 @@ function getResumeHash(text: string): string {
 }
 
 /**
+ * Deduplicate locations - keep only one "Remote" entry and unique physical locations
+ */
+function deduplicateLocations(locations: NormalizedLocation[]): NormalizedLocation[] {
+  const result: NormalizedLocation[] = [];
+  let hasRemote = false;
+  const seenDisplays = new Set<string>();
+
+  for (const loc of locations) {
+    if (loc.type === 'remote') {
+      // Only keep first remote entry
+      if (!hasRemote) {
+        result.push(loc);
+        hasRemote = true;
+      }
+    } else {
+      // Deduplicate physical locations by display name (case-insensitive)
+      const key = loc.display.toLowerCase();
+      if (!seenDisplays.has(key)) {
+        seenDisplays.add(key);
+        result.push(loc);
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
  * Show location confirmation message with parsed locations
  */
 async function showLocationConfirmation(
@@ -55,12 +83,15 @@ async function showLocationConfirmation(
 ): Promise<void> {
   if (!ctx.telegramUser) return;
 
+  // Deduplicate locations (e.g., user says "Remote... USA remote" - keep only one Remote)
+  const dedupedLocations = deduplicateLocations(locations);
+
   // Format locations for display
   let locationDisplay: string;
-  if (locations.length === 0) {
+  if (dedupedLocations.length === 0) {
     locationDisplay = 'Anywhere';
   } else {
-    const lines = locations.map(loc => {
+    const lines = dedupedLocations.map(loc => {
       if (loc.type === 'remote') {
         return '• Remote';
       }
@@ -69,12 +100,12 @@ async function showLocationConfirmation(
     locationDisplay = lines.join('\n');
   }
 
-  // Save locations and move to confirmation state
+  // Save deduplicated locations and move to confirmation state
   await db.telegramUser.update({
     where: { id: ctx.telegramUser.id },
     data: {
       conversationState: 'awaiting_location_confirmation',
-      conversationData: { ...data, normalizedLocations: locations },
+      conversationData: { ...data, normalizedLocations: dedupedLocations },
     },
   });
 

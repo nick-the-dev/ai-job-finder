@@ -66,6 +66,10 @@ RULES:
 6. For country-wide searches, omit city/state and use country name for searchVariants
 7. For "anywhere", "worldwide", "skip", "any" → return empty locations array (no location filter)
 8. If input seems like a real location but you're not 100% sure it exists, parse it anyway - job boards will handle invalid locations gracefully
+9. IMPORTANT: If input mentions BOTH generic "remote" AND country-specific remote (e.g., "Remote... USA remote"), ask for clarification:
+   - User might want: global remote + on-site locations
+   - Or: ONLY country-specific remote + on-site (no global remote)
+   - Or: All three options (global remote + country-specific remote + on-site)
 
 EXAMPLES:
 
@@ -112,6 +116,20 @@ Output:
     { "raw": "Canada", "display": "Canada", "country": "Canada", "searchVariants": ["Canada", "CA"], "type": "physical" },
     { "raw": "remote", "display": "Remote", "country": "Worldwide", "searchVariants": [], "type": "remote" }
   ]
+}
+
+Input: "Remote, Canada Toronto preferable, but USA remote is okay"
+Output:
+{
+  "locations": [],
+  "needsClarification": {
+    "question": "You mentioned both 'Remote' and 'USA remote'. What do you mean?",
+    "options": [
+      "Remote anywhere + Toronto on-site",
+      "Toronto on-site + USA-based remote only (no global remote)",
+      "All: Remote anywhere + Toronto on-site + USA-based remote"
+    ]
+  }
 }`;
 
     let userPrompt = `Parse this location input: "${text}"`;
