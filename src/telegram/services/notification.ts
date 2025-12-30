@@ -1,5 +1,6 @@
 import { getBot } from '../bot.js';
 import type { NormalizedJob, JobMatchResult } from '../../core/types.js';
+import type { MatchStats, MatchItem } from '../../scheduler/jobs/search-subscriptions.js';
 import { logger } from '../../utils/logger.js';
 import { saveMatchesToCSV, generateDownloadToken } from '../../utils/csv.js';
 import { config } from '../../config.js';
@@ -109,23 +110,33 @@ ${escapeHtml(truncate(match.reasoning || 'No reasoning provided', 300))}
 // Send a batch summary of new matches
 export async function sendMatchSummary(
   chatId: bigint,
-  matches: Array<{ job: NormalizedJob; match: JobMatchResult }>
+  matches: MatchItem[],
+  stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 }
 ): Promise<void> {
   if (matches.length === 0) return;
 
   const bot = getBot();
-
-  // Sort by score descending
   const sorted = [...matches].sort((a, b) => b.match.score - a.match.score);
 
-  let message = `<b>Found ${matches.length} New Job Match${matches.length > 1 ? 'es' : ''}!</b>\n\n`;
+  let message = `<b>Found ${matches.length} New Job Match${matches.length > 1 ? 'es' : ''}!</b>\n`;
+
+  // Show skipped stats (compact)
+  const skipped: string[] = [];
+  if (stats.skippedAlreadySent > 0) skipped.push(`${stats.skippedAlreadySent} already sent`);
+  if (stats.skippedBelowScore > 0) skipped.push(`${stats.skippedBelowScore} below threshold`);
+  if (stats.skippedCrossSubDuplicates > 0) skipped.push(`${stats.skippedCrossSubDuplicates} matched via other sub`);
+  if (skipped.length > 0) message += `<i>(Skipped: ${skipped.join(', ')})</i>\n`;
+  if (stats.previouslyMatchedOther > 0) message += `<i>(${stats.previouslyMatchedOther} also matched via other sub)</i>\n`;
+
+  message += '\n';
 
   for (let i = 0; i < Math.min(sorted.length, 10); i++) {
-    const { job, match } = sorted[i];
+    const { job, match, isPreviouslyMatched } = sorted[i];
     const salary = formatSalary(job, match);
     const location = job.isRemote ? 'Remote' : job.location || 'N/A';
+    const marker = isPreviouslyMatched ? ' 🔄' : '';
 
-    message += `<b>${i + 1}. ${escapeHtml(truncate(job.title, 40))}</b>\n`;
+    message += `<b>${i + 1}. ${escapeHtml(truncate(job.title, 40))}${marker}</b>\n`;
     message += `   ${escapeHtml(truncate(job.company, 30))} | ${match.score} pts\n`;
     message += `   ${escapeHtml(location)} | ${salary}\n`;
 
@@ -139,6 +150,11 @@ export async function sendMatchSummary(
     message += `<i>...and ${sorted.length - 10} more matches</i>\n`;
   }
 
+  // Legend for 🔄 marker
+  if (sorted.some(m => m.isPreviouslyMatched)) {
+    message += `\n<i>🔄 = Also matched via another subscription</i>\n`;
+  }
+
   // Generate CSV download link if 10+ matches and APP_URL is configured
   if (sorted.length >= 10 && config.APP_URL) {
     try {
@@ -149,11 +165,9 @@ export async function sendMatchSummary(
       logger.info('Telegram', `Generated CSV download: ${csvFilename}`);
     } catch (error) {
       logger.error('Telegram', 'Failed to generate CSV', error);
-      // Continue without CSV link
     }
   }
 
-  // Truncate if too long
   if (message.length > MAX_MESSAGE_LENGTH) {
     message = message.substring(0, MAX_MESSAGE_LENGTH - 20) + '\n...[Truncated]';
   }

@@ -22,6 +22,20 @@ interface SingleSearchResult {
   notificationsSent: number;
 }
 
+export interface MatchStats {
+  skippedAlreadySent: number;
+  skippedBelowScore: number;
+  skippedCrossSubDuplicates: number;
+  previouslyMatchedOther: number;
+}
+
+export interface MatchItem {
+  job: NormalizedJob;
+  match: JobMatchResult;
+  matchId: string;
+  isPreviouslyMatched: boolean;
+}
+
 // Run search for a single subscription (used for immediate scan)
 export async function runSingleSubscriptionSearch(subscriptionId: string): Promise<SingleSearchResult> {
   const db = getDb();
@@ -29,16 +43,29 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   const sub = await db.searchSubscription.findUnique({
     where: { id: subscriptionId },
     include: {
-      user: true,
-      sentNotifications: {
-        select: { jobMatchId: true },
+      user: {
+        include: {
+          subscriptions: {
+            select: { id: true, sentNotifications: { select: { jobMatchId: true } } },
+          },
+        },
       },
+      sentNotifications: { select: { jobMatchId: true } },
     },
   });
 
   if (!sub || !sub.isActive) {
     throw new Error('Subscription not found or inactive');
   }
+
+  // Build Sets for O(1) deduplication lookups
+  const thisSentIds = new Set(sub.sentNotifications.map(n => n.jobMatchId));
+  const otherSentIds = new Set(
+    sub.user.subscriptions
+      .filter(s => s.id !== sub.id)
+      .flatMap(s => s.sentNotifications.map(n => n.jobMatchId))
+  );
+  const skipDupes = sub.user.skipCrossSubDuplicates;
 
   const userLabel = sub.user.username
     ? `@${sub.user.username}`
@@ -119,23 +146,15 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     }
   }
 
-  // Get already-sent job match IDs
-  const sentJobMatchIds = new Set(sub.sentNotifications.map((n) => n.jobMatchId));
-
-  // Match jobs and find NEW matches
-  const newMatches: Array<{
-    job: NormalizedJob;
-    match: JobMatchResult;
-    matchId: string;
-  }> = [];
+  // Match jobs and track stats
+  const newMatches: MatchItem[] = [];
+  const stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 };
 
   for (const job of normalizedJobs) {
     try {
       const existingJob = await db.job.findUnique({
         where: { contentHash: job.contentHash },
-        include: {
-          matches: { where: { resumeHash: sub.resumeHash }, take: 1 },
-        },
+        include: { matches: { where: { resumeHash: sub.resumeHash }, take: 1 } },
       });
 
       let matchResult: JobMatchResult;
@@ -197,9 +216,23 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
         jobMatchId = savedMatch.id;
       }
 
-      if (matchResult.score >= sub.minScore && !sentJobMatchIds.has(jobMatchId)) {
-        newMatches.push({ job, match: matchResult, matchId: jobMatchId });
+      // Track stats and apply filters
+      if (matchResult.score < sub.minScore) {
+        stats.skippedBelowScore++;
+        continue;
       }
+      if (thisSentIds.has(jobMatchId)) {
+        stats.skippedAlreadySent++;
+        continue;
+      }
+      const isPreviouslyMatched = otherSentIds.has(jobMatchId);
+      if (isPreviouslyMatched && skipDupes) {
+        stats.skippedCrossSubDuplicates++;
+        continue;
+      }
+      if (isPreviouslyMatched) stats.previouslyMatchedOther++;
+
+      newMatches.push({ job, match: matchResult, matchId: jobMatchId, isPreviouslyMatched });
     } catch (error) {
       logger.error('Scheduler', `[Manual] Failed to process job: ${job.title}`, error);
     }
@@ -209,20 +242,16 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
 
   if (newMatches.length > 0) {
     newMatches.sort((a, b) => b.match.score - a.match.score);
-    const toNotify = newMatches; // Send all matches
 
-    await sendMatchSummary(
-      sub.user.chatId,
-      toNotify.map(({ job, match }) => ({ job, match }))
-    );
+    await sendMatchSummary(sub.user.chatId, newMatches, stats);
 
-    for (const { matchId } of toNotify) {
+    for (const { matchId } of newMatches) {
       await db.sentNotification.create({
         data: { subscriptionId: sub.id, jobMatchId: matchId },
       });
     }
 
-    notificationsSent = toNotify.length;
+    notificationsSent = newMatches.length;
   }
 
   // Update last search timestamp
@@ -231,7 +260,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     data: { lastSearchAt: new Date() },
   });
 
-  logger.info('Scheduler', `[Manual] Found ${newMatches.length} matches, sent ${notificationsSent} notifications`);
+  logger.info('Scheduler', `[Manual] Results: ${newMatches.length} new | ${stats.skippedAlreadySent} already sent | ${stats.skippedBelowScore} below threshold | ${stats.skippedCrossSubDuplicates} cross-sub skipped`);
 
   return { matchesFound: newMatches.length, notificationsSent };
 }
@@ -246,10 +275,14 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       isPaused: false,
     },
     include: {
-      user: true,
-      sentNotifications: {
-        select: { jobMatchId: true },
+      user: {
+        include: {
+          subscriptions: {
+            select: { id: true, sentNotifications: { select: { jobMatchId: true } } },
+          },
+        },
       },
+      sentNotifications: { select: { jobMatchId: true } },
     },
   });
 
@@ -270,6 +303,15 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         : `user-${sub.user.telegramId}`;
 
       logger.info('Scheduler', `Processing ${userLabel}: ${sub.jobTitles.join(', ')}`);
+
+      // Build Sets for O(1) deduplication lookups
+      const thisSentIds = new Set(sub.sentNotifications.map(n => n.jobMatchId));
+      const otherSentIds = new Set(
+        sub.user.subscriptions
+          .filter(s => s.id !== sub.id)
+          .flatMap(s => s.sentNotifications.map(n => n.jobMatchId))
+      );
+      const skipDupes = sub.user.skipCrossSubDuplicates;
 
       // Step 1: Collect jobs for each title using user's date preference
       type DatePostedType = 'today' | '3days' | 'week' | 'month' | 'all';
@@ -355,15 +397,9 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         }
       }
 
-      // Step 3: Get already-sent job match IDs
-      const sentJobMatchIds = new Set(sub.sentNotifications.map((n) => n.jobMatchId));
-
-      // Step 4: Match jobs and find NEW matches
-      const newMatches: Array<{
-        job: NormalizedJob;
-        match: JobMatchResult;
-        matchId: string;
-      }> = [];
+      // Step 3: Match jobs and track stats
+      const newMatches: MatchItem[] = [];
+      const stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 };
 
       for (const job of normalizedJobs) {
         try {
@@ -444,42 +480,45 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
             jobMatchId = savedMatch.id;
           }
 
-          // Check if meets minScore and hasn't been sent before
-          if (matchResult.score >= sub.minScore && !sentJobMatchIds.has(jobMatchId)) {
-            newMatches.push({ job, match: matchResult, matchId: jobMatchId });
+          // Track stats and apply filters
+          if (matchResult.score < sub.minScore) {
+            stats.skippedBelowScore++;
+            continue;
           }
+          if (thisSentIds.has(jobMatchId)) {
+            stats.skippedAlreadySent++;
+            continue;
+          }
+          const isPreviouslyMatched = otherSentIds.has(jobMatchId);
+          if (isPreviouslyMatched && skipDupes) {
+            stats.skippedCrossSubDuplicates++;
+            continue;
+          }
+          if (isPreviouslyMatched) stats.previouslyMatchedOther++;
+
+          newMatches.push({ job, match: matchResult, matchId: jobMatchId, isPreviouslyMatched });
         } catch (error) {
           logger.error('Scheduler', `  Failed to process job: ${job.title}`, error);
         }
       }
 
-      logger.info('Scheduler', `  Found ${newMatches.length} new matches (score >= ${sub.minScore})`);
+      logger.info('Scheduler', `  Results: ${newMatches.length} new | ${stats.skippedAlreadySent} already sent | ${stats.skippedBelowScore} below threshold | ${stats.skippedCrossSubDuplicates} cross-sub skipped`);
       totalMatchesFound += newMatches.length;
 
       if (newMatches.length > 0) {
-        // Sort by score descending
         newMatches.sort((a, b) => b.match.score - a.match.score);
-        const toNotify = newMatches; // Send all matches
 
-        // Send notification summary
         try {
-          await sendMatchSummary(
-            sub.user.chatId,
-            toNotify.map(({ job, match }) => ({ job, match }))
-          );
+          await sendMatchSummary(sub.user.chatId, newMatches, stats);
 
-          // Record all as sent
-          for (const { matchId } of toNotify) {
+          for (const { matchId } of newMatches) {
             await db.sentNotification.create({
-              data: {
-                subscriptionId: sub.id,
-                jobMatchId: matchId,
-              },
+              data: { subscriptionId: sub.id, jobMatchId: matchId },
             });
           }
 
-          totalNotifications += toNotify.length;
-          logger.info('Scheduler', `  Sent ${toNotify.length} notifications to ${userLabel}`);
+          totalNotifications += newMatches.length;
+          logger.info('Scheduler', `  Sent ${newMatches.length} notifications to ${userLabel}`);
         } catch (error) {
           logger.error('Scheduler', `  Failed to send notifications to ${userLabel}`, error);
         }

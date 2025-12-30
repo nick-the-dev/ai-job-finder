@@ -16,6 +16,7 @@ interface ConversationData {
   datePosted?: string;
   excludedTitles?: string[];
   excludedCompanies?: string[];
+  skipCrossSubDuplicates?: boolean;
 }
 
 // Date range options for JobSpy
@@ -282,8 +283,48 @@ export function setupConversation(bot: Bot<BotContext>): void {
             .filter((t) => t.length > 0);
         }
 
+        // Move to step 8: cross-subscription duplicates preference
+        await db.telegramUser.update({
+          where: { id: ctx.telegramUser.id },
+          data: {
+            conversationState: 'awaiting_cross_sub_preference',
+            conversationData: { ...data, excludedCompanies },
+          },
+        });
+
+        const excludedText = excludedCompanies.length > 0
+          ? excludedCompanies.join(', ')
+          : 'None';
+
+        await ctx.reply(
+          `<b>Excluded Companies:</b> ${excludedText}\n\n` +
+            '<b>Step 8/8: Cross-Subscription Duplicates</b>\n\n' +
+            'If a job matches multiple of your subscriptions, should I:\n\n' +
+            '1️⃣ <b>Skip it</b> - Only notify once (Recommended)\n' +
+            '2️⃣ <b>Show it</b> - Notify for each subscription (marked with 🔄)\n\n' +
+            'Send <b>1</b> or <b>2</b>, or <b>"Skip"</b> for default (Skip duplicates)',
+          { parse_mode: 'HTML' }
+        );
+        break;
+      }
+
+      case 'awaiting_cross_sub_preference': {
+        let skipCrossSubDuplicates = true; // default
+
+        const lowerText = text.toLowerCase();
+        if (lowerText !== 'skip') {
+          if (text === '1') {
+            skipCrossSubDuplicates = true;
+          } else if (text === '2') {
+            skipCrossSubDuplicates = false;
+          } else {
+            await ctx.reply('Please enter 1 or 2, or "Skip" for default.');
+            return;
+          }
+        }
+
         // Create subscription with all data
-        const finalData = { ...data, excludedCompanies } as ConversationData;
+        const finalData = { ...data, skipCrossSubDuplicates } as ConversationData;
         await createSubscription(ctx, finalData);
         break;
       }
@@ -333,6 +374,14 @@ async function createSubscription(
       return;
     }
 
+    // Update user's cross-sub preference if changed
+    if (data.skipCrossSubDuplicates !== undefined) {
+      await db.telegramUser.update({
+        where: { id: ctx.telegramUser.id },
+        data: { skipCrossSubDuplicates: data.skipCrossSubDuplicates },
+      });
+    }
+
     // Create new subscription (multiple allowed)
     const subscription = await db.searchSubscription.create({
       data: {
@@ -375,6 +424,9 @@ async function createSubscription(
     const excludedCompaniesText = data.excludedCompanies?.length
       ? data.excludedCompanies.join(', ')
       : 'None';
+    const crossSubText = data.skipCrossSubDuplicates === false
+      ? 'Show with 🔄 marker'
+      : 'Skip duplicates';
 
     // Build inline keyboard
     const keyboard = new InlineKeyboard()
@@ -389,7 +441,8 @@ async function createSubscription(
         `<b>Date Range:</b> ${dateRangeText}\n` +
         `<b>Resume:</b> ${data.resumeName || 'Uploaded'}\n` +
         `<b>Excluded Titles:</b> ${excludedTitlesText}\n` +
-        `<b>Excluded Companies:</b> ${excludedCompaniesText}\n\n` +
+        `<b>Excluded Companies:</b> ${excludedCompaniesText}\n` +
+        `<b>Cross-Sub Duplicates:</b> ${crossSubText}\n\n` +
         '🔍 <b>Starting your first scan now...</b>\n' +
         "I'll notify you when I find matches, and continue searching every hour.",
       { parse_mode: 'HTML', reply_markup: keyboard }

@@ -156,6 +156,10 @@ model TelegramUser {
   conversationState  String?  @map("conversation_state")
   conversationData   Json?    @map("conversation_data")
 
+  // If true, skip jobs already matched via other subscriptions
+  // If false, show them with a marker
+  skipCrossSubDuplicates  Boolean  @default(true) @map("skip_cross_sub_duplicates")
+
   createdAt     DateTime @default(now()) @map("created_at")
   lastActiveAt  DateTime @default(now()) @map("last_active_at")
 
