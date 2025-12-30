@@ -226,6 +226,7 @@ model DownloadToken {
   id        String   @id @default(uuid())
   token     String   @unique
   filename  String
+  content   String?  // CSV content stored in database for persistence
   createdAt DateTime @default(now()) @map("created_at")
 
   @@map("download_tokens")

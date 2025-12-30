@@ -527,9 +527,9 @@ Ready to get started?
           },
         }));
 
-      // Generate CSV and download token
-      const csvFilename = await saveMatchesToCSV(matches);
-      const downloadToken = await generateDownloadToken(csvFilename);
+      // Generate CSV and download token with content stored in database
+      const { filename: csvFilename, content: csvContent } = await saveMatchesToCSV(matches);
+      const downloadToken = await generateDownloadToken(csvFilename, csvContent);
 
       const baseUrl = config.APP_URL || `http://localhost:${config.PORT}`;
       const downloadUrl = `${baseUrl}/download/${downloadToken}`;
@@ -537,8 +537,7 @@ Ready to get started?
       await ctx.editMessageText(
         `📥 <b>Download Ready</b>\n\n` +
           `<b>${matches.length}</b> unique job matches from all time.\n\n` +
-          `<a href="${downloadUrl}">📄 Download CSV</a>\n\n` +
-          `<i>Link expires when the file is cleaned up.</i>`,
+          `<a href="${downloadUrl}">📄 Download CSV</a>`,
         {
           parse_mode: 'HTML',
           reply_markup: new InlineKeyboard().text('« Back', `sub:view:${subId}`),

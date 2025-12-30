@@ -184,8 +184,8 @@ export async function sendMatchSummary(
   // Generate CSV download link if 10+ matches and APP_URL is configured
   if (sorted.length >= 10 && config.APP_URL) {
     try {
-      const csvFilename = await saveMatchesToCSV(sorted);
-      const downloadToken = await generateDownloadToken(csvFilename);
+      const { filename: csvFilename, content: csvContent } = await saveMatchesToCSV(sorted);
+      const downloadToken = await generateDownloadToken(csvFilename, csvContent);
       const downloadUrl = `${config.APP_URL}/download/${downloadToken}`;
       message += `\n📥 <a href="${downloadUrl}">Download all ${sorted.length} matches as CSV</a>`;
       logger.info('Telegram', `Generated CSV download: ${csvFilename}`);

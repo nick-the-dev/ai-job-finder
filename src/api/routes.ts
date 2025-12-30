@@ -344,12 +344,12 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
 
     // Save filtered results to CSV (strip cached field for CSV export)
     const matchesForCSV = filteredMatches.map(({ job, match }) => ({ job, match }));
-    const csvFilename = await saveMatchesToCSV(matchesForCSV);
+    const { filename: csvFilename, content: csvContent } = await saveMatchesToCSV(matchesForCSV);
     const csvAbsolutePath = join(process.cwd(), 'exports', csvFilename);
     logger.info('API', `CSV saved: ${csvAbsolutePath}`);
 
-    // Generate secure download token (persisted in database)
-    const downloadToken = await generateDownloadToken(csvFilename);
+    // Generate secure download token with content stored in database
+    const downloadToken = await generateDownloadToken(csvFilename, csvContent);
     const protocol = req.protocol;
     const host = req.get('host');
     const downloadUrl = `${protocol}://${host}/download/${downloadToken}`;
@@ -420,25 +420,25 @@ router.get('/download/:token', async (req: Request, res: Response, next: NextFun
   try {
     const { token } = req.params;
 
-    // Validate token and get filename
-    const filename = await validateDownloadToken(token);
-    if (!filename) {
+    // Validate token and get filename + content
+    const tokenData = await validateDownloadToken(token);
+    if (!tokenData) {
       logger.warn('API', `Invalid download token: ${token.substring(0, 8)}...`);
       return res.status(404).json({ error: 'Invalid download link' });
     }
 
-    // Get file content
-    const content = await getExportFile(filename);
+    // Get file content (from database or filesystem)
+    const content = await getExportFile(tokenData.filename, tokenData.content);
     if (!content) {
-      logger.error('API', `File not found for valid token: ${filename}`);
+      logger.error('API', `File not found for valid token: ${tokenData.filename}`);
       return res.status(404).json({ error: 'File not found' });
     }
 
-    logger.info('API', `Serving download: ${filename}`);
+    logger.info('API', `Serving download: ${tokenData.filename}`);
 
     // Set headers for file download
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${tokenData.filename}"`);
     res.setHeader('Content-Length', content.length);
     res.send(content);
   } catch (error) {

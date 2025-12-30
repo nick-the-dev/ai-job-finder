@@ -9,32 +9,39 @@ const EXPORTS_DIR = join(process.cwd(), 'exports');
 
 /**
  * Generate a secure download token for a CSV file
- * Stores token in database for persistence across restarts
+ * Stores token and CSV content in database for persistence across restarts
  */
-export async function generateDownloadToken(filename: string): Promise<string> {
+export async function generateDownloadToken(filename: string, content?: string): Promise<string> {
   const token = crypto.randomBytes(32).toString('hex');
   await getDb().downloadToken.create({
-    data: { token, filename },
+    data: { token, filename, content },
   });
   return token;
 }
 
 /**
- * Validate and get filename for download token
- * Returns null if token is invalid (tokens no longer expire)
+ * Validate and get download token entry
+ * Returns null if token is invalid
  */
-export async function validateDownloadToken(token: string): Promise<string | null> {
+export async function validateDownloadToken(token: string): Promise<{ filename: string; content: string | null } | null> {
   const entry = await getDb().downloadToken.findUnique({
     where: { token },
   });
   if (!entry) return null;
-  return entry.filename;
+  return { filename: entry.filename, content: entry.content };
 }
 
 /**
  * Get file content for download
+ * First checks database (new tokens), falls back to filesystem (legacy tokens)
  */
-export async function getExportFile(filename: string): Promise<Buffer | null> {
+export async function getExportFile(filename: string, dbContent?: string | null): Promise<Buffer | null> {
+  // If content is stored in database, use it directly
+  if (dbContent) {
+    return Buffer.from(dbContent, 'utf-8');
+  }
+
+  // Fallback to filesystem for legacy tokens
   const filepath = join(EXPORTS_DIR, filename);
 
   // Security: ensure path doesn't escape exports directory
@@ -248,9 +255,10 @@ function matchesToCSV(matches: MatchEntry[]): string {
 }
 
 /**
- * Save matches to CSV file and return the filename
+ * Save matches to CSV and return filename + content
+ * Also writes to filesystem for backwards compatibility
  */
-export async function saveMatchesToCSV(matches: MatchEntry[]): Promise<string> {
+export async function saveMatchesToCSV(matches: MatchEntry[]): Promise<{ filename: string; content: string }> {
   await mkdir(EXPORTS_DIR, { recursive: true });
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -260,5 +268,5 @@ export async function saveMatchesToCSV(matches: MatchEntry[]): Promise<string> {
   const csv = matchesToCSV(matches);
   await writeFile(filepath, csv, 'utf-8');
 
-  return filename;
+  return { filename, content: csv };
 }
