@@ -60,7 +60,7 @@ export async function getSubscriptions(
   return fetchApi<SubscriptionsResponse>(url);
 }
 
-export async function getRuns(page = 1, limit = 50): Promise<RunsResponse> {
+export async function getRuns(page = 1, limit = 100): Promise<RunsResponse> {
   return fetchApi<RunsResponse>(`/runs?page=${page}&limit=${limit}`);
 }
 

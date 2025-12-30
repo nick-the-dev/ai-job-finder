@@ -364,9 +364,20 @@ function Dashboard() {
   const [users, setUsers] = useState<User[]>([]);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [runsPage, setRunsPage] = useState(1);
+  const [runsTotalPages, setRunsTotalPages] = useState(1);
+  const [runsTotal, setRunsTotal] = useState(0);
   const [errors, setErrors] = useState<ErrorEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  const loadRuns = async (page: number) => {
+    const runsData = await getRuns(page, 100);
+    setRuns(runsData.runs);
+    setRunsPage(runsData.pagination.page);
+    setRunsTotalPages(runsData.pagination.pages);
+    setRunsTotal(runsData.pagination.total);
+  };
 
   useEffect(() => {
     async function loadData() {
@@ -376,13 +387,16 @@ function Dashboard() {
           getOverview(),
           getUsers(),
           getSubscriptions(),
-          getRuns(),
+          getRuns(runsPage, 100),
           getErrors(),
         ]);
         setOverview(overviewData);
         setUsers(usersData.users);
         setSubscriptions(subsData.subscriptions);
         setRuns(runsData.runs);
+        setRunsPage(runsData.pagination.page);
+        setRunsTotalPages(runsData.pagination.pages);
+        setRunsTotal(runsData.pagination.total);
         setErrors(errorsData.errors);
         setError('');
       } catch (err) {
@@ -448,7 +462,7 @@ function Dashboard() {
             <TabsList>
               <TabsTrigger value="users">Users ({users.length})</TabsTrigger>
               <TabsTrigger value="subscriptions">Subscriptions ({subscriptions.length})</TabsTrigger>
-              <TabsTrigger value="runs">Runs ({runs.length})</TabsTrigger>
+              <TabsTrigger value="runs">Runs ({runsTotal})</TabsTrigger>
               <TabsTrigger value="errors">
                 Errors ({errors.length})
                 {errors.length > 0 && <span className="ml-1 w-2 h-2 rounded-full bg-destructive inline-block" />}
@@ -475,6 +489,37 @@ function Dashboard() {
               <Card>
                 <CardContent className="pt-6">
                   <RunsTable runs={runs} />
+                  {runsTotalPages > 1 && (
+                    <div className="flex items-center justify-between mt-4 pt-4 border-t border-border">
+                      <p className="text-sm text-muted-foreground">
+                        Showing {runs.length} of {runsTotal} total runs
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => loadRuns(runsPage - 1)}
+                          disabled={runsPage <= 1}
+                          className="px-3 py-1 text-sm bg-secondary text-secondary-foreground rounded hover:bg-secondary/80 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Previous
+                        </button>
+                        <span className="text-sm text-muted-foreground">
+                          Page {runsPage} of {runsTotalPages}
+                        </span>
+                        <button
+                          onClick={() => loadRuns(runsPage + 1)}
+                          disabled={runsPage >= runsTotalPages}
+                          className="px-3 py-1 text-sm bg-secondary text-secondary-foreground rounded hover:bg-secondary/80 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {runsTotalPages <= 1 && runsTotal > 0 && (
+                    <p className="text-sm text-muted-foreground mt-4 pt-4 border-t border-border">
+                      Showing all {runsTotal} runs
+                    </p>
+                  )}
                 </CardContent>
               </Card>
             </TabsContent>
