@@ -3,6 +3,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/com
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   getOverview,
   getUsers,
@@ -45,6 +46,21 @@ function StatusBadge({ status }: { status: string }) {
     running: 'default',
   };
   return <Badge variant={variants[status] || 'secondary'}>{status}</Badge>;
+}
+
+function TruncatedCell({ value, maxWidth = 200, className = '' }: { value: string; maxWidth?: number; className?: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={`block truncate cursor-default ${className}`} style={{ maxWidth }}>
+          {value}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>
+        <p className="max-w-md whitespace-pre-wrap">{value}</p>
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 function LoginScreen({ onLogin }: { onLogin: () => void }) {
@@ -226,12 +242,15 @@ function SubscriptionsTable({ subscriptions }: { subscriptions: Subscription[] }
         {subscriptions.map((sub) => (
           <TableRow key={sub.id}>
             <TableCell className="font-medium">{sub.user.username || 'No name'}</TableCell>
-            <TableCell className="max-w-[200px] truncate" title={sub.jobTitles.join(', ')}>
-              {sub.jobTitles.slice(0, 2).join(', ')}
-              {sub.jobTitles.length > 2 && '...'}
+            <TableCell>
+              <TruncatedCell value={sub.jobTitles.join(', ')} maxWidth={200} />
             </TableCell>
-            <TableCell className="max-w-[150px] truncate" title={sub.location || 'Any'}>
-              {sub.location || <span className="text-muted-foreground">Any</span>}
+            <TableCell>
+              {sub.location ? (
+                <TruncatedCell value={sub.location} maxWidth={150} />
+              ) : (
+                <span className="text-muted-foreground">Any</span>
+              )}
             </TableCell>
             <TableCell><StatusBadge status={sub.status} /></TableCell>
             <TableCell>{sub._count.sentNotifications}</TableCell>
@@ -278,9 +297,8 @@ function RunsTable({ runs }: { runs: Run[] }) {
         {runs.map((run) => (
           <TableRow key={run.id}>
             <TableCell className="font-medium">{run.subscription.user.username || 'No name'}</TableCell>
-            <TableCell className="max-w-[200px] truncate" title={run.subscription.jobTitles.join(', ')}>
-              {run.subscription.jobTitles.slice(0, 2).join(', ')}
-              {run.subscription.jobTitles.length > 2 && '...'}
+            <TableCell>
+              <TruncatedCell value={run.subscription.jobTitles.join(', ')} maxWidth={200} />
             </TableCell>
             <TableCell><StatusBadge status={run.status} /></TableCell>
             <TableCell>{run.jobsCollected}</TableCell>
@@ -319,12 +337,12 @@ function ErrorsTable({ errors }: { errors: ErrorEntry[] }) {
         {errors.map((error) => (
           <TableRow key={error.id}>
             <TableCell className="font-medium">{error.subscription.user.username || 'No name'}</TableCell>
-            <TableCell className="max-w-[150px] truncate" title={error.subscription.jobTitles.join(', ')}>
-              {error.subscription.jobTitles.slice(0, 2).join(', ')}
+            <TableCell>
+              <TruncatedCell value={error.subscription.jobTitles.join(', ')} maxWidth={150} />
             </TableCell>
             <TableCell><Badge variant="secondary">{error.triggerType}</Badge></TableCell>
-            <TableCell className="max-w-[300px] truncate text-destructive" title={error.errorMessage || ''}>
-              {error.errorMessage || 'Unknown error'}
+            <TableCell>
+              <TruncatedCell value={error.errorMessage || 'Unknown error'} maxWidth={300} className="text-destructive" />
             </TableCell>
             <TableCell className="text-muted-foreground">{formatTimeAgo(error.startedAt)}</TableCell>
           </TableRow>
@@ -486,7 +504,11 @@ function App() {
     return <LoginScreen onLogin={() => setAuthenticated(true)} />;
   }
 
-  return <Dashboard />;
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Dashboard />
+    </TooltipProvider>
+  );
 }
 
 export default App;
