@@ -36,6 +36,33 @@ function formatTimeAgo(dateStr: string | null): string {
   return `${days}d ago`;
 }
 
+function formatNextRun(dateStr: string | null): string {
+  if (!dateStr) return 'Never';
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diff = date.getTime() - now.getTime();
+
+  // If in the past, it's overdue or running now
+  if (diff < 0) {
+    const mins = Math.floor(-diff / 60000);
+    if (mins < 2) return 'Now';
+    if (mins < 60) return `${mins}m overdue`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h overdue`;
+    return `${Math.floor(hours / 24)}d overdue`;
+  }
+
+  // Future time
+  const mins = Math.floor(diff / 60000);
+  const hours = Math.floor(mins / 60);
+  const days = Math.floor(hours / 24);
+
+  if (mins < 1) return 'Now';
+  if (mins < 60) return `in ${mins}m`;
+  if (hours < 24) return `in ${hours}h`;
+  return `in ${days}d`;
+}
+
 function StatusBadge({ status }: { status: string }) {
   const variants: Record<string, 'default' | 'success' | 'warning' | 'destructive' | 'secondary'> = {
     active: 'success',
@@ -264,7 +291,7 @@ function SubscriptionsTable({ subscriptions }: { subscriptions: Subscription[] }
                 <span className="text-muted-foreground">-</span>
               )}
             </TableCell>
-            <TableCell className="text-muted-foreground">{formatTimeAgo(sub.nextRunAt)}</TableCell>
+            <TableCell className="text-muted-foreground">{formatNextRun(sub.nextRunAt)}</TableCell>
           </TableRow>
         ))}
         {subscriptions.length === 0 && (
