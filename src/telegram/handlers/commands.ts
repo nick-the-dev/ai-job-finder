@@ -12,6 +12,23 @@ import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
 import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
 
 /**
+ * Format job types for display.
+ * Converts internal values to user-friendly labels.
+ */
+function formatJobTypesDisplay(jobTypes: string[]): string {
+  if (!jobTypes || jobTypes.length === 0) {
+    return 'All types';
+  }
+  const labels: Record<string, string> = {
+    fulltime: 'Full-time',
+    parttime: 'Part-time',
+    internship: 'Internship',
+    contract: 'Contract',
+  };
+  return jobTypes.map((t) => labels[t] || t).join(', ');
+}
+
+/**
  * Format location for display in subscription list/details.
  * Uses normalizedLocations if available, falls back to legacy location/isRemote.
  */
@@ -132,7 +149,8 @@ Ready to get started?
       if (sub.jobTitles.length > 2) message += ` +${sub.jobTitles.length - 2}`;
       message += '\n';
       message += `   ${status} | 📍 ${location} | Score ≥${sub.minScore}\n`;
-      message += `   📬 ${sub._count.sentNotifications} notifications sent\n\n`;
+      message += `   💼 ${formatJobTypesDisplay(sub.jobTypes)}\n`;
+      message += `   📬 ${sub._count.sentNotifications} matches\n\n`;
     }
 
     message += 'Select a subscription to manage:';
@@ -190,7 +208,7 @@ Ready to get started?
 
       message += `• <b>${sub.jobTitles.slice(0, 2).join(', ')}</b>\n`;
       message += `  ${location} | Ended: ${ended}\n`;
-      message += `  📬 ${sub._count.sentNotifications} notifications sent\n\n`;
+      message += `  📬 ${sub._count.sentNotifications} matches\n\n`;
     }
 
     await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
@@ -406,12 +424,15 @@ Ready to get started?
       ? sub.resumeUploadedAt.toLocaleDateString()
       : sub.createdAt.toLocaleDateString();
 
+    const jobTypesDisplay = formatJobTypesDisplay(sub.jobTypes);
+
     const message = `
 <b>📋 Subscription Details</b>
 
 <b>Status:</b> ${status}
 <b>Job Titles:</b> ${sub.jobTitles.join(', ')}
 <b>Location:</b> ${location}
+<b>Job Types:</b> ${jobTypesDisplay}
 <b>Min Score:</b> ${sub.minScore}
 <b>Date Range:</b> ${dateRange}
 
@@ -422,7 +443,7 @@ Ready to get started?
 <b>Excluded Companies:</b> ${excludedCompanies}
 
 <b>Stats:</b>
-📬 ${sub._count.sentNotifications} notifications sent
+📬 ${sub._count.sentNotifications} matches
 🔍 Last search: ${lastSearch}
 📅 Created: ${sub.createdAt.toLocaleDateString()}
     `.trim();
@@ -693,7 +714,8 @@ Ready to get started?
       if (sub.jobTitles.length > 2) message += ` +${sub.jobTitles.length - 2}`;
       message += '\n';
       message += `   ${status} | 📍 ${location} | Score ≥${sub.minScore}\n`;
-      message += `   📬 ${sub._count.sentNotifications} notifications sent\n\n`;
+      message += `   💼 ${formatJobTypesDisplay(sub.jobTypes)}\n`;
+      message += `   📬 ${sub._count.sentNotifications} matches\n\n`;
     }
 
     message += 'Select a subscription to manage:';
@@ -881,7 +903,7 @@ Ready to get started?
 
       message += `• <b>${sub.jobTitles.slice(0, 2).join(', ')}</b>\n`;
       message += `  ${location} | Ended: ${ended}\n`;
-      message += `  📬 ${sub._count.sentNotifications} notifications sent\n\n`;
+      message += `  📬 ${sub._count.sentNotifications} matches\n\n`;
     }
 
     await ctx.editMessageText(message, {
