@@ -5,6 +5,7 @@ import type { BotContext } from '../bot.js';
 import { getDb } from '../../db/client.js';
 import { logger } from '../../utils/logger.js';
 import { runSingleSubscriptionSearch } from '../../scheduler/jobs/search-subscriptions.js';
+import { markSubscriptionRunning, markSubscriptionFinished } from '../../scheduler/cron.js';
 import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
 import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
 
@@ -824,8 +825,10 @@ async function createSubscription(
 
     // Auto-start the first search (fire-and-forget)
     const chatId = Number(ctx.telegramUser.chatId);
+    markSubscriptionRunning(subscription.id);
     runSingleSubscriptionSearch(subscription.id)
       .then(async (result) => {
+        markSubscriptionFinished(subscription.id);
         if (result.notificationsSent > 0) {
           await ctx.api.sendMessage(
             chatId,
@@ -861,6 +864,7 @@ async function createSubscription(
         }
       })
       .catch((error) => {
+        markSubscriptionFinished(subscription.id);
         logger.error('Telegram', `Auto-scan failed for new subscription ${subscription.id}`, error);
       });
   } catch (error) {

@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import pLimit from 'p-limit';
+import { Job } from 'bull';
 import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
 import { isRedisConnected } from './redis.js';
@@ -9,6 +10,22 @@ import type { RawJob, NormalizedJob, JobMatchResult } from '../core/types.js';
 // Fallback rate limiters (used when Redis is down)
 const fallbackJobspyLimit = pLimit(2);
 const fallbackLlmLimit = pLimit(5);
+
+// Timeouts for queue jobs (ms)
+const COLLECTION_TIMEOUT = 3 * 60 * 1000; // 3 minutes per collection
+const MATCHING_TIMEOUT = 60 * 1000; // 1 minute per match
+
+/**
+ * Wait for job completion with timeout
+ */
+async function waitWithTimeout<T>(job: Job<unknown>, timeoutMs: number): Promise<T> {
+  return Promise.race([
+    job.finished() as Promise<T>,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`Job ${job.id} timed out after ${timeoutMs}ms`)), timeoutMs)
+    ),
+  ]);
+}
 
 // Generate short request IDs
 function generateRequestId(): string {
@@ -52,11 +69,12 @@ export class QueueService {
           type: 'exponential',
           delay: 5000,
         },
+        timeout: COLLECTION_TIMEOUT, // Bull job timeout
       }
     );
 
-    const result = await job.finished();
-    return result as RawJob[];
+    const result = await waitWithTimeout<RawJob[]>(job, COLLECTION_TIMEOUT);
+    return result;
   }
 
   /**
@@ -111,9 +129,10 @@ export class QueueService {
         type: 'exponential',
         delay: 2000,
       },
+      timeout: MATCHING_TIMEOUT, // Bull job timeout
     });
 
-    return await queueJob.finished();
+    return await waitWithTimeout(queueJob, MATCHING_TIMEOUT);
   }
 
   /**

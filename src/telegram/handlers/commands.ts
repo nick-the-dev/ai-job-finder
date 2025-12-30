@@ -4,6 +4,7 @@ import type { BotContext } from '../bot.js';
 import { getDb } from '../../db/client.js';
 import { logger } from '../../utils/logger.js';
 import { runSingleSubscriptionSearch } from '../../scheduler/jobs/search-subscriptions.js';
+import { isSubscriptionRunning, markSubscriptionRunning, markSubscriptionFinished } from '../../scheduler/cron.js';
 import { saveMatchesToCSV, generateDownloadToken } from '../../utils/csv.js';
 import { config } from '../../config.js';
 import { getPersonalStats, getMarketInsights, getResumeTips } from '../../observability/index.js';
@@ -768,6 +769,25 @@ Ready to get started?
 
     const chatId = Number(sub.user.chatId);
 
+    // Check if subscription is already running (prevents concurrent runs)
+    if (isSubscriptionRunning(subId)) {
+      await ctx.answerCallbackQuery({ text: '⏳ A scan is already in progress for this subscription' });
+      await ctx.editMessageText(
+        '⏳ <b>Scan Already Running</b>\n\n' +
+          'A scan is already in progress for this subscription.\n' +
+          'Please wait for it to complete.',
+        {
+          parse_mode: 'HTML',
+          reply_markup: new InlineKeyboard()
+            .text('« Back', `sub:detail:${subId}`),
+        }
+      );
+      return;
+    }
+
+    // Mark as running before starting
+    markSubscriptionRunning(subId);
+
     // Answer callback immediately and update message
     await ctx.answerCallbackQuery({ text: '🔍 Starting scan...' });
     await ctx.editMessageText(
@@ -779,6 +799,8 @@ Ready to get started?
     // Run scan asynchronously (fire-and-forget) to avoid webhook timeout
     runSingleSubscriptionSearch(subId)
       .then(async (result) => {
+        markSubscriptionFinished(subId);
+
         const keyboard = new InlineKeyboard()
           .text('📋 My Subscriptions', 'sub:list')
           .text('🔍 Scan Again', `sub:scan:${subId}`);
@@ -805,6 +827,7 @@ Ready to get started?
         logger.info('Telegram', `Manual scan completed for subscription ${subId}: ${result.matchesFound} matches`);
       })
       .catch(async (error) => {
+        markSubscriptionFinished(subId);
         logger.error('Telegram', `Manual scan failed for subscription ${subId}`, error);
 
         await ctx.api.sendMessage(
