@@ -236,7 +236,7 @@ Users can filter jobs by employment type during Telegram subscription setup:
 - `contract` - Contract/freelance positions
 
 **How it works:**
-1. User selects one or more job types during subscription setup (step 3/9)
+1. User selects one or more job types during subscription setup (step 6/9)
 2. Empty selection = search all job types (no filter)
 3. If multiple types selected, separate searches are made per type
 4. Results are merged and deduplicated
@@ -249,6 +249,27 @@ To work around this, we use an **intersection approach**:
 3. Intersect results by job URL to get jobs matching all criteria
 
 This ensures users get recent jobs that also match their job type and remote preferences.
+
+### Telegram Subscription Flow
+
+The subscription setup in Telegram follows a 9-step conversation flow:
+
+| Step | Name | Description |
+|------|------|-------------|
+| 1/9 | Job Titles | Enter job titles to search for (comma-separated) |
+| 2/9 | Location | Enter location(s) naturally (e.g., "NYC, Remote") |
+| 3/9 | Location Confirmation | Confirm parsed locations from LLM |
+| 4/9 | Date Range | Select how recent jobs should be (24h to 30 days) |
+| 5/9 | Min Score | Set minimum match score threshold (1-100) |
+| 6/9 | Job Type | Select job types (Full-time, Part-time, etc.) |
+| 7/9 | Exclusions | Optional: exclude specific titles/companies |
+| 8/9 | Resume | Upload PDF or paste resume text |
+| 9/9 | Confirmation | Review and confirm subscription |
+
+**Key files:**
+- `src/telegram/handlers/conversation.ts` - Main conversation flow logic
+- `src/telegram/handlers/commands.ts` - Bot commands and callback handlers
+- `src/telegram/services/document.ts` - Resume upload handling
 
 ### Job Match Score (1-100)
 - 90-100: Perfect match
