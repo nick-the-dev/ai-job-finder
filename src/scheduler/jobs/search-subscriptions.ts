@@ -374,13 +374,16 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
 
     await sendMatchSummary(sub.user.chatId, newMatches, stats);
 
-    for (const { matchId } of newMatches) {
-      await db.sentNotification.create({
-        data: { subscriptionId: sub.id, jobMatchId: matchId },
-      });
-    }
+    // Use createMany with skipDuplicates to handle concurrent runs safely
+    const created = await db.sentNotification.createMany({
+      data: newMatches.map(({ matchId }) => ({
+        subscriptionId: sub.id,
+        jobMatchId: matchId,
+      })),
+      skipDuplicates: true,
+    });
 
-    notificationsSent = newMatches.length;
+    notificationsSent = created.count;
   }
 
   // Collect skill data for analytics
@@ -644,13 +647,16 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         try {
           await sendMatchSummary(sub.user.chatId, newMatches, stats);
 
-          for (const { matchId } of newMatches) {
-            await db.sentNotification.create({
-              data: { subscriptionId: sub.id, jobMatchId: matchId },
-            });
-          }
+          // Use createMany with skipDuplicates to handle concurrent runs safely
+          const created = await db.sentNotification.createMany({
+            data: newMatches.map(({ matchId }) => ({
+              subscriptionId: sub.id,
+              jobMatchId: matchId,
+            })),
+            skipDuplicates: true,
+          });
 
-          notificationsSent = newMatches.length;
+          notificationsSent = created.count;
           totalNotifications += newMatches.length;
           logger.info('Scheduler', `  Sent ${newMatches.length} notifications to ${userLabel}`);
         } catch (error) {
