@@ -21,6 +21,7 @@ interface CollectionParams {
   normalizedLocations: NormalizedLocation[] | null;
   legacyLocation: string | null;
   legacyIsRemote: boolean;
+  jobTypes: string[]; // fulltime, parttime, internship, contract (empty = all)
   datePosted: DatePostedType;
   limit: number;
   skipCache: boolean;
@@ -33,7 +34,7 @@ interface CollectionParams {
  * Uses normalizedLocations if available, falls back to legacy location/isRemote.
  */
 async function collectJobsForSubscription(params: CollectionParams): Promise<RawJob[]> {
-  const { jobTitles, normalizedLocations, legacyLocation, legacyIsRemote, datePosted, limit, skipCache, priority, subLogger } = params;
+  const { jobTitles, normalizedLocations, legacyLocation, legacyIsRemote, jobTypes, datePosted, limit, skipCache, priority, subLogger } = params;
   const allRawJobs: RawJob[] = [];
 
   // Debug mode: Log detailed collection parameters
@@ -42,11 +43,15 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
     normalizedLocations: normalizedLocations?.map(l => l.display),
     legacyLocation,
     legacyIsRemote,
+    jobTypes,
     datePosted,
     limit,
     skipCache,
     priority,
   });
+
+  // Determine job types to search (empty array = search all types with single call)
+  const jobTypesToSearch = jobTypes.length > 0 ? jobTypes : [undefined];
 
   // Use normalized locations if available
   if (normalizedLocations && normalizedLocations.length > 0) {
@@ -54,94 +59,106 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
     const hasWorldwideRemote = LocationNormalizerAgent.hasWorldwideRemote(normalizedLocations);
     const countrySpecificRemote = LocationNormalizerAgent.getCountrySpecificRemote(normalizedLocations);
 
-    for (const title of jobTitles) {
-      // Search for worldwide remote jobs (no location filter)
-      if (hasWorldwideRemote) {
-        try {
-          logger.info('Scheduler', `  Collecting remote jobs for: "${title}"`);
-          const jobs = await queueService.enqueueCollection({
-            query: title,
-            isRemote: true,
-            limit,
-            source: 'jobspy',
-            skipCache,
-            datePosted: datePosted === 'all' ? undefined : datePosted,
-          }, priority);
-          logger.info('Scheduler', `  Found ${jobs.length} remote jobs for "${title}"`);
-          allRawJobs.push(...jobs);
-        } catch (error) {
-          logger.error('Scheduler', `  Failed to collect remote jobs for "${title}"`, error);
-        }
-      }
+    for (const jobType of jobTypesToSearch) {
+      const jobTypeLabel = jobType ? ` (${jobType})` : '';
 
-      // Search for country-specific remote jobs (e.g., "Remote in Canada")
-      for (const loc of countrySpecificRemote) {
-        const variants = loc.searchVariants.slice(0, 2);
-        if (variants.length === 0) variants.push(loc.country);
-
-        for (const variant of variants) {
+      for (const title of jobTitles) {
+        // Search for worldwide remote jobs (no location filter)
+        if (hasWorldwideRemote) {
           try {
-            logger.info('Scheduler', `  Collecting remote jobs for: "${title}" in "${variant}"`);
+            logger.info('Scheduler', `  Collecting remote jobs for: "${title}"${jobTypeLabel}`);
             const jobs = await queueService.enqueueCollection({
               query: title,
-              location: variant,
-              isRemote: true, // Remote jobs within this country
+              isRemote: true,
+              jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
               limit,
               source: 'jobspy',
               skipCache,
               datePosted: datePosted === 'all' ? undefined : datePosted,
             }, priority);
-            logger.info('Scheduler', `  Found ${jobs.length} remote jobs for "${title}" in "${variant}"`);
+            logger.info('Scheduler', `  Found ${jobs.length} remote jobs for "${title}"${jobTypeLabel}`);
             allRawJobs.push(...jobs);
           } catch (error) {
-            logger.error('Scheduler', `  Failed to collect remote jobs for "${title}" in "${variant}"`, error);
+            logger.error('Scheduler', `  Failed to collect remote jobs for "${title}"${jobTypeLabel}`, error);
           }
         }
-      }
 
-      // Search for each physical location using first 2 searchVariants
-      for (const loc of physicalLocations) {
-        const variants = loc.searchVariants.slice(0, 2);
-        if (variants.length === 0) variants.push(loc.display);
+        // Search for country-specific remote jobs (e.g., "Remote in Canada")
+        for (const loc of countrySpecificRemote) {
+          const variants = loc.searchVariants.slice(0, 2);
+          if (variants.length === 0) variants.push(loc.country);
 
-        for (const variant of variants) {
-          try {
-            logger.info('Scheduler', `  Collecting jobs for: "${title}" in "${variant}"`);
-            const jobs = await queueService.enqueueCollection({
-              query: title,
-              location: variant,
-              isRemote: false, // Physical locations only
-              limit,
-              source: 'jobspy',
-              skipCache,
-              datePosted: datePosted === 'all' ? undefined : datePosted,
-            }, priority);
-            logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}" in "${variant}"`);
-            allRawJobs.push(...jobs);
-          } catch (error) {
-            logger.error('Scheduler', `  Failed to collect jobs for "${title}" in "${variant}"`, error);
+          for (const variant of variants) {
+            try {
+              logger.info('Scheduler', `  Collecting remote jobs for: "${title}" in "${variant}"${jobTypeLabel}`);
+              const jobs = await queueService.enqueueCollection({
+                query: title,
+                location: variant,
+                isRemote: true, // Remote jobs within this country
+                jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
+                limit,
+                source: 'jobspy',
+                skipCache,
+                datePosted: datePosted === 'all' ? undefined : datePosted,
+              }, priority);
+              logger.info('Scheduler', `  Found ${jobs.length} remote jobs for "${title}" in "${variant}"${jobTypeLabel}`);
+              allRawJobs.push(...jobs);
+            } catch (error) {
+              logger.error('Scheduler', `  Failed to collect remote jobs for "${title}" in "${variant}"${jobTypeLabel}`, error);
+            }
+          }
+        }
+
+        // Search for each physical location using first 2 searchVariants
+        for (const loc of physicalLocations) {
+          const variants = loc.searchVariants.slice(0, 2);
+          if (variants.length === 0) variants.push(loc.display);
+
+          for (const variant of variants) {
+            try {
+              logger.info('Scheduler', `  Collecting jobs for: "${title}" in "${variant}"${jobTypeLabel}`);
+              const jobs = await queueService.enqueueCollection({
+                query: title,
+                location: variant,
+                isRemote: false, // Physical locations only
+                jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
+                limit,
+                source: 'jobspy',
+                skipCache,
+                datePosted: datePosted === 'all' ? undefined : datePosted,
+              }, priority);
+              logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}" in "${variant}"${jobTypeLabel}`);
+              allRawJobs.push(...jobs);
+            } catch (error) {
+              logger.error('Scheduler', `  Failed to collect jobs for "${title}" in "${variant}"${jobTypeLabel}`, error);
+            }
           }
         }
       }
     }
   } else {
     // Legacy mode: single location
-    for (const title of jobTitles) {
-      try {
-        logger.info('Scheduler', `  Collecting jobs for: "${title}"`);
-        const jobs = await queueService.enqueueCollection({
-          query: title,
-          location: legacyLocation ?? undefined,
-          isRemote: legacyIsRemote,
-          limit,
-          source: 'jobspy',
-          skipCache,
-          datePosted: datePosted === 'all' ? undefined : datePosted,
-        }, priority);
-        logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}"`);
-        allRawJobs.push(...jobs);
-      } catch (error) {
-        logger.error('Scheduler', `  Failed to collect jobs for "${title}"`, error);
+    for (const jobType of jobTypesToSearch) {
+      const jobTypeLabel = jobType ? ` (${jobType})` : '';
+
+      for (const title of jobTitles) {
+        try {
+          logger.info('Scheduler', `  Collecting jobs for: "${title}"${jobTypeLabel}`);
+          const jobs = await queueService.enqueueCollection({
+            query: title,
+            location: legacyLocation ?? undefined,
+            isRemote: legacyIsRemote,
+            jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
+            limit,
+            source: 'jobspy',
+            skipCache,
+            datePosted: datePosted === 'all' ? undefined : datePosted,
+          }, priority);
+          logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}"${jobTypeLabel}`);
+          allRawJobs.push(...jobs);
+        } catch (error) {
+          logger.error('Scheduler', `  Failed to collect jobs for "${title}"${jobTypeLabel}`, error);
+        }
       }
     }
   }
@@ -254,6 +271,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
       jobTitles: sub.jobTitles,
       minScore: sub.minScore,
       datePosted: sub.datePosted,
+      jobTypes: sub.jobTypes,
       excludedTitles: sub.excludedTitles,
       excludedCompanies: sub.excludedCompanies,
       isRemote: sub.isRemote,
@@ -293,12 +311,16 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   errorContext.query = sub.jobTitles.join(', ');
   errorContext.location = sub.location ?? (normalizedLocations ? LocationNormalizerAgent.formatForDisplaySingleLine(normalizedLocations) : undefined);
 
+  // Extract job types from subscription
+  const jobTypes = (sub.jobTypes ?? []) as string[];
+
   subLogger.debug('Collection', 'Starting collection stage');
   const allRawJobs = await collectJobsForSubscription({
     jobTitles: sub.jobTitles,
     normalizedLocations,
     legacyLocation: sub.location,
     legacyIsRemote: sub.isRemote,
+    jobTypes,
     datePosted,
     limit: 3000,
     skipCache: true, // Manual scans always fetch fresh results
@@ -659,6 +681,7 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
           jobTitles: sub.jobTitles,
           minScore: sub.minScore,
           datePosted: sub.datePosted,
+          jobTypes: sub.jobTypes,
           excludedTitles: sub.excludedTitles,
           excludedCompanies: sub.excludedCompanies,
           isRemote: sub.isRemote,
@@ -688,12 +711,17 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
 
       // Stage 1: Collection
       errorContext.stage = 'collection';
+
+      // Extract job types from subscription
+      const jobTypes = (sub.jobTypes ?? []) as string[];
+
       subLogger.debug('Collection', 'Starting collection stage');
       const allRawJobs = await collectJobsForSubscription({
         jobTitles: sub.jobTitles,
         normalizedLocations,
         legacyLocation: sub.location,
         legacyIsRemote: sub.isRemote,
+        jobTypes,
         datePosted,
         limit: 3000,
         skipCache: false,

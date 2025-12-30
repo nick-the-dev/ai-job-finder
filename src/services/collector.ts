@@ -11,6 +11,7 @@ interface CollectorInput {
   query: string;      // Job title + location
   location?: string;
   isRemote?: boolean;
+  jobType?: 'fulltime' | 'parttime' | 'internship' | 'contract'; // Filter by job type
   limit?: number;      // Target number of jobs to fetch
   maxPages?: number;   // Max pages to fetch (each page ~10 jobs)
   source?: 'serpapi' | 'jobspy' | 'all'; // Which source to use
@@ -256,6 +257,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       query,
       location,
       isRemote, // undefined = all jobs, true = remote only, false = on-site only
+      jobType,  // fulltime, parttime, internship, contract
       limit = 100,
       skipCache = false,
       cacheHours = DEFAULT_CACHE_HOURS,
@@ -328,6 +330,25 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     const hoursOld = input.datePosted ? hoursOldMap[input.datePosted] : 720;
 
     try {
+      // Indeed limitation: only one of (hours_old) OR (job_type & is_remote) can be used
+      // Solution: If both are needed, do multiple searches and intersect results
+      const needsMultipleSearches = (hoursOld !== undefined) && (jobType || isRemote !== undefined);
+
+      if (needsMultipleSearches) {
+        logger.info('Collector', `[JobSpy] Using multiple searches due to Indeed limitation`);
+        const jobs = await this.fetchJobSpyWithIntersection(
+          query,
+          location || 'USA',
+          limit,
+          hoursOld,
+          jobType,
+          isRemote
+        );
+        await this.updateCache(queryHash, query, location, isRemote, 'jobspy', jobs.length, cacheHours);
+        return jobs;
+      }
+
+      // Single search - no conflicting filters
       const requestBody: Record<string, any> = {
         search_term: query,
         location: location || 'USA',
@@ -337,6 +358,10 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       // Only add is_remote if explicitly set (undefined = all jobs)
       if (isRemote !== undefined) {
         requestBody.is_remote = isRemote;
+      }
+      // Only add job_type if explicitly set (undefined = all types)
+      if (jobType) {
+        requestBody.job_type = jobType;
       }
       // Only add hours_old if specified (undefined = no limit / all time)
       if (hoursOld !== undefined) {
@@ -522,5 +547,85 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
     // NOT remote: mentions like "remote debugging", "remote teams", "support remote"
     return false;
+  }
+
+  /**
+   * Handle Indeed limitation: only one of (hours_old) OR (job_type & is_remote) can be used
+   * Solution: Do multiple searches and intersect results
+   *
+   * Search 1: with hours_old → gets recent jobs (any type)
+   * Search 2: with job_type & is_remote → gets specific type (any date)
+   * Result: intersection of both (jobs that match BOTH criteria)
+   */
+  private async fetchJobSpyWithIntersection(
+    query: string,
+    location: string,
+    limit: number,
+    hoursOld: number | undefined,
+    jobType: string | undefined,
+    isRemote: boolean | undefined
+  ): Promise<RawJob[]> {
+    const jobspyUrl = process.env.JOBSPY_URL;
+    if (!jobspyUrl) return [];
+
+    // Request more results since we'll be filtering down
+    const expandedLimit = Math.min(limit * 3, 500);
+
+    // Search 1: Filter by date (hours_old)
+    const dateRequest: Record<string, any> = {
+      search_term: query,
+      location,
+      site_name: ['indeed', 'linkedin'],
+      results_wanted: expandedLimit,
+    };
+    if (hoursOld !== undefined) {
+      dateRequest.hours_old = hoursOld;
+    }
+
+    logger.info('Collector', `[JobSpy] Search 1: date filter (hours_old=${hoursOld})`);
+    const dateResponse = await axios.post(`${jobspyUrl}/scrape`, dateRequest, { timeout: 120000 });
+    const dateJobs = dateResponse.data.jobs || [];
+    logger.info('Collector', `[JobSpy] Search 1 found ${dateJobs.length} recent jobs`);
+
+    // Search 2: Filter by job_type and/or is_remote
+    const typeRequest: Record<string, any> = {
+      search_term: query,
+      location,
+      site_name: ['indeed', 'linkedin'],
+      results_wanted: expandedLimit,
+    };
+    if (jobType) {
+      typeRequest.job_type = jobType;
+    }
+    if (isRemote !== undefined) {
+      typeRequest.is_remote = isRemote;
+    }
+
+    // Small delay between requests to be nice to the API
+    await this.delay(500);
+
+    logger.info('Collector', `[JobSpy] Search 2: type filter (job_type=${jobType}, is_remote=${isRemote})`);
+    const typeResponse = await axios.post(`${jobspyUrl}/scrape`, typeRequest, { timeout: 120000 });
+    const typeJobs = typeResponse.data.jobs || [];
+    logger.info('Collector', `[JobSpy] Search 2 found ${typeJobs.length} type-filtered jobs`);
+
+    // Build a set of job URLs from the type-filtered search for fast lookup
+    const typeJobUrls = new Set(
+      typeJobs.map((job: any) => job.job_url).filter(Boolean)
+    );
+
+    // Intersect: keep only date-filtered jobs that also appear in type-filtered results
+    const intersectedJobs = dateJobs.filter((job: any) =>
+      job.job_url && typeJobUrls.has(job.job_url)
+    );
+
+    logger.info('Collector', `[JobSpy] Intersection: ${intersectedJobs.length} jobs match both filters`);
+
+    // Transform and limit results
+    const transformedJobs = intersectedJobs
+      .slice(0, limit)
+      .map((job: any) => this.transformJobSpyJob(job));
+
+    return transformedJobs;
   }
 }

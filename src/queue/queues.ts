@@ -18,6 +18,7 @@ export interface CollectionJobData {
   query: string;
   location?: string;
   isRemote?: boolean;
+  jobType?: 'fulltime' | 'parttime' | 'internship' | 'contract';
   limit: number;
   source: 'jobspy' | 'serpapi';
   skipCache: boolean;

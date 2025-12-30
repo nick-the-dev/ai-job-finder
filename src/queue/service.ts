@@ -170,6 +170,7 @@ export class QueueService {
         query: params.query,
         location: params.location,
         isRemote: params.isRemote,
+        jobType: params.jobType,
         limit: params.limit,
         source: params.source,
         skipCache: params.skipCache,

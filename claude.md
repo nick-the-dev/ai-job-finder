@@ -225,6 +225,31 @@ Output: [
 6. Collector searches each location + variants
 7. Results filtered to match user's locations
 
+### Job Type Filtering
+
+Users can filter jobs by employment type during Telegram subscription setup:
+
+**Supported job types:**
+- `fulltime` - Full-time positions
+- `parttime` - Part-time positions
+- `internship` - Internship positions
+- `contract` - Contract/freelance positions
+
+**How it works:**
+1. User selects one or more job types during subscription setup (step 3/9)
+2. Empty selection = search all job types (no filter)
+3. If multiple types selected, separate searches are made per type
+4. Results are merged and deduplicated
+
+**Indeed API Limitation:**
+Indeed's API only allows one filter at a time from: `hours_old`, `job_type`, `is_remote`, `easy_apply`.
+To work around this, we use an **intersection approach**:
+1. Search 1: Query with `hours_old` (gets recent jobs)
+2. Search 2: Query with `job_type` + `is_remote` (gets filtered jobs)
+3. Intersect results by job URL to get jobs matching all criteria
+
+This ensures users get recent jobs that also match their job type and remote preferences.
+
 ### Job Match Score (1-100)
 - 90-100: Perfect match
 - 70-89: Strong match
@@ -276,6 +301,8 @@ ADMIN_API_KEY=your-secret-key  # Required for /admin access
 - Set `JOBSPY_URL` env var (e.g., `http://localhost:8000`)
 - Use `source: "jobspy"` in search requests
 - Rate limited: max 2 concurrent requests via Bull queue (or p-limit fallback)
+- **Indeed limitation**: Only one filter from `hours_old`, `job_type`, `is_remote`, `easy_apply` per search
+  - We use intersection-based searches to combine these filters (see "Job Type Filtering" section)
 
 ### SerpAPI Google Jobs (Optional - Paid)
 - Aggregates jobs from LinkedIn, Indeed, Glassdoor, etc.

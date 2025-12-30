@@ -16,6 +16,7 @@ class ScrapeRequest(BaseModel):
     location: str = "USA"
     site_name: list[str] = ["indeed", "linkedin"]  # glassdoor/zip_recruiter disabled - broken upstream
     is_remote: Optional[bool] = None  # None = all jobs, True = remote only, False = on-site only
+    job_type: Optional[str] = None  # fulltime, parttime, internship, contract (None = all)
     results_wanted: int = 50
     hours_old: Optional[int] = 72  # Jobs posted in last 72 hours
     country_indeed: Optional[str] = None  # Auto-detect from location if not provided
@@ -92,9 +93,10 @@ def scrape(request: ScrapeRequest):
         # Auto-detect country from location if not provided
         country = request.country_indeed or detect_country(request.location)
         remote_filter = f", remote={request.is_remote}" if request.is_remote is not None else ""
-        logger.info(f"Scraping jobs: {request.search_term} in {request.location} (country: {country}{remote_filter})")
+        job_type_filter = f", job_type={request.job_type}" if request.job_type else ""
+        logger.info(f"Scraping jobs: {request.search_term} in {request.location} (country: {country}{remote_filter}{job_type_filter})")
 
-        # Build kwargs - only include is_remote if explicitly set
+        # Build kwargs - only include optional params if explicitly set
         scrape_kwargs = {
             "site_name": request.site_name,
             "search_term": request.search_term,
@@ -105,6 +107,8 @@ def scrape(request: ScrapeRequest):
         }
         if request.is_remote is not None:
             scrape_kwargs["is_remote"] = request.is_remote
+        if request.job_type is not None:
+            scrape_kwargs["job_type"] = request.job_type
 
         jobs_df = scrape_jobs(**scrape_kwargs)
 

@@ -15,6 +15,7 @@ interface ConversationData {
   isRemote?: boolean;             // DEPRECATED: kept for backwards compatibility
   normalizedLocations?: NormalizedLocation[];  // New structured locations
   pendingLocationText?: string;   // User's location input awaiting confirmation
+  jobTypes?: string[];            // fulltime, parttime, internship, contract (empty = all)
   resumeText?: string;
   resumeName?: string;
   minScore?: number;
@@ -39,6 +40,21 @@ const DATE_RANGE_LABELS: Record<string, string> = {
   week: 'Last week',
   month: 'Last month',
   all: 'All time',
+};
+
+// Job type options for JobSpy
+const JOB_TYPE_OPTIONS: Record<string, string> = {
+  '1': 'fulltime',
+  '2': 'parttime',
+  '3': 'internship',
+  '4': 'contract',
+};
+
+const JOB_TYPE_LABELS: Record<string, string> = {
+  fulltime: 'Full-time',
+  parttime: 'Part-time',
+  internship: 'Internship',
+  contract: 'Contract',
 };
 
 function getResumeHash(text: string): string {
@@ -130,7 +146,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
     await db.telegramUser.update({
       where: { id: ctx.telegramUser.id },
       data: {
-        conversationState: 'awaiting_resume',
+        conversationState: 'awaiting_job_types',
         conversationData: {
           ...data,
           // Legacy fields for backwards compatibility
@@ -145,11 +161,13 @@ export function setupConversation(bot: Bot<BotContext>): void {
     await ctx.answerCallbackQuery();
     await ctx.editMessageText(
       `<b>📍 Location:</b>\n${locationDisplay}\n\n` +
-        '<b>Step 3/8: Resume</b>\n\n' +
-        'Now I need your resume to match you with jobs.\n\n' +
-        'You can:\n' +
-        '- <b>Upload</b> a PDF or DOCX file\n' +
-        '- <b>Paste</b> your resume text directly here',
+        '<b>Step 3/9: Job Type</b>\n\n' +
+        'What type of employment are you looking for?\n\n' +
+        '1️⃣ Full-time\n' +
+        '2️⃣ Part-time\n' +
+        '3️⃣ Internship\n' +
+        '4️⃣ Contract\n\n' +
+        'Send numbers separated by commas (e.g., <b>"1,2"</b>) or <b>"Skip"</b> for all types',
       { parse_mode: 'HTML' }
     );
   });
@@ -289,7 +307,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Got it!</b> Searching for: ${titles.join(', ')}\n\n` +
-            '<b>Step 2/8: Location</b>\n\n' +
+            '<b>Step 2/9: Location</b>\n\n' +
             'Where should I search for jobs?\n\n' +
             '<b>Examples:</b>\n' +
             '• <code>New York</code> - single city\n' +
@@ -312,18 +330,20 @@ export function setupConversation(bot: Bot<BotContext>): void {
           await db.telegramUser.update({
             where: { id: ctx.telegramUser.id },
             data: {
-              conversationState: 'awaiting_resume',
+              conversationState: 'awaiting_job_types',
               conversationData: { ...data, normalizedLocations: [], location: undefined, isRemote: false },
             },
           });
 
           await ctx.reply(
             `<b>📍 Location:</b> Anywhere\n\n` +
-              '<b>Step 3/8: Resume</b>\n\n' +
-              'Now I need your resume to match you with jobs.\n\n' +
-              'You can:\n' +
-              '- <b>Upload</b> a PDF or DOCX file\n' +
-              '- <b>Paste</b> your resume text directly here',
+              '<b>Step 3/9: Job Type</b>\n\n' +
+              'What type of employment are you looking for?\n\n' +
+              '1️⃣ Full-time\n' +
+              '2️⃣ Part-time\n' +
+              '3️⃣ Internship\n' +
+              '4️⃣ Contract\n\n' +
+              'Send numbers separated by commas (e.g., <b>"1,2"</b>) or <b>"Skip"</b> for all types',
             { parse_mode: 'HTML' }
           );
           break;
@@ -436,18 +456,20 @@ export function setupConversation(bot: Bot<BotContext>): void {
           await db.telegramUser.update({
             where: { id: ctx.telegramUser.id },
             data: {
-              conversationState: 'awaiting_resume',
+              conversationState: 'awaiting_job_types',
               conversationData: { ...data, normalizedLocations: [], location: undefined, isRemote: false },
             },
           });
 
           await ctx.reply(
             `<b>📍 Location:</b> Anywhere\n\n` +
-              '<b>Step 3/8: Resume</b>\n\n' +
-              'Now I need your resume to match you with jobs.\n\n' +
-              'You can:\n' +
-              '- <b>Upload</b> a PDF or DOCX file\n' +
-              '- <b>Paste</b> your resume text directly here',
+              '<b>Step 3/9: Job Type</b>\n\n' +
+              'What type of employment are you looking for?\n\n' +
+              '1️⃣ Full-time\n' +
+              '2️⃣ Part-time\n' +
+              '3️⃣ Internship\n' +
+              '4️⃣ Contract\n\n' +
+              'Send numbers separated by commas (e.g., <b>"1,2"</b>) or <b>"Skip"</b> for all types',
             { parse_mode: 'HTML' }
           );
           break;
@@ -494,6 +516,54 @@ export function setupConversation(bot: Bot<BotContext>): void {
         break;
       }
 
+      case 'awaiting_job_types': {
+        const lowerText = text.toLowerCase();
+        let jobTypes: string[] = [];
+
+        if (lowerText !== 'skip' && lowerText !== 'all') {
+          // Parse comma-separated numbers
+          const selections = text.split(',').map(s => s.trim());
+          for (const sel of selections) {
+            const jobType = JOB_TYPE_OPTIONS[sel];
+            if (jobType && !jobTypes.includes(jobType)) {
+              jobTypes.push(jobType);
+            }
+          }
+
+          // If user typed something invalid, show error
+          if (jobTypes.length === 0 && selections.length > 0 && selections[0] !== '') {
+            await ctx.reply(
+              'Please enter numbers 1-4 separated by commas, or "Skip" for all types.\n\n' +
+                '1️⃣ Full-time\n2️⃣ Part-time\n3️⃣ Internship\n4️⃣ Contract'
+            );
+            return;
+          }
+        }
+
+        await db.telegramUser.update({
+          where: { id: ctx.telegramUser.id },
+          data: {
+            conversationState: 'awaiting_resume',
+            conversationData: { ...data, jobTypes },
+          },
+        });
+
+        const jobTypesText = jobTypes.length > 0
+          ? jobTypes.map(t => JOB_TYPE_LABELS[t]).join(', ')
+          : 'All types';
+
+        await ctx.reply(
+          `<b>Job Type:</b> ${jobTypesText}\n\n` +
+            '<b>Step 4/9: Resume</b>\n\n' +
+            'Now I need your resume to match you with jobs.\n\n' +
+            'You can:\n' +
+            '- <b>Upload</b> a PDF or DOCX file\n' +
+            '- <b>Paste</b> your resume text directly here',
+          { parse_mode: 'HTML' }
+        );
+        break;
+      }
+
       case 'awaiting_resume': {
         // Text resume (file uploads handled separately in document.ts)
         if (text.length < 100) {
@@ -513,7 +583,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Resume received!</b> (${text.length} characters)\n\n` +
-            '<b>Step 4/8: Minimum Match Score</b>\n\n' +
+            '<b>Step 5/9: Minimum Match Score</b>\n\n' +
             "I'll only notify you about jobs with a score >= this value.\n\n" +
             '<b>Score ranges:</b>\n' +
             '- 90-100: Perfect match\n' +
@@ -552,7 +622,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Min Score:</b> ${minScore}\n\n` +
-            '<b>Step 5/8: Job Posting Date Range</b>\n\n' +
+            '<b>Step 6/9: Job Posting Date Range</b>\n\n' +
             'How far back should I search for jobs?\n\n' +
             '1️⃣ Last 24 hours\n' +
             '2️⃣ Last 3 days\n' +
@@ -591,7 +661,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Date Range:</b> ${DATE_RANGE_LABELS[datePosted]}\n\n` +
-            '<b>Step 6/8: Excluded Job Titles (Optional)</b>\n\n' +
+            '<b>Step 7/9: Excluded Job Titles (Optional)</b>\n\n' +
             'Any job title keywords to exclude?\n\n' +
             'Examples: <b>"Manager, Director, Lead"</b>\n' +
             '(Jobs with these words in the title will be skipped)\n\n' +
@@ -626,7 +696,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Excluded Titles:</b> ${excludedText}\n\n` +
-            '<b>Step 7/8: Excluded Companies (Optional)</b>\n\n' +
+            '<b>Step 8/9: Excluded Companies (Optional)</b>\n\n' +
             'Any companies to exclude?\n\n' +
             'Examples: <b>"Amazon, Meta, Google"</b>\n' +
             '(Jobs from these companies will be skipped)\n\n' +
@@ -662,7 +732,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Excluded Companies:</b> ${excludedText}\n\n` +
-            '<b>Step 8/8: Cross-Subscription Duplicates</b>\n\n' +
+            '<b>Step 9/9: Cross-Subscription Duplicates</b>\n\n' +
             'If a job matches multiple of your subscriptions, should I:\n\n' +
             '1️⃣ <b>Skip it</b> - Only notify once (Recommended)\n' +
             '2️⃣ <b>Show it</b> - Notify for each subscription (marked with 🔄)\n\n' +
@@ -754,6 +824,7 @@ async function createSubscription(
       location: data.location,
       isRemote: data.isRemote ?? true,
       normalizedLocations: data.normalizedLocations ?? null,  // New structured locations
+      jobTypes: data.jobTypes ?? [],  // fulltime, parttime, internship, contract (empty = all)
       minScore: data.minScore ?? 60,
       datePosted: data.datePosted ?? 'month',
       resumeText: data.resumeText,
@@ -788,6 +859,9 @@ async function createSubscription(
           ? data.location
           : 'Any location';
 
+    const jobTypesText = data.jobTypes?.length
+      ? data.jobTypes.map(t => JOB_TYPE_LABELS[t] || t).join(', ')
+      : 'All types';
     const dateRangeText = DATE_RANGE_LABELS[data.datePosted ?? 'month'] || 'Last month';
     const excludedTitlesText = data.excludedTitles?.length
       ? data.excludedTitles.join(', ')
@@ -808,6 +882,7 @@ async function createSubscription(
       '<b>✅ Subscription created!</b>\n\n' +
         `<b>Job Titles:</b> ${data.jobTitles.join(', ')}\n` +
         `<b>Location:</b> ${locationText}\n` +
+        `<b>Job Type:</b> ${jobTypesText}\n` +
         `<b>Min Score:</b> ${data.minScore ?? 60}\n` +
         `<b>Date Range:</b> ${dateRangeText}\n` +
         `<b>Resume:</b> ${data.resumeName || 'Uploaded'}\n` +

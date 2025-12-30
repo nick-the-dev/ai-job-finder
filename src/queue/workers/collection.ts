@@ -11,15 +11,17 @@ const collector = new CollectorService();
  * Process a collection job from the queue
  */
 export async function processCollectionJob(job: Job<CollectionJobData>): Promise<RawJob[]> {
-  const { query, location, isRemote, limit, source, skipCache, datePosted, requestId } = job.data;
+  const { query, location, isRemote, jobType, limit, source, skipCache, datePosted, requestId } = job.data;
 
-  logger.info('Worker:Collection', `[${requestId}] Processing: "${query}" (${source}, limit: ${limit})`);
+  const jobTypeLabel = jobType ? ` [${jobType}]` : '';
+  logger.info('Worker:Collection', `[${requestId}] Processing: "${query}"${jobTypeLabel} (${source}, limit: ${limit})`);
 
   try {
     const jobs = await collector.execute({
       query,
       location,
       isRemote,
+      jobType,
       limit,
       source,
       skipCache,
