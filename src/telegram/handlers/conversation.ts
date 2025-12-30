@@ -45,34 +45,6 @@ function getResumeHash(text: string): string {
 }
 
 /**
- * Deduplicate locations - keep only one "Remote" entry and unique physical locations
- */
-function deduplicateLocations(locations: NormalizedLocation[]): NormalizedLocation[] {
-  const result: NormalizedLocation[] = [];
-  let hasRemote = false;
-  const seenDisplays = new Set<string>();
-
-  for (const loc of locations) {
-    if (loc.type === 'remote') {
-      // Only keep first remote entry
-      if (!hasRemote) {
-        result.push(loc);
-        hasRemote = true;
-      }
-    } else {
-      // Deduplicate physical locations by display name (case-insensitive)
-      const key = loc.display.toLowerCase();
-      if (!seenDisplays.has(key)) {
-        seenDisplays.add(key);
-        result.push(loc);
-      }
-    }
-  }
-
-  return result;
-}
-
-/**
  * Show location confirmation message with parsed locations
  */
 async function showLocationConfirmation(
@@ -84,7 +56,7 @@ async function showLocationConfirmation(
   if (!ctx.telegramUser) return;
 
   // Deduplicate locations (e.g., user says "Remote... USA remote" - keep only one Remote)
-  const dedupedLocations = deduplicateLocations(locations);
+  const dedupedLocations = LocationNormalizerAgent.deduplicate(locations);
 
   // Format locations for display
   let locationDisplay: string;

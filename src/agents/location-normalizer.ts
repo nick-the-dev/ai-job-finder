@@ -158,6 +158,32 @@ Output:
   }
 
   /**
+   * Deduplicate locations - keep only one "Remote" entry and unique physical locations
+   */
+  static deduplicate(locations: NormalizedLocation[]): NormalizedLocation[] {
+    const result: NormalizedLocation[] = [];
+    let hasRemote = false;
+    const seenDisplays = new Set<string>();
+
+    for (const loc of locations) {
+      if (loc.type === 'remote') {
+        if (!hasRemote) {
+          result.push(loc);
+          hasRemote = true;
+        }
+      } else {
+        const key = loc.display.toLowerCase();
+        if (!seenDisplays.has(key)) {
+          seenDisplays.add(key);
+          result.push(loc);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
    * Format locations for display in Telegram messages
    */
   static formatForDisplay(locations: NormalizedLocation[]): string {
