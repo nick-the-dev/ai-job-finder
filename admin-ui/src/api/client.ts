@@ -20,10 +20,13 @@ export function hasAdminKey(): boolean {
   return !!getAdminKey();
 }
 
-async function fetchApi<T>(endpoint: string): Promise<T> {
+async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${endpoint}`, {
+    ...options,
     headers: {
       'X-Admin-Key': getAdminKey(),
+      'Content-Type': 'application/json',
+      ...options?.headers,
     },
   });
 
@@ -66,4 +69,22 @@ export async function getRuns(page = 1, limit = 100): Promise<RunsResponse> {
 
 export async function getErrors(limit = 50): Promise<ErrorsResponse> {
   return fetchApi<ErrorsResponse>(`/errors?limit=${limit}`);
+}
+
+export interface ToggleDebugModeResponse {
+  success: boolean;
+  subscription: {
+    id: string;
+    debugMode: boolean;
+  };
+}
+
+export async function toggleDebugMode(
+  subscriptionId: string,
+  enabled: boolean
+): Promise<ToggleDebugModeResponse> {
+  return fetchApi<ToggleDebugModeResponse>(`/subscriptions/${subscriptionId}/debug`, {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  });
 }

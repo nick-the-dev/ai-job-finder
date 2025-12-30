@@ -4,7 +4,7 @@ import { NormalizerService } from '../../services/normalizer.js';
 import { MatcherAgent } from '../../agents/matcher.js';
 import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
 import { sendMatchSummary } from '../../telegram/services/notification.js';
-import { logger } from '../../utils/logger.js';
+import { logger, createSubscriptionLogger, type SubscriptionLogger } from '../../utils/logger.js';
 import { queueService, PRIORITY, type Priority } from '../../queue/index.js';
 import { RunTracker, updateSkillStats, createMarketSnapshot, type ErrorContext } from '../../observability/index.js';
 import type { NormalizedJob, JobMatchResult, RawJob } from '../../core/types.js';
@@ -25,6 +25,7 @@ interface CollectionParams {
   limit: number;
   skipCache: boolean;
   priority: Priority;
+  subLogger?: SubscriptionLogger; // Optional subscription-scoped logger for debug mode
 }
 
 /**
@@ -32,8 +33,20 @@ interface CollectionParams {
  * Uses normalizedLocations if available, falls back to legacy location/isRemote.
  */
 async function collectJobsForSubscription(params: CollectionParams): Promise<RawJob[]> {
-  const { jobTitles, normalizedLocations, legacyLocation, legacyIsRemote, datePosted, limit, skipCache, priority } = params;
+  const { jobTitles, normalizedLocations, legacyLocation, legacyIsRemote, datePosted, limit, skipCache, priority, subLogger } = params;
   const allRawJobs: RawJob[] = [];
+
+  // Debug mode: Log detailed collection parameters
+  subLogger?.debug('Collection', 'Starting job collection with params', {
+    jobTitles,
+    normalizedLocations: normalizedLocations?.map(l => l.display),
+    legacyLocation,
+    legacyIsRemote,
+    datePosted,
+    limit,
+    skipCache,
+    priority,
+  });
 
   // Use normalized locations if available
   if (normalizedLocations && normalizedLocations.length > 0) {
@@ -230,6 +243,25 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     throw new Error('Subscription not found or inactive');
   }
 
+  // Create subscription-scoped logger if debug mode is enabled
+  const subLogger = createSubscriptionLogger(subscriptionId, sub.debugMode);
+
+  if (sub.debugMode) {
+    subLogger.info('Debug', '=== DEBUG MODE ENABLED - Detailed logging active ===');
+    subLogger.debug('Debug', 'Subscription configuration', {
+      id: sub.id,
+      userId: sub.userId,
+      jobTitles: sub.jobTitles,
+      minScore: sub.minScore,
+      datePosted: sub.datePosted,
+      excludedTitles: sub.excludedTitles,
+      excludedCompanies: sub.excludedCompanies,
+      isRemote: sub.isRemote,
+      location: sub.location,
+      normalizedLocations: sub.normalizedLocations,
+    });
+  }
+
   // Build Sets for O(1) deduplication lookups
   const thisSentIds = new Set(sub.sentNotifications.map(n => n.jobMatchId));
   const otherSentIds = new Set(
@@ -261,6 +293,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   errorContext.query = sub.jobTitles.join(', ');
   errorContext.location = sub.location ?? (normalizedLocations ? LocationNormalizerAgent.formatForDisplaySingleLine(normalizedLocations) : undefined);
 
+  subLogger.debug('Collection', 'Starting collection stage');
   const allRawJobs = await collectJobsForSubscription({
     jobTitles: sub.jobTitles,
     normalizedLocations,
@@ -270,33 +303,45 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     limit: 3000,
     skipCache: true, // Manual scans always fetch fresh results
     priority: PRIORITY.MANUAL_SCAN,
+    subLogger,
   });
 
   errorContext.partialResults!.jobsCollected = allRawJobs.length;
   logger.info('Scheduler', `[Manual] Total raw jobs collected: ${allRawJobs.length}`);
+  subLogger.debug('Collection', `Collection complete: ${allRawJobs.length} raw jobs`);
 
   // Stage 2: Normalization
   errorContext.stage = 'normalization';
+  subLogger.debug('Normalization', 'Starting normalization and deduplication');
   let normalizedJobs = await normalizer.execute(allRawJobs);
   errorContext.partialResults!.jobsNormalized = normalizedJobs.length;
   logger.info('Scheduler', `[Manual] After dedup: ${normalizedJobs.length} unique jobs`);
+  subLogger.debug('Normalization', `Deduplication complete: ${normalizedJobs.length} unique jobs (removed ${allRawJobs.length - normalizedJobs.length} duplicates)`);
 
   // Apply exclusion filters
   const excludedTitles = sub.excludedTitles ?? [];
   const excludedCompanies = sub.excludedCompanies ?? [];
 
   if (excludedTitles.length > 0 || excludedCompanies.length > 0) {
+    const beforeExclusionFilter = normalizedJobs.length;
     normalizedJobs = normalizedJobs.filter((job) => {
       const titleLower = job.title.toLowerCase();
       for (const excluded of excludedTitles) {
-        if (titleLower.includes(excluded.toLowerCase())) return false;
+        if (titleLower.includes(excluded.toLowerCase())) {
+          subLogger.debug('Filter', `Excluded job by title: "${job.title}" matches excluded term "${excluded}"`);
+          return false;
+        }
       }
       const companyLower = job.company.toLowerCase();
       for (const excluded of excludedCompanies) {
-        if (companyLower.includes(excluded.toLowerCase())) return false;
+        if (companyLower.includes(excluded.toLowerCase())) {
+          subLogger.debug('Filter', `Excluded job by company: "${job.company}" matches excluded term "${excluded}"`);
+          return false;
+        }
       }
       return true;
     });
+    subLogger.debug('Filter', `Exclusion filter: removed ${beforeExclusionFilter - normalizedJobs.length} jobs`);
   }
 
   // Apply location filter using normalized locations or legacy location
@@ -305,12 +350,18 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   const locationFiltered = beforeLocationFilter - normalizedJobs.length;
   if (locationFiltered > 0) {
     logger.info('Scheduler', `[Manual] Filtered ${locationFiltered} jobs by location`);
+    subLogger.debug('Filter', `Location filter: removed ${locationFiltered} jobs that didn't match location criteria`);
   }
+
+  subLogger.debug('Filter', `After all filters: ${normalizedJobs.length} jobs ready for matching`);
 
   // Stage 3: Matching
   errorContext.stage = 'matching';
   const newMatches: MatchItem[] = [];
   const stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 };
+
+  subLogger.debug('Matching', `Starting matching stage for ${normalizedJobs.length} jobs`);
+  let matchedCount = 0;
 
   for (const job of normalizedJobs) {
     // Update context for each job being matched
@@ -318,6 +369,12 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     errorContext.company = job.company;
 
     try {
+      subLogger.debug('Matching', `Processing job: "${job.title}" at "${job.company}"`, {
+        location: job.location,
+        isRemote: job.isRemote,
+        contentHash: job.contentHash.slice(0, 8),
+      });
+
       const existingJob = await db.job.findUnique({
         where: { contentHash: job.contentHash },
         include: { matches: { where: { resumeHash: sub.resumeHash }, take: 1 } },
@@ -337,8 +394,14 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
           cons: cached.cons,
         };
         jobMatchId = cached.id;
+        subLogger.debug('Matching', `Cache HIT for "${job.title}": score=${matchResult.score}`);
       } else {
+        subLogger.debug('Matching', `Cache MISS for "${job.title}" - calling LLM matcher`);
         matchResult = await matcher.execute({ job, resumeText: sub.resumeText });
+        subLogger.debug('Matching', `LLM match result for "${job.title}": score=${matchResult.score}`, {
+          matchedSkills: matchResult.matchedSkills?.slice(0, 5),
+          missingSkills: matchResult.missingSkills?.slice(0, 5),
+        });
 
         const savedJob = await db.job.upsert({
           where: { contentHash: job.contentHash },
@@ -382,28 +445,37 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
         jobMatchId = savedMatch.id;
       }
 
+      matchedCount++;
+
       // Track stats and apply filters
       if (matchResult.score < sub.minScore) {
         stats.skippedBelowScore++;
+        subLogger.debug('Matching', `SKIP "${job.title}": score ${matchResult.score} below minScore ${sub.minScore}`);
         continue;
       }
       if (thisSentIds.has(jobMatchId)) {
         stats.skippedAlreadySent++;
+        subLogger.debug('Matching', `SKIP "${job.title}": already sent to user`);
         continue;
       }
       const isPreviouslyMatched = otherSentIds.has(jobMatchId);
       if (isPreviouslyMatched && skipDupes) {
         stats.skippedCrossSubDuplicates++;
+        subLogger.debug('Matching', `SKIP "${job.title}": cross-subscription duplicate`);
         continue;
       }
       if (isPreviouslyMatched) stats.previouslyMatchedOther++;
 
       newMatches.push({ job, match: matchResult, matchId: jobMatchId, isPreviouslyMatched });
       errorContext.partialResults!.jobsMatched = newMatches.length;
+      subLogger.debug('Matching', `MATCH "${job.title}": score=${matchResult.score}, added to results`);
     } catch (error) {
       logger.error('Scheduler', `[Manual] Failed to process job: ${job.title}`, error);
+      subLogger.debug('Matching', `ERROR processing "${job.title}"`, error);
     }
   }
+
+  subLogger.debug('Matching', `Matching complete: processed ${matchedCount} jobs, found ${newMatches.length} new matches`);
 
   // Clear job-specific context after matching loop
   delete errorContext.jobTitle;
@@ -423,6 +495,15 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     errorContext.stage = 'notification';
     newMatches.sort((a, b) => b.match.score - a.match.score);
 
+    subLogger.debug('Notification', `Sending ${newMatches.length} notifications to chat ${sub.user.chatId}`);
+    subLogger.debug('Notification', 'Top matches being sent', {
+      topMatches: newMatches.slice(0, 5).map(m => ({
+        title: m.job.title,
+        company: m.job.company,
+        score: m.match.score,
+      })),
+    });
+
     await sendMatchSummary(sub.user.chatId, newMatches, stats);
 
     // Use createMany with skipDuplicates to handle concurrent runs safely
@@ -435,6 +516,9 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     });
 
     notificationsSent = created.count;
+    subLogger.debug('Notification', `Notification stage complete: ${notificationsSent} notifications recorded`);
+  } else {
+    subLogger.debug('Notification', 'No new matches to send');
   }
 
   // Collect skill data for analytics
@@ -442,11 +526,16 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   const allMissingSkills = newMatches.flatMap(m => m.match.missingSkills ?? []);
   if (allMatchedSkills.length > 0 || allMissingSkills.length > 0) {
     await updateSkillStats(subscriptionId, allMatchedSkills, allMissingSkills);
+    subLogger.debug('Analytics', 'Updated skill stats', {
+      matchedSkillsCount: allMatchedSkills.length,
+      missingSkillsCount: allMissingSkills.length,
+    });
   }
 
   // Create market snapshot for analytics
   if (normalizedJobs.length > 0) {
     await createMarketSnapshot(sub.jobTitles, sub.location, sub.isRemote, normalizedJobs);
+    subLogger.debug('Analytics', 'Created market snapshot');
   }
 
   // Update last search timestamp
@@ -464,6 +553,20 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   });
 
   logger.info('Scheduler', `[Manual] Results: ${newMatches.length} new | ${stats.skippedAlreadySent} already sent | ${stats.skippedBelowScore} below threshold | ${stats.skippedCrossSubDuplicates} cross-sub skipped`);
+
+  // Final debug summary
+  subLogger.debug('Complete', '=== RUN COMPLETE ===', {
+    runId,
+    jobsCollected: allRawJobs.length,
+    jobsAfterDedup: normalizedJobs.length,
+    newMatches: newMatches.length,
+    notificationsSent,
+    stats,
+  });
+
+  if (sub.debugMode) {
+    subLogger.info('Debug', '=== DEBUG MODE - Run complete. Disable debug mode in admin dashboard when done. ===');
+  }
 
   return { matchesFound: newMatches.length, notificationsSent, stats, jobsProcessed: normalizedJobs.length };
 
@@ -486,7 +589,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
 export async function runSubscriptionSearches(): Promise<SearchResult> {
   const db = getDb();
 
-  // Get all active, non-paused subscriptions
+  // Get all active, non-paused subscriptions (include debugMode for logging)
   const subscriptions = await db.searchSubscription.findMany({
     where: {
       isActive: true,
@@ -530,11 +633,30 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
     };
 
     try {
+      // Create subscription-scoped logger for debug mode
+      const subLogger = createSubscriptionLogger(sub.id, sub.debugMode);
+
       const userLabel = sub.user.username
         ? `@${sub.user.username}`
         : `user-${sub.user.telegramId}`;
 
       logger.info('Scheduler', `Processing ${userLabel}: ${sub.jobTitles.join(', ')}`);
+
+      if (sub.debugMode) {
+        subLogger.info('Debug', '=== DEBUG MODE ENABLED - Detailed logging active (scheduled run) ===');
+        subLogger.debug('Debug', 'Subscription configuration', {
+          id: sub.id,
+          userId: sub.userId,
+          jobTitles: sub.jobTitles,
+          minScore: sub.minScore,
+          datePosted: sub.datePosted,
+          excludedTitles: sub.excludedTitles,
+          excludedCompanies: sub.excludedCompanies,
+          isRemote: sub.isRemote,
+          location: sub.location,
+          normalizedLocations: sub.normalizedLocations,
+        });
+      }
 
       // Build Sets for O(1) deduplication lookups
       const thisSentIds = new Set(sub.sentNotifications.map(n => n.jobMatchId));
@@ -557,6 +679,7 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
 
       // Stage 1: Collection
       errorContext.stage = 'collection';
+      subLogger.debug('Collection', 'Starting collection stage');
       const allRawJobs = await collectJobsForSubscription({
         jobTitles: sub.jobTitles,
         normalizedLocations,
@@ -566,16 +689,20 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         limit: 3000,
         skipCache: false,
         priority: PRIORITY.SCHEDULED,
+        subLogger,
       });
 
       errorContext.partialResults!.jobsCollected = allRawJobs.length;
       logger.info('Scheduler', `  Total collected: ${allRawJobs.length} raw jobs`);
+      subLogger.debug('Collection', `Collection complete: ${allRawJobs.length} raw jobs`);
 
       // Stage 2: Normalization
       errorContext.stage = 'normalization';
+      subLogger.debug('Normalization', 'Starting normalization and deduplication');
       let normalizedJobs = await normalizer.execute(allRawJobs);
       errorContext.partialResults!.jobsNormalized = normalizedJobs.length;
       logger.debug('Scheduler', `  ${normalizedJobs.length} unique jobs after dedup`);
+      subLogger.debug('Normalization', `Deduplication complete: ${normalizedJobs.length} unique jobs (removed ${allRawJobs.length - normalizedJobs.length} duplicates)`);
 
       // Step 2.5: Apply exclusion filters
       const excludedTitles = sub.excludedTitles ?? [];
@@ -588,6 +715,7 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
           const titleLower = job.title.toLowerCase();
           for (const excluded of excludedTitles) {
             if (titleLower.includes(excluded.toLowerCase())) {
+              subLogger.debug('Filter', `Excluded job by title: "${job.title}" matches excluded term "${excluded}"`);
               return false;
             }
           }
@@ -595,6 +723,7 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
           const companyLower = job.company.toLowerCase();
           for (const excluded of excludedCompanies) {
             if (companyLower.includes(excluded.toLowerCase())) {
+              subLogger.debug('Filter', `Excluded job by company: "${job.company}" matches excluded term "${excluded}"`);
               return false;
             }
           }
@@ -604,6 +733,7 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         if (filtered > 0) {
           logger.debug('Scheduler', `  Filtered ${filtered} jobs by exclusions`);
         }
+        subLogger.debug('Filter', `Exclusion filter: removed ${filtered} jobs`);
       }
 
       // Step 2.6: Apply location filter using normalized locations or legacy location
@@ -612,18 +742,30 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       const locationFiltered = beforeLocationFilter - normalizedJobs.length;
       if (locationFiltered > 0) {
         logger.info('Scheduler', `  Filtered ${locationFiltered} jobs by location`);
+        subLogger.debug('Filter', `Location filter: removed ${locationFiltered} jobs that didn't match location criteria`);
       }
+
+      subLogger.debug('Filter', `After all filters: ${normalizedJobs.length} jobs ready for matching`);
 
       // Stage 3: Matching
       errorContext.stage = 'matching';
       const newMatches: MatchItem[] = [];
       const stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 };
 
+      subLogger.debug('Matching', `Starting matching stage for ${normalizedJobs.length} jobs`);
+      let matchedCount = 0;
+
       for (const job of normalizedJobs) {
         errorContext.jobTitle = job.title;
         errorContext.company = job.company;
 
         try {
+          subLogger.debug('Matching', `Processing job: "${job.title}" at "${job.company}"`, {
+            location: job.location,
+            isRemote: job.isRemote,
+            contentHash: job.contentHash.slice(0, 8),
+          });
+
           // Check for existing match in DB
           const existingJob = await db.job.findUnique({
             where: { contentHash: job.contentHash },
@@ -650,11 +792,17 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
               cons: cached.cons,
             };
             jobMatchId = cached.id;
+            subLogger.debug('Matching', `Cache HIT for "${job.title}": score=${matchResult.score}`);
           } else {
             // Need to create new match via LLM
+            subLogger.debug('Matching', `Cache MISS for "${job.title}" - calling LLM matcher`);
             matchResult = await matcher.execute({
               job,
               resumeText: sub.resumeText,
+            });
+            subLogger.debug('Matching', `LLM match result for "${job.title}": score=${matchResult.score}`, {
+              matchedSkills: matchResult.matchedSkills?.slice(0, 5),
+              missingSkills: matchResult.missingSkills?.slice(0, 5),
             });
 
             // Save job and match to DB
@@ -701,28 +849,37 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
             jobMatchId = savedMatch.id;
           }
 
+          matchedCount++;
+
           // Track stats and apply filters
           if (matchResult.score < sub.minScore) {
             stats.skippedBelowScore++;
+            subLogger.debug('Matching', `SKIP "${job.title}": score ${matchResult.score} below minScore ${sub.minScore}`);
             continue;
           }
           if (thisSentIds.has(jobMatchId)) {
             stats.skippedAlreadySent++;
+            subLogger.debug('Matching', `SKIP "${job.title}": already sent to user`);
             continue;
           }
           const isPreviouslyMatched = otherSentIds.has(jobMatchId);
           if (isPreviouslyMatched && skipDupes) {
             stats.skippedCrossSubDuplicates++;
+            subLogger.debug('Matching', `SKIP "${job.title}": cross-subscription duplicate`);
             continue;
           }
           if (isPreviouslyMatched) stats.previouslyMatchedOther++;
 
           newMatches.push({ job, match: matchResult, matchId: jobMatchId, isPreviouslyMatched });
           errorContext.partialResults!.jobsMatched = newMatches.length;
+          subLogger.debug('Matching', `MATCH "${job.title}": score=${matchResult.score}, added to results`);
         } catch (error) {
           logger.error('Scheduler', `  Failed to process job: ${job.title}`, error);
+          subLogger.debug('Matching', `ERROR processing "${job.title}"`, error);
         }
       }
+
+      subLogger.debug('Matching', `Matching complete: processed ${matchedCount} jobs, found ${newMatches.length} new matches`);
 
       // Clear job-specific context after matching loop
       delete errorContext.jobTitle;
@@ -736,6 +893,15 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         // Stage 4: Notification
         errorContext.stage = 'notification';
         newMatches.sort((a, b) => b.match.score - a.match.score);
+
+        subLogger.debug('Notification', `Sending ${newMatches.length} notifications to chat ${sub.user.chatId}`);
+        subLogger.debug('Notification', 'Top matches being sent', {
+          topMatches: newMatches.slice(0, 5).map(m => ({
+            title: m.job.title,
+            company: m.job.company,
+            score: m.match.score,
+          })),
+        });
 
         try {
           await sendMatchSummary(sub.user.chatId, newMatches, stats);
@@ -752,9 +918,13 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
           notificationsSent = created.count;
           totalNotifications += newMatches.length;
           logger.info('Scheduler', `  Sent ${newMatches.length} notifications to ${userLabel}`);
+          subLogger.debug('Notification', `Notification stage complete: ${notificationsSent} notifications recorded`);
         } catch (error) {
           logger.error('Scheduler', `  Failed to send notifications to ${userLabel}`, error);
+          subLogger.debug('Notification', `ERROR sending notifications`, error);
         }
+      } else {
+        subLogger.debug('Notification', 'No new matches to send');
       }
 
       // Collect skill data for analytics
@@ -762,11 +932,16 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       const allMissingSkills = newMatches.flatMap(m => m.match.missingSkills ?? []);
       if (allMatchedSkills.length > 0 || allMissingSkills.length > 0) {
         await updateSkillStats(sub.id, allMatchedSkills, allMissingSkills);
+        subLogger.debug('Analytics', 'Updated skill stats', {
+          matchedSkillsCount: allMatchedSkills.length,
+          missingSkillsCount: allMissingSkills.length,
+        });
       }
 
       // Create market snapshot for analytics
       if (normalizedJobs.length > 0) {
         await createMarketSnapshot(sub.jobTitles, sub.location, sub.isRemote, normalizedJobs);
+        subLogger.debug('Analytics', 'Created market snapshot');
       }
 
       // Update last search timestamp
@@ -782,6 +957,20 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         jobsMatched: newMatches.length,
         notificationsSent,
       });
+
+      // Final debug summary
+      subLogger.debug('Complete', '=== RUN COMPLETE ===', {
+        runId,
+        jobsCollected: allRawJobs.length,
+        jobsAfterDedup: normalizedJobs.length,
+        newMatches: newMatches.length,
+        notificationsSent,
+        stats,
+      });
+
+      if (sub.debugMode) {
+        subLogger.info('Debug', '=== DEBUG MODE - Run complete. Disable debug mode in admin dashboard when done. ===');
+      }
     } catch (error) {
       errorContext.timestamp = new Date().toISOString();
       await RunTracker.fail(runId, error, errorContext);

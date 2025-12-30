@@ -66,4 +66,91 @@ export const logger = {
   error: (context: string, message: string, data?: unknown) => log('error', context, message, data),
 };
 
+/**
+ * Subscription-scoped logger that enables debug logging when debugMode is true.
+ * When debugMode is enabled, debug logs are shown regardless of global LOG_LEVEL.
+ * All logs include the subscription ID for easy filtering.
+ */
+export class SubscriptionLogger {
+  private subscriptionId: string;
+  private debugMode: boolean;
+  private shortId: string;
+
+  constructor(subscriptionId: string, debugMode: boolean) {
+    this.subscriptionId = subscriptionId;
+    this.debugMode = debugMode;
+    this.shortId = subscriptionId.slice(0, 8);
+  }
+
+  private formatContext(context: string): string {
+    return `${context}:${this.shortId}`;
+  }
+
+  /**
+   * Debug logs are shown when:
+   * 1. Global LOG_LEVEL is 'debug', OR
+   * 2. This subscription has debugMode enabled
+   */
+  debug(context: string, message: string, data?: unknown): void {
+    const formattedContext = this.formatContext(context);
+    if (this.debugMode) {
+      // Force debug output by calling log directly, bypassing level check
+      const color = colors.debug;
+      const prefix = `${colors.reset}[${formatTime()}] ${color}DEBUG${colors.reset}`;
+      const ctx = `[${formattedContext}]`;
+      const debugTag = `${colors.warn}[DEBUG MODE]${colors.reset}`;
+
+      if (data !== undefined) {
+        let formattedData: string;
+        if (data instanceof Error) {
+          formattedData = `${data.name}: ${data.message}${data.stack ? `\n${data.stack}` : ''}`;
+        } else if (typeof data === 'object') {
+          formattedData = JSON.stringify(data, null, 2);
+        } else {
+          formattedData = String(data);
+        }
+        console.log(`${prefix} ${debugTag} ${ctx} ${message}`, formattedData);
+      } else {
+        console.log(`${prefix} ${debugTag} ${ctx} ${message}`);
+      }
+    } else {
+      // Use normal log path (respects LOG_LEVEL)
+      log('debug', formattedContext, message, data);
+    }
+  }
+
+  info(context: string, message: string, data?: unknown): void {
+    log('info', this.formatContext(context), message, data);
+  }
+
+  warn(context: string, message: string, data?: unknown): void {
+    log('warn', this.formatContext(context), message, data);
+  }
+
+  error(context: string, message: string, data?: unknown): void {
+    log('error', this.formatContext(context), message, data);
+  }
+
+  /**
+   * Get the subscription ID for reference
+   */
+  getSubscriptionId(): string {
+    return this.subscriptionId;
+  }
+
+  /**
+   * Check if debug mode is enabled
+   */
+  isDebugMode(): boolean {
+    return this.debugMode;
+  }
+}
+
+/**
+ * Create a subscription-scoped logger
+ */
+export function createSubscriptionLogger(subscriptionId: string, debugMode: boolean): SubscriptionLogger {
+  return new SubscriptionLogger(subscriptionId, debugMode);
+}
+
 export default logger;

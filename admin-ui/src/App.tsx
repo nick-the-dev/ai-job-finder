@@ -12,6 +12,7 @@ import {
   getErrors,
   setAdminKey,
   hasAdminKey,
+  toggleDebugMode,
 } from '@/api/client';
 import type {
   OverviewData,
@@ -251,11 +252,35 @@ function UsersTable({ users }: { users: User[] }) {
   );
 }
 
-function SubscriptionRow({ sub }: { sub: Subscription }) {
+function SubscriptionRow({ sub, onDebugToggle }: { sub: Subscription; onDebugToggle: (id: string, enabled: boolean) => void }) {
   const isActive = sub.status === 'active' || sub.status === 'paused';
+  const [toggling, setToggling] = useState(false);
+
+  const handleDebugToggle = async () => {
+    setToggling(true);
+    try {
+      await onDebugToggle(sub.id, !sub.debugMode);
+    } finally {
+      setToggling(false);
+    }
+  };
+
+  // Show first 8 chars of UUID for display, full ID on hover
+  const shortId = sub.id.slice(0, 8);
 
   return (
     <TableRow className={!isActive ? 'opacity-60' : ''}>
+      <TableCell>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <code className="text-xs font-mono text-muted-foreground cursor-pointer hover:text-foreground">{shortId}</code>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p className="font-mono text-xs">{sub.id}</p>
+            <p className="text-xs text-muted-foreground mt-1">Click to copy</p>
+          </TooltipContent>
+        </Tooltip>
+      </TableCell>
       <TableCell className="font-medium">{sub.user.username || 'No name'}</TableCell>
       <TableCell>
         <TruncatedCell value={sub.jobTitles.join(', ')} maxWidth={200} />
@@ -282,11 +307,31 @@ function SubscriptionRow({ sub }: { sub: Subscription }) {
       <TableCell className="text-muted-foreground">
         {isActive ? formatNextRun(sub.nextRunAt) : '-'}
       </TableCell>
+      <TableCell>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={handleDebugToggle}
+              disabled={toggling}
+              className={`px-2 py-1 text-xs rounded transition-colors ${
+                sub.debugMode
+                  ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 border border-amber-500/50'
+                  : 'bg-secondary text-muted-foreground hover:bg-secondary/80 border border-border'
+              } disabled:opacity-50`}
+            >
+              {toggling ? '...' : sub.debugMode ? '🔍 Debug ON' : 'Debug'}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p>{sub.debugMode ? 'Disable debug logging' : 'Enable detailed debug logging for this subscription'}</p>
+          </TooltipContent>
+        </Tooltip>
+      </TableCell>
     </TableRow>
   );
 }
 
-function SubscriptionsTable({ subscriptions }: { subscriptions: Subscription[] }) {
+function SubscriptionsTable({ subscriptions, onDebugToggle }: { subscriptions: Subscription[]; onDebugToggle: (id: string, enabled: boolean) => void }) {
   // Separate active/paused from inactive
   const activeSubs = subscriptions.filter(s => s.status === 'active' || s.status === 'paused');
   const inactiveSubs = subscriptions.filter(s => s.status === 'inactive');
@@ -295,6 +340,7 @@ function SubscriptionsTable({ subscriptions }: { subscriptions: Subscription[] }
     <Table>
       <TableHeader>
         <TableRow>
+          <TableHead>ID</TableHead>
           <TableHead>User</TableHead>
           <TableHead>Job Titles</TableHead>
           <TableHead>Location</TableHead>
@@ -302,15 +348,16 @@ function SubscriptionsTable({ subscriptions }: { subscriptions: Subscription[] }
           <TableHead>Notifications</TableHead>
           <TableHead>Last Run</TableHead>
           <TableHead>Next Run</TableHead>
+          <TableHead>Actions</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {activeSubs.map((sub) => (
-          <SubscriptionRow key={sub.id} sub={sub} />
+          <SubscriptionRow key={sub.id} sub={sub} onDebugToggle={onDebugToggle} />
         ))}
         {activeSubs.length > 0 && inactiveSubs.length > 0 && (
           <TableRow>
-            <TableCell colSpan={7} className="bg-muted/30 py-2 text-center">
+            <TableCell colSpan={9} className="bg-muted/30 py-2 text-center">
               <span className="text-xs text-muted-foreground uppercase tracking-wider">
                 Inactive Subscriptions ({inactiveSubs.length})
               </span>
@@ -318,11 +365,11 @@ function SubscriptionsTable({ subscriptions }: { subscriptions: Subscription[] }
           </TableRow>
         )}
         {inactiveSubs.map((sub) => (
-          <SubscriptionRow key={sub.id} sub={sub} />
+          <SubscriptionRow key={sub.id} sub={sub} onDebugToggle={onDebugToggle} />
         ))}
         {subscriptions.length === 0 && (
           <TableRow>
-            <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
+            <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
               No subscriptions found
             </TableCell>
           </TableRow>
@@ -469,6 +516,23 @@ function Dashboard() {
     window.location.reload();
   };
 
+  const handleDebugToggle = async (subscriptionId: string, enabled: boolean) => {
+    try {
+      const result = await toggleDebugMode(subscriptionId, enabled);
+      // Update local state optimistically
+      setSubscriptions(subs =>
+        subs.map(sub =>
+          sub.id === subscriptionId
+            ? { ...sub, debugMode: result.subscription.debugMode }
+            : sub
+        )
+      );
+    } catch (err) {
+      console.error('Failed to toggle debug mode:', err);
+      // Could add a toast notification here
+    }
+  };
+
   if (loading && !overview) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -533,7 +597,7 @@ function Dashboard() {
             <TabsContent value="subscriptions" className="mt-4">
               <Card>
                 <CardContent className="pt-6">
-                  <SubscriptionsTable subscriptions={subscriptions} />
+                  <SubscriptionsTable subscriptions={subscriptions} onDebugToggle={handleDebugToggle} />
                 </CardContent>
               </Card>
             </TabsContent>

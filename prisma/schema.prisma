@@ -191,6 +191,7 @@ model SearchSubscription {
   // Status
   isActive        Boolean  @default(true) @map("is_active")
   isPaused        Boolean  @default(false) @map("is_paused")
+  debugMode       Boolean  @default(false) @map("debug_mode") // Enable detailed logging for debugging
 
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")

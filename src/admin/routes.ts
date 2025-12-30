@@ -306,6 +306,7 @@ router.get('/api/subscriptions', async (req: Request, res: Response) => {
           isRemote: true,
           isActive: true,
           isPaused: true,
+          debugMode: true,
           minScore: true,
           createdAt: true,
           nextRunAt: true,
@@ -382,6 +383,7 @@ router.get('/api/subscriptions/:id', async (req: Request, res: Response) => {
         isRemote: true,
         isActive: true,
         isPaused: true,
+        debugMode: true,
         minScore: true,
         createdAt: true,
         nextRunAt: true,
@@ -446,6 +448,57 @@ router.get('/api/subscriptions/:id', async (req: Request, res: Response) => {
   } catch (error) {
     logger.error('Admin', 'Failed to get subscription', error);
     res.status(500).json({ error: 'Failed to get subscription' });
+  }
+});
+
+// POST /admin/api/subscriptions/:id/debug - Toggle debug mode
+router.post('/api/subscriptions/:id/debug', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const { id } = req.params;
+    const { enabled } = req.body;
+
+    // Validate input
+    if (typeof enabled !== 'boolean') {
+      res.status(400).json({ error: 'enabled must be a boolean' });
+      return;
+    }
+
+    // Update subscription
+    const subscription = await db.searchSubscription.update({
+      where: { id },
+      data: { debugMode: enabled },
+      select: {
+        id: true,
+        debugMode: true,
+        user: {
+          select: {
+            username: true,
+          },
+        },
+        jobTitles: true,
+      },
+    });
+
+    logger.info(
+      'Admin',
+      `Debug mode ${enabled ? 'enabled' : 'disabled'} for subscription ${id} (@${subscription.user.username}: ${subscription.jobTitles.slice(0, 2).join(', ')})`
+    );
+
+    res.json({
+      success: true,
+      subscription: {
+        id: subscription.id,
+        debugMode: subscription.debugMode,
+      },
+    });
+  } catch (error) {
+    if ((error as any).code === 'P2025') {
+      res.status(404).json({ error: 'Subscription not found' });
+      return;
+    }
+    logger.error('Admin', 'Failed to toggle debug mode', error);
+    res.status(500).json({ error: 'Failed to toggle debug mode' });
   }
 });
 

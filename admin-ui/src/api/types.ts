@@ -49,6 +49,7 @@ export interface Subscription {
   isRemote: boolean;
   isActive: boolean;
   isPaused: boolean;
+  debugMode: boolean;
   minScore: number;
   createdAt: string;
   nextRunAt: string | null;
