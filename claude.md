@@ -437,7 +437,7 @@ When runs fail, structured context is captured for debugging:
 ### Stuck Run Cleanup
 
 A cron job runs every 5 minutes to detect and fail stuck runs:
-- Runs with `status: 'running'` for >10 minutes are marked as failed
+- Runs with `status: 'running'` for >24 hours are marked as failed
 - Prevents zombie runs from blocking the system
 - Logs cleanup actions for visibility
 

@@ -18,7 +18,7 @@ const CLEANUP_SCHEDULE = '*/5 * * * *';
 const MAX_PER_MINUTE = 5;
 
 // Runs stuck for longer than this are considered failed (ms)
-const STUCK_RUN_THRESHOLD = 10 * 60 * 1000; // 10 minutes
+const STUCK_RUN_THRESHOLD = 24 * 60 * 60 * 1000; // 24 hours
 
 // Track currently running subscriptions to prevent concurrent runs
 const runningSubscriptions = new Set<string>();
