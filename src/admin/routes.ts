@@ -1,10 +1,17 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import express from 'express';
 import { getDb } from '../db/client.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
-import { generateDashboardHtml } from './dashboard.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const router = Router();
+
+// Get directory for serving static files
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const adminUiPath = path.join(__dirname, '../../admin-ui/dist');
 
 // Simple in-memory rate limiter
 const rateLimiter = new Map<string, { count: number; resetAt: number }>();
@@ -77,19 +84,11 @@ function requireAdminKey(req: Request, res: Response, next: NextFunction): void 
   next();
 }
 
-// Apply security middleware to all routes
-router.use(requireAdminKey);
+// Serve static files for React SPA (no auth required for assets)
+router.use(express.static(adminUiPath));
 
-// GET /admin - HTML Dashboard
-router.get('/', async (_req: Request, res: Response) => {
-  try {
-    const html = await generateDashboardHtml();
-    res.type('html').send(html);
-  } catch (error) {
-    logger.error('Admin', 'Failed to generate dashboard', error);
-    res.status(500).json({ error: 'Failed to generate dashboard' });
-  }
-});
+// Apply security middleware to API routes only
+router.use('/api', requireAdminKey);
 
 // GET /admin/api/overview - Platform summary
 router.get('/api/overview', async (_req: Request, res: Response) => {
@@ -546,6 +545,18 @@ router.get('/api/errors', async (req: Request, res: Response) => {
     logger.error('Admin', 'Failed to get errors', error);
     res.status(500).json({ error: 'Failed to get errors' });
   }
+});
+
+// SPA catch-all: serve index.html for any non-API route
+// This enables client-side routing in the React app
+router.get('*', (_req: Request, res: Response) => {
+  const indexPath = path.join(adminUiPath, 'index.html');
+  res.sendFile(indexPath, (err) => {
+    if (err) {
+      logger.error('Admin', 'Failed to serve admin UI', err);
+      res.status(500).send('Admin UI not available');
+    }
+  });
 });
 
 export { router as adminRouter };
