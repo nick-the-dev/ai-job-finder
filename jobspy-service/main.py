@@ -129,21 +129,23 @@ def scrape(request: ScrapeRequest):
             logger.info(f"Scraping jobs (GLOBAL): {request.search_term}{remote_filter}{job_type_filter}")
             all_jobs = []
 
-            # LinkedIn: use "Worldwide" location
+            # LinkedIn: omit location for truly global search
+            # Note: Passing "Worldwide" doesn't work - JobSpy maps it to US geoId
+            # Omitting location lets LinkedIn search globally by default
             if "linkedin" in request.site_name:
                 linkedin_kwargs = {
                     "site_name": ["linkedin"],
                     "search_term": request.search_term,
                     "results_wanted": request.results_wanted,
                     "hours_old": request.hours_old,
-                    "location": "Worldwide",
+                    # No location = global search
                 }
                 if request.is_remote is not None:
                     linkedin_kwargs["is_remote"] = request.is_remote
                 if request.job_type is not None:
                     linkedin_kwargs["job_type"] = request.job_type
 
-                logger.info(f"  LinkedIn: location=Worldwide")
+                logger.info(f"  LinkedIn: location=<none> (global search)")
                 linkedin_df = scrape_jobs(**linkedin_kwargs)
                 linkedin_jobs = df_to_jobs(linkedin_df)
                 logger.info(f"  LinkedIn: found {len(linkedin_jobs)} jobs")
