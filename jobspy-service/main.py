@@ -366,6 +366,138 @@ def df_to_jobs(jobs_df) -> list:
     return jobs
 
 
+# LinkedIn geoId for worldwide search
+LINKEDIN_WORLDWIDE_GEOID = "92000000"
+
+
+def scrape_linkedin_worldwide(search_term: str, results_wanted: int = 50, hours_old: Optional[int] = None) -> list:
+    """Custom LinkedIn scraper that uses geoId for truly worldwide results.
+
+    python-jobspy doesn't support geoId parameter, so LinkedIn defaults to US results
+    when no location is specified. This function directly calls LinkedIn's API with
+    geoId=92000000 (Worldwide) to get global job listings.
+    """
+    import requests
+    from bs4 import BeautifulSoup
+    import time
+    import random
+    from datetime import datetime
+
+    headers = {
+        "authority": "www.linkedin.com",
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.9",
+        "cache-control": "no-cache",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+
+    base_url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+    jobs = []
+    seen_ids = set()
+    start = 0
+    page = 0
+    max_pages = (results_wanted // 25) + 2  # LinkedIn returns ~25 jobs per page
+
+    while len(jobs) < results_wanted and page < max_pages:
+        params = {
+            "keywords": search_term,
+            "geoId": LINKEDIN_WORLDWIDE_GEOID,  # Key: Worldwide geoId
+            "pageNum": 0,
+            "start": start,
+        }
+
+        # Add time filter if specified
+        if hours_old:
+            params["f_TPR"] = f"r{hours_old * 3600}"
+
+        try:
+            logger.info(f"  LinkedIn worldwide: fetching page {page + 1}, start={start}")
+            response = requests.get(base_url, params=params, headers=headers, timeout=15)
+
+            if response.status_code == 429:
+                logger.warning("  LinkedIn: Rate limited (429), stopping")
+                break
+            if response.status_code != 200:
+                logger.error(f"  LinkedIn: Error {response.status_code}")
+                break
+
+            soup = BeautifulSoup(response.text, "html.parser")
+            job_cards = soup.find_all("div", class_="base-search-card")
+
+            if not job_cards:
+                logger.info("  LinkedIn: No more jobs found")
+                break
+
+            for card in job_cards:
+                if len(jobs) >= results_wanted:
+                    break
+
+                # Extract job ID from URL
+                href_tag = card.find("a", class_="base-card__full-link")
+                if not href_tag or "href" not in href_tag.attrs:
+                    continue
+
+                href = href_tag.attrs["href"].split("?")[0]
+                job_id = href.split("-")[-1]
+
+                if job_id in seen_ids:
+                    continue
+                seen_ids.add(job_id)
+
+                # Extract job details
+                title_tag = card.find("span", class_="sr-only")
+                title = title_tag.get_text(strip=True) if title_tag else "Unknown"
+
+                company_tag = card.find("h4", class_="base-search-card__subtitle")
+                company_a_tag = company_tag.find("a") if company_tag else None
+                company = company_a_tag.get_text(strip=True) if company_a_tag else "Unknown"
+
+                loc_tag = card.find("span", class_="job-search-card__location")
+                location = loc_tag.get_text(strip=True) if loc_tag else None
+
+                # Parse date
+                datetime_tag = card.find("time", class_="job-search-card__listdate")
+                date_posted = None
+                if datetime_tag and "datetime" in datetime_tag.attrs:
+                    try:
+                        date_posted = datetime_tag["datetime"]
+                    except:
+                        pass
+
+                # Check if remote (simple heuristic)
+                is_remote = "remote" in (title or "").lower() or "remote" in (location or "").lower()
+
+                job = {
+                    "id": f"li-{job_id}",
+                    "title": title,
+                    "company": company,
+                    "description": None,  # Would need separate request
+                    "location": location,
+                    "is_remote": is_remote,
+                    "min_amount": None,
+                    "max_amount": None,
+                    "currency": None,
+                    "job_url": f"https://www.linkedin.com/jobs/view/{job_id}",
+                    "date_posted": date_posted,
+                    "site": "linkedin",
+                }
+                jobs.append(job)
+
+            start += len(job_cards)
+            page += 1
+
+            # Rate limit protection
+            if page < max_pages and len(jobs) < results_wanted:
+                time.sleep(random.uniform(2, 4))
+
+        except Exception as e:
+            logger.error(f"  LinkedIn worldwide scrape error: {e}")
+            break
+
+    logger.info(f"  LinkedIn worldwide: collected {len(jobs)} jobs")
+    return jobs
+
+
 @app.post("/scrape")
 def scrape(request: ScrapeRequest):
     try:
@@ -382,27 +514,16 @@ def scrape(request: ScrapeRequest):
             logger.info(f"Scraping jobs (GLOBAL): {request.search_term}{remote_filter}{job_type_filter}")
             all_jobs = []
 
-            # LinkedIn: omit location for truly global search
-            # Note: Passing "Worldwide" doesn't work - JobSpy maps it to US geoId
-            # Omitting location lets LinkedIn search globally by default
+            # LinkedIn: use custom worldwide scraper with geoId=92000000
+            # python-jobspy doesn't support geoId, so LinkedIn defaults to US results
+            # Our custom scraper explicitly sets geoId for truly global results
             if "linkedin" in request.site_name:
-                linkedin_kwargs = {
-                    "site_name": ["linkedin"],
-                    "search_term": request.search_term,
-                    "results_wanted": request.results_wanted,
-                    "hours_old": request.hours_old,
-                    # No location = global search
-                }
-                if request.is_remote is not None:
-                    linkedin_kwargs["is_remote"] = request.is_remote
-                if request.job_type is not None:
-                    linkedin_kwargs["job_type"] = request.job_type
-
-                logger.info(f"  LinkedIn: location=<none> (global search)")
-                logger.info(f"  LinkedIn kwargs: {linkedin_kwargs}")
-                linkedin_df = scrape_jobs(**linkedin_kwargs)
-                linkedin_jobs = df_to_jobs(linkedin_df)
-                logger.info(f"  LinkedIn: found {len(linkedin_jobs)} jobs")
+                logger.info(f"  LinkedIn: using worldwide scraper with geoId={LINKEDIN_WORLDWIDE_GEOID}")
+                linkedin_jobs = scrape_linkedin_worldwide(
+                    search_term=request.search_term,
+                    results_wanted=request.results_wanted,
+                    hours_old=request.hours_old,
+                )
 
                 # Debug: log location distribution
                 from collections import Counter
