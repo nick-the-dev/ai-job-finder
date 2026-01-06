@@ -98,6 +98,74 @@ def health():
     return {"status": "ok", "service": "jobspy-scraper", "jobspy_version": JOBSPY_VERSION}
 
 
+@app.get("/debug/info")
+def debug_info():
+    """Return debug info about the server environment."""
+    import socket
+    import requests as req
+
+    try:
+        # Get external IP
+        external_ip = req.get("https://api.ipify.org", timeout=5).text
+    except:
+        external_ip = "unknown"
+
+    try:
+        # Get IP info
+        ip_info = req.get(f"https://ipinfo.io/{external_ip}/json", timeout=5).json()
+    except:
+        ip_info = {}
+
+    return {
+        "jobspy_version": JOBSPY_VERSION,
+        "hostname": socket.gethostname(),
+        "external_ip": external_ip,
+        "ip_city": ip_info.get("city", "unknown"),
+        "ip_country": ip_info.get("country", "unknown"),
+    }
+
+
+@app.get("/debug/test-linkedin")
+def debug_test_linkedin():
+    """Test LinkedIn scraping with detailed debug info."""
+    from collections import Counter
+
+    linkedin_kwargs = {
+        "site_name": ["linkedin"],
+        "search_term": "Full stack engineer",
+        "results_wanted": 30,
+        # No location = should be global
+    }
+
+    logger.info(f"DEBUG: Testing LinkedIn with kwargs: {linkedin_kwargs}")
+    df = scrape_jobs(**linkedin_kwargs)
+    jobs = df_to_jobs(df)
+
+    locations = [j.get("location") or "null" for j in jobs]
+    loc_counts = Counter(locations).most_common(20)
+
+    # Extract countries from locations
+    countries = []
+    for loc in locations:
+        if loc and loc != "null":
+            parts = loc.split(",")
+            if len(parts) >= 2:
+                countries.append(parts[-1].strip())
+            else:
+                countries.append(loc)
+        else:
+            countries.append("Unknown")
+    country_counts = Counter(countries).most_common(10)
+
+    return {
+        "jobspy_version": JOBSPY_VERSION,
+        "jobs_found": len(jobs),
+        "location_distribution": loc_counts,
+        "country_distribution": country_counts,
+        "sample_jobs": [{"title": j["title"], "company": j["company"], "location": j["location"]} for j in jobs[:5]],
+    }
+
+
 def df_to_jobs(jobs_df) -> list:
     """Convert DataFrame to list of job dicts."""
     if jobs_df is None or jobs_df.empty:
@@ -155,9 +223,17 @@ def scrape(request: ScrapeRequest):
                     linkedin_kwargs["job_type"] = request.job_type
 
                 logger.info(f"  LinkedIn: location=<none> (global search)")
+                logger.info(f"  LinkedIn kwargs: {linkedin_kwargs}")
                 linkedin_df = scrape_jobs(**linkedin_kwargs)
                 linkedin_jobs = df_to_jobs(linkedin_df)
                 logger.info(f"  LinkedIn: found {len(linkedin_jobs)} jobs")
+
+                # Debug: log location distribution
+                from collections import Counter
+                locations = [j.get("location", "null") for j in linkedin_jobs]
+                loc_counts = Counter(locations).most_common(10)
+                logger.info(f"  LinkedIn location distribution: {loc_counts}")
+
                 all_jobs.extend(linkedin_jobs)
 
             # Indeed: use country_indeed="Canada" (no location)
