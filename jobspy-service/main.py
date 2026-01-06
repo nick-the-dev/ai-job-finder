@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import logging
+import importlib.metadata
 
 from jobspy import scrape_jobs
 
@@ -9,6 +10,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="JobSpy Scraper API", version="1.0.0")
+
+# Get jobspy version for debugging
+try:
+    JOBSPY_VERSION = importlib.metadata.version("python-jobspy")
+except:
+    JOBSPY_VERSION = "unknown"
+
+logger.info(f"JobSpy version: {JOBSPY_VERSION}")
 
 
 class ScrapeRequest(BaseModel):
@@ -86,7 +95,7 @@ class JobResult(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "jobspy-scraper"}
+    return {"status": "ok", "service": "jobspy-scraper", "jobspy_version": JOBSPY_VERSION}
 
 
 def df_to_jobs(jobs_df) -> list:
