@@ -134,15 +134,12 @@ describe('CollectorService Cache Key Generation', () => {
     });
 
     it('treats undefined location differently from empty string', () => {
-      // Note: In the actual implementation, undefined is serialized as null in JSON
-      // This test verifies the behavior
+      // undefined is serialized as null in JSON, empty string stays as ""
+      // These should produce different hashes to prevent cache collisions
       const hashUndefined = getQueryHash('Software Engineer', undefined, true, 'jobspy');
       const hashEmpty = getQueryHash('Software Engineer', '', true, 'jobspy');
 
-      // These might be the same or different depending on JSON.stringify behavior
-      // The important thing is consistency
-      expect(typeof hashUndefined).toBe('string');
-      expect(typeof hashEmpty).toBe('string');
+      expect(hashUndefined).not.toBe(hashEmpty);
     });
   });
 });

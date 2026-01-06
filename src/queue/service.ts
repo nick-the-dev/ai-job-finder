@@ -40,6 +40,8 @@ function startCacheCleanup(): void {
       }
     }
   }, 60 * 1000); // Clean every minute
+  // Allow Node.js to exit cleanly when this is the only pending work
+  cleanupIntervalId.unref();
 }
 
 function stopCacheCleanup(): void {
