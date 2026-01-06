@@ -102,6 +102,8 @@ def health():
 def debug_info():
     """Return debug info about the server environment."""
     import socket
+    import sys
+    import platform
     import requests as req
 
     try:
@@ -116,12 +118,23 @@ def debug_info():
     except:
         ip_info = {}
 
+    # Get library versions
+    lib_versions = {}
+    for lib in ["requests", "urllib3", "tls_client", "pandas", "numpy"]:
+        try:
+            lib_versions[lib] = importlib.metadata.version(lib)
+        except:
+            lib_versions[lib] = "not installed"
+
     return {
         "jobspy_version": JOBSPY_VERSION,
+        "python_version": sys.version,
+        "platform": platform.platform(),
         "hostname": socket.gethostname(),
         "external_ip": external_ip,
         "ip_city": ip_info.get("city", "unknown"),
         "ip_country": ip_info.get("country", "unknown"),
+        "lib_versions": lib_versions,
     }
 
 
@@ -213,6 +226,120 @@ def debug_raw_linkedin(lang: str = "en-US"):
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/debug/jobspy-session")
+def debug_jobspy_session():
+    """Test using python-jobspy's actual session mechanism."""
+    from bs4 import BeautifulSoup
+    from jobspy.util import create_session
+    from jobspy.linkedin.constant import headers
+
+    # Create session the same way python-jobspy does
+    session = create_session(
+        proxies=None,
+        ca_cert=None,
+        is_tls=False,
+        has_retry=True,
+        delay=5,
+        clear_cookies=True,
+    )
+    session.headers.update(headers)
+
+    url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+    params = {
+        "keywords": "Full stack engineer",
+        "pageNum": 0,
+        "start": 0,
+    }
+
+    try:
+        response = session.get(url, params=params, timeout=10)
+        soup = BeautifulSoup(response.text, "html.parser")
+        job_cards = soup.find_all("div", class_="base-search-card")
+
+        locations = []
+        for card in job_cards[:10]:
+            loc_tag = card.find("span", class_="job-search-card__location")
+            if loc_tag:
+                locations.append(loc_tag.get_text(strip=True))
+
+        return {
+            "status_code": response.status_code,
+            "jobs_in_response": len(job_cards),
+            "sample_locations": locations,
+            "request_url": str(response.request.url) if hasattr(response, 'request') else response.url,
+            "session_type": type(session).__name__,
+            "session_headers": dict(session.headers),
+        }
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
+
+
+@app.get("/debug/linkedin-with-cookie")
+def debug_linkedin_with_cookie(lang: str = "en-GB", geo: str = ""):
+    """Test LinkedIn with different cookies to see if geolocation changes.
+
+    LinkedIn may set user preferences via cookies. Test with:
+    - lang=en-GB (British English)
+    - lang=de-DE (German)
+    - geo=DE (Germany geoId)
+    """
+    import requests as req
+    from bs4 import BeautifulSoup
+
+    headers = {
+        "authority": "www.linkedin.com",
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "accept-language": f"{lang},en;q=0.9",
+        "cache-control": "no-cache",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+
+    # Try setting language cookie
+    cookies = {
+        "lang": f"v=2&lang={lang.lower().replace('-', '_')}",
+    }
+
+    url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+    params = {
+        "keywords": "Full stack engineer",
+        "pageNum": 0,
+        "start": 0,
+    }
+
+    # If geo specified, add geoId parameter (LinkedIn geographic filter)
+    if geo:
+        params["geoId"] = geo
+
+    try:
+        response = req.get(url, params=params, headers=headers, cookies=cookies, timeout=15)
+        soup = BeautifulSoup(response.text, "html.parser")
+        job_cards = soup.find_all("div", class_="base-search-card")
+
+        locations = []
+        for card in job_cards[:10]:
+            loc_tag = card.find("span", class_="job-search-card__location")
+            if loc_tag:
+                locations.append(loc_tag.get_text(strip=True))
+
+        # Check response cookies
+        resp_cookies = dict(response.cookies)
+
+        return {
+            "status_code": response.status_code,
+            "jobs_in_response": len(job_cards),
+            "sample_locations": locations,
+            "request_url": response.request.url,
+            "cookies_sent": cookies,
+            "cookies_received": resp_cookies,
+            "lang_param": lang,
+            "geo_param": geo or "none",
+        }
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
 
 
 def df_to_jobs(jobs_df) -> list:
