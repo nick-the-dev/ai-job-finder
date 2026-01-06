@@ -109,10 +109,25 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
   /**
    * Generate hash for query parameters
+   * Includes all parameters that affect API results to ensure correct caching
    */
-  private getQueryHash(query: string, location: string | undefined, isRemote: boolean | undefined, source: string): string {
+  private getQueryHash(
+    query: string,
+    location: string | undefined,
+    isRemote: boolean | undefined,
+    source: string,
+    datePosted?: string,
+    jobType?: string
+  ): string {
     // Use null in JSON for undefined to distinguish from false
-    const data = JSON.stringify({ query, location, isRemote: isRemote ?? null, source });
+    const data = JSON.stringify({
+      query,
+      location,
+      isRemote: isRemote ?? null,
+      source,
+      datePosted: datePosted ?? null,
+      jobType: jobType ?? null,
+    });
     return crypto.createHash('sha256').update(data).digest('hex').substring(0, 16);
   }
 
@@ -131,7 +146,9 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       datePosted = 'month', // Default to last 30 days
     } = input;
 
-    const queryHash = this.getQueryHash(query, location, isRemote, 'serpapi');
+    const queryHash = this.getQueryHash(query, location, isRemote, 'serpapi', datePosted);
+
+    logger.debug('Collector', `[SerpAPI] Query: "${query}" | location: "${location || 'any'}" | remote: ${isRemote} | datePosted: ${datePosted} | hash: ${queryHash}`);
 
     // Check cache unless skipCache is true
     if (!skipCache) {
@@ -148,17 +165,21 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
         // Build remote filter: undefined = all, true = remote only, false = on-site only
         const remoteFilter = isRemote !== undefined ? { isRemote } : {};
 
+        // Build date filter based on datePosted
+        const dateFilter = this.getDateFilter(datePosted);
+
         const cachedJobs = await db.job.findMany({
           where: {
             source: 'serpapi',
             ...remoteFilter,
             ...locationFilter,
+            ...dateFilter,
           },
           orderBy: { lastSeenAt: 'desc' },
           take: limit,
         });
 
-        logger.info('Collector', `[SerpAPI] Cache hit: ${cachedJobs.length} jobs for "${query}" in "${location || 'any'}"`);
+        logger.info('Collector', `[SerpAPI] ✓ CACHE HIT: ${cachedJobs.length} jobs for "${query}" in "${location || 'any'}" (hash: ${queryHash}) - API call SKIPPED`);
 
         return cachedJobs.map((job: Job) => ({
           title: job.title,
@@ -174,7 +195,11 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           source: job.source as 'serpapi' | 'jobspy',
           sourceId: job.sourceId ?? undefined,
         }));
+      } else {
+        logger.debug('Collector', `[SerpAPI] Cache MISS for hash: ${queryHash} - will call API`);
       }
+    } else {
+      logger.debug('Collector', `[SerpAPI] Cache SKIPPED (skipCache=true) - will call API`);
     }
 
     const allJobs: RawJob[] = [];
@@ -231,6 +256,8 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       // Update cache
       await this.updateCache(queryHash, query, location, isRemote, 'serpapi', allJobs.length, cacheHours);
 
+      logger.info('Collector', `[SerpAPI] ✗ API CALLED: ${allJobs.length} jobs for "${query}" in "${location || 'any'}" (hash: ${queryHash}) - cached for ${cacheHours}h`);
+
       return allJobs;
     } catch (error) {
       if (axios.isAxiosError(error)) {
@@ -266,7 +293,10 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       cacheHours = DEFAULT_CACHE_HOURS,
     } = input;
 
-    const queryHash = this.getQueryHash(query, location, isRemote, 'jobspy');
+    const datePosted = input.datePosted ?? 'month';
+    const queryHash = this.getQueryHash(query, location, isRemote, 'jobspy', datePosted, jobType);
+
+    logger.debug('Collector', `[JobSpy] Query: "${query}" | location: "${location || 'any'}" | remote: ${isRemote} | datePosted: ${datePosted} | jobType: ${jobType || 'all'} | hash: ${queryHash}`);
 
     // Check cache unless skipCache is true
     if (!skipCache) {
@@ -282,17 +312,21 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
         // Build remote filter: undefined = all, true = remote only, false = on-site only
         const remoteFilter = isRemote !== undefined ? { isRemote } : {};
 
+        // Build date filter based on datePosted
+        const dateFilter = this.getDateFilter(datePosted);
+
         const cachedJobs = await db.job.findMany({
           where: {
             source: 'jobspy',
             ...remoteFilter,
             ...locationFilter,
+            ...dateFilter,
           },
           orderBy: { lastSeenAt: 'desc' },
           take: limit,
         });
 
-        logger.info('Collector', `[JobSpy] Cache hit: ${cachedJobs.length} jobs for "${query}" in "${location || 'any'}"`);
+        logger.info('Collector', `[JobSpy] ✓ CACHE HIT: ${cachedJobs.length} jobs for "${query}" in "${location || 'any'}" (hash: ${queryHash}) - API call SKIPPED`);
 
         return cachedJobs.map((job: Job) => ({
           title: job.title,
@@ -308,7 +342,11 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           source: job.source as 'serpapi' | 'jobspy',
           sourceId: job.sourceId ?? undefined,
         }));
+      } else {
+        logger.debug('Collector', `[JobSpy] Cache MISS for hash: ${queryHash} - will call API`);
       }
+    } else {
+      logger.debug('Collector', `[JobSpy] Cache SKIPPED (skipCache=true) - will call API`);
     }
 
     // Check if JOBSPY_URL is configured
@@ -383,6 +421,8 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
       // Update cache
       await this.updateCache(queryHash, query, location, isRemote, 'jobspy', transformedJobs.length, cacheHours);
+
+      logger.info('Collector', `[JobSpy] ✗ API CALLED: ${transformedJobs.length} jobs for "${query}" in "${location || 'any'}" (hash: ${queryHash}) - cached for ${cacheHours}h`);
 
       return transformedJobs;
     } catch (error) {
@@ -508,6 +548,39 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Build a Prisma date filter based on datePosted parameter
+   * Returns jobs posted within the specified time frame
+   */
+  private getDateFilter(datePosted: string): Record<string, any> {
+    const now = new Date();
+    let cutoffDate: Date;
+
+    switch (datePosted) {
+      case 'today':
+        cutoffDate = new Date(now.getTime() - 24 * 60 * 60 * 1000); // 24 hours
+        break;
+      case '3days':
+        cutoffDate = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000); // 72 hours
+        break;
+      case 'week':
+        cutoffDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); // 7 days
+        break;
+      case 'month':
+        cutoffDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); // 30 days
+        break;
+      default:
+        return {}; // No date filter for 'all' or unknown values
+    }
+
+    return {
+      OR: [
+        { postedDate: { gte: cutoffDate } },
+        { postedDate: null }, // Include jobs without posted date
+      ],
+    };
   }
 
   /**

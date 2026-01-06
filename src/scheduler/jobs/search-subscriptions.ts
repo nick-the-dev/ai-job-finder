@@ -110,7 +110,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
           }
         }
 
-        // Search for each physical location using first 2 searchVariants
+        // Search for each physical location using up to 2 searchVariants
         for (const loc of physicalLocations) {
           const variants = loc.searchVariants.slice(0, 2);
           if (variants.length === 0) variants.push(loc.display);
@@ -323,7 +323,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     legacyIsRemote: sub.isRemote,
     jobTypes,
     datePosted,
-    limit: 3000,
+    limit: 1000, // Per-query limit for manual scans
     skipCache: true, // Manual scans always fetch fresh results
     priority: PRIORITY.MANUAL_SCAN,
     subLogger,
@@ -716,6 +716,16 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       // Extract job types from subscription
       const jobTypes = (sub.jobTypes ?? []) as string[];
 
+      // First run: use user's configured datePosted to backfill historical jobs
+      // Subsequent runs: use 'today' since older jobs were already processed
+      const isFirstRun = !sub.lastSearchAt;
+      const effectiveDatePosted = isFirstRun ? datePosted : 'today';
+      const effectiveLimit = isFirstRun ? 1000 : 500;
+
+      if (isFirstRun) {
+        logger.info('Scheduler', `  First run - using user's datePosted: ${datePosted}`);
+      }
+
       subLogger.debug('Collection', 'Starting collection stage');
       const allRawJobs = await collectJobsForSubscription({
         jobTitles: sub.jobTitles,
@@ -723,8 +733,8 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         legacyLocation: sub.location,
         legacyIsRemote: sub.isRemote,
         jobTypes,
-        datePosted,
-        limit: 3000,
+        datePosted: effectiveDatePosted,
+        limit: effectiveLimit,
         skipCache: false,
         priority: PRIORITY.SCHEDULED,
         subLogger,

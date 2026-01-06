@@ -15,6 +15,64 @@ const fallbackLlmLimit = pLimit(5);
 const COLLECTION_TIMEOUT = 3 * 60 * 1000; // 3 minutes per collection
 const MATCHING_TIMEOUT = 60 * 1000; // 1 minute per match
 
+// In-memory request deduplication cache
+// Prevents duplicate API calls when multiple subscriptions request the same query
+const REQUEST_CACHE_TTL = 5 * 60 * 1000; // 5 minutes cache for in-flight dedup
+
+interface CacheEntry {
+  promise: Promise<RawJob[]>;
+  timestamp: number;
+}
+
+const requestCache = new Map<string, CacheEntry>();
+
+// Clean up old cache entries periodically
+// Store interval ID to allow cleanup on shutdown
+let cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
+
+function startCacheCleanup(): void {
+  if (cleanupIntervalId) return; // Already running
+  cleanupIntervalId = setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of requestCache.entries()) {
+      if (now - entry.timestamp > REQUEST_CACHE_TTL) {
+        requestCache.delete(key);
+      }
+    }
+  }, 60 * 1000); // Clean every minute
+  // Allow Node.js to exit cleanly when this is the only pending work
+  cleanupIntervalId.unref();
+}
+
+function stopCacheCleanup(): void {
+  if (cleanupIntervalId) {
+    clearInterval(cleanupIntervalId);
+    cleanupIntervalId = null;
+  }
+}
+
+// Start cleanup on module load
+startCacheCleanup();
+
+/**
+ * Generate cache key for collection request deduplication
+ * Uses null for undefined values to match CollectorService behavior
+ */
+function getCollectionCacheKey(params: Omit<CollectionJobData, 'requestId' | 'priority'>): string {
+  // Include all parameters that affect the API response
+  // Use null for undefined to be consistent with CollectorService
+  const keyData = {
+    query: params.query,
+    location: params.location ?? null,
+    isRemote: params.isRemote ?? null,
+    jobType: params.jobType ?? null,
+    datePosted: params.datePosted ?? null,
+    source: params.source ?? 'jobspy',
+    limit: params.limit ?? null,
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(keyData)).digest('hex').substring(0, 16);
+}
+
 /**
  * Wait for job completion with timeout
  */
@@ -40,12 +98,54 @@ export class QueueService {
   /**
    * Enqueue a job collection request
    * Falls back to direct execution if Redis unavailable
+   * Uses in-memory request deduplication to avoid duplicate API calls
    */
   async enqueueCollection(
     params: Omit<CollectionJobData, 'requestId' | 'priority'>,
     priority: Priority = PRIORITY.API_REQUEST
   ): Promise<RawJob[]> {
     const requestId = generateRequestId();
+
+    // Check in-memory request cache for deduplication (unless skipCache is true)
+    if (!params.skipCache) {
+      const cacheKey = getCollectionCacheKey(params);
+      const cached = requestCache.get(cacheKey);
+
+      if (cached && Date.now() - cached.timestamp < REQUEST_CACHE_TTL) {
+        logger.debug('QueueService', `[${requestId}] Request cache hit for "${params.query}" (key: ${cacheKey})`);
+        // Return a copy of the cached jobs to prevent mutation issues
+        const cachedJobs = await cached.promise;
+        return [...cachedJobs];
+      }
+
+      // Create the actual request and cache it
+      const requestPromise = this.executeCollection(params, requestId, priority);
+      requestCache.set(cacheKey, {
+        promise: requestPromise,
+        timestamp: Date.now(),
+      });
+
+      try {
+        return await requestPromise;
+      } catch (error) {
+        // Remove from cache on error so it can be retried
+        requestCache.delete(cacheKey);
+        throw error;
+      }
+    }
+
+    // skipCache=true: bypass request cache
+    return this.executeCollection(params, requestId, priority);
+  }
+
+  /**
+   * Internal method to execute collection (used by enqueueCollection)
+   */
+  private async executeCollection(
+    params: Omit<CollectionJobData, 'requestId' | 'priority'>,
+    requestId: string,
+    priority: Priority
+  ): Promise<RawJob[]> {
     const { collectionQueue } = getQueues();
 
     if (!collectionQueue || !isRedisConnected()) {
@@ -156,6 +256,35 @@ export class QueueService {
    */
   isAvailable(): boolean {
     return isRedisConnected();
+  }
+
+  /**
+   * Clear the in-memory request cache
+   * Useful after a scheduler run completes
+   */
+  clearRequestCache(): void {
+    const size = requestCache.size;
+    requestCache.clear();
+    if (size > 0) {
+      logger.debug('QueueService', `Cleared ${size} entries from request cache`);
+    }
+  }
+
+  /**
+   * Get request cache stats (for debugging)
+   */
+  getRequestCacheStats(): { size: number; ttlMs: number } {
+    return { size: requestCache.size, ttlMs: REQUEST_CACHE_TTL };
+  }
+
+  /**
+   * Shutdown the queue service - stops cache cleanup interval
+   * Call this on graceful shutdown to prevent memory leaks
+   */
+  shutdown(): void {
+    stopCacheCleanup();
+    this.clearRequestCache();
+    logger.info('QueueService', 'Shutdown complete - cleanup interval stopped');
   }
 
   // Fallback: direct collection using p-limit

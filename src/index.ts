@@ -13,6 +13,7 @@ import {
   closeQueues,
   startCollectionWorker,
   startMatchingWorker,
+  queueService,
 } from './queue/index.js';
 import { adminRouter } from './admin/index.js';
 import { startCleanupScheduler, stopCleanupScheduler } from './observability/index.js';
@@ -79,6 +80,7 @@ async function shutdown(signal: string) {
   logger.info('Server', `${signal} received, shutting down...`);
   stopScheduler();
   stopCleanupScheduler();
+  queueService.shutdown(); // Stop cache cleanup interval
   await stopBot();
   await closeQueues();
   await disconnectRedis();

@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
     "search": "tsx scripts/run-search.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
@@ -41,7 +43,8 @@
     "@types/pdf-parse": "^1.1.5",
     "prisma": "^6.0.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^4.0.16"
   },
   "engines": {
     "node": ">=20.0.0"
