@@ -27,27 +27,46 @@ interface CacheEntry {
 const requestCache = new Map<string, CacheEntry>();
 
 // Clean up old cache entries periodically
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of requestCache.entries()) {
-    if (now - entry.timestamp > REQUEST_CACHE_TTL) {
-      requestCache.delete(key);
+// Store interval ID to allow cleanup on shutdown
+let cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
+
+function startCacheCleanup(): void {
+  if (cleanupIntervalId) return; // Already running
+  cleanupIntervalId = setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of requestCache.entries()) {
+      if (now - entry.timestamp > REQUEST_CACHE_TTL) {
+        requestCache.delete(key);
+      }
     }
+  }, 60 * 1000); // Clean every minute
+}
+
+function stopCacheCleanup(): void {
+  if (cleanupIntervalId) {
+    clearInterval(cleanupIntervalId);
+    cleanupIntervalId = null;
   }
-}, 60 * 1000); // Clean every minute
+}
+
+// Start cleanup on module load
+startCacheCleanup();
 
 /**
  * Generate cache key for collection request deduplication
+ * Uses null for undefined values to match CollectorService behavior
  */
 function getCollectionCacheKey(params: Omit<CollectionJobData, 'requestId' | 'priority'>): string {
   // Include all parameters that affect the API response
+  // Use null for undefined to be consistent with CollectorService
   const keyData = {
     query: params.query,
-    location: params.location ?? '',
-    isRemote: params.isRemote ?? false,
-    jobType: params.jobType ?? '',
-    datePosted: params.datePosted ?? '',
+    location: params.location ?? null,
+    isRemote: params.isRemote ?? null,
+    jobType: params.jobType ?? null,
+    datePosted: params.datePosted ?? null,
     source: params.source ?? 'jobspy',
+    limit: params.limit ?? null,
   };
   return crypto.createHash('sha256').update(JSON.stringify(keyData)).digest('hex').substring(0, 16);
 }
@@ -254,6 +273,16 @@ export class QueueService {
    */
   getRequestCacheStats(): { size: number; ttlMs: number } {
     return { size: requestCache.size, ttlMs: REQUEST_CACHE_TTL };
+  }
+
+  /**
+   * Shutdown the queue service - stops cache cleanup interval
+   * Call this on graceful shutdown to prevent memory leaks
+   */
+  shutdown(): void {
+    stopCacheCleanup();
+    this.clearRequestCache();
+    logger.info('QueueService', 'Shutdown complete - cleanup interval stopped');
   }
 
   // Fallback: direct collection using p-limit

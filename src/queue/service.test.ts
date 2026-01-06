@@ -5,9 +5,10 @@ import crypto from 'crypto';
  * Tests for QueueService in-memory request deduplication cache
  *
  * These tests verify that:
- * 1. Cache keys include all relevant parameters
+ * 1. Cache keys include all relevant parameters (including limit)
  * 2. Duplicate requests within TTL should share the same cache entry
  * 3. Different parameters produce different cache keys
+ * 4. Undefined values use null (consistent with CollectorService)
  */
 
 // Helper to generate collection cache key (same logic as in service.ts)
@@ -18,14 +19,17 @@ function getCollectionCacheKey(params: {
   jobType?: string;
   datePosted?: string;
   source?: string;
+  limit?: number;
 }): string {
+  // Use null for undefined to be consistent with CollectorService
   const keyData = {
     query: params.query,
-    location: params.location ?? '',
-    isRemote: params.isRemote ?? false,
-    jobType: params.jobType ?? '',
-    datePosted: params.datePosted ?? '',
+    location: params.location ?? null,
+    isRemote: params.isRemote ?? null,
+    jobType: params.jobType ?? null,
+    datePosted: params.datePosted ?? null,
     source: params.source ?? 'jobspy',
+    limit: params.limit ?? null,
   };
   return crypto.createHash('sha256').update(JSON.stringify(keyData)).digest('hex').substring(0, 16);
 }
@@ -38,12 +42,14 @@ describe('QueueService Collection Cache Key', () => {
         location: 'Toronto',
         isRemote: true,
         datePosted: 'today',
+        limit: 500,
       });
       const key2 = getCollectionCacheKey({
         query: 'Software Engineer',
         location: 'Toronto',
         isRemote: true,
         datePosted: 'today',
+        limit: 500,
       });
 
       expect(key1).toBe(key2);
@@ -73,22 +79,33 @@ describe('QueueService Collection Cache Key', () => {
     it('generates different hash for different isRemote values', () => {
       const keyRemote = getCollectionCacheKey({ query: 'Engineer', isRemote: true });
       const keyOnsite = getCollectionCacheKey({ query: 'Engineer', isRemote: false });
+      const keyAny = getCollectionCacheKey({ query: 'Engineer' }); // undefined = null
 
       expect(keyRemote).not.toBe(keyOnsite);
+      expect(keyRemote).not.toBe(keyAny);
+      expect(keyOnsite).not.toBe(keyAny);
     });
 
-    it('treats undefined isRemote as false for consistency', () => {
-      const keyUndefined = getCollectionCacheKey({ query: 'Engineer' });
-      const keyFalse = getCollectionCacheKey({ query: 'Engineer', isRemote: false });
+    it('generates different hash for different limit values', () => {
+      const key500 = getCollectionCacheKey({ query: 'Engineer', limit: 500 });
+      const key1000 = getCollectionCacheKey({ query: 'Engineer', limit: 1000 });
+      const keyNoLimit = getCollectionCacheKey({ query: 'Engineer' }); // undefined = null
 
-      expect(keyUndefined).toBe(keyFalse);
+      expect(key500).not.toBe(key1000);
+      expect(key500).not.toBe(keyNoLimit);
+      expect(key1000).not.toBe(keyNoLimit);
     });
 
-    it('treats undefined location as empty string', () => {
-      const keyUndefined = getCollectionCacheKey({ query: 'Engineer' });
-      const keyEmpty = getCollectionCacheKey({ query: 'Engineer', location: '' });
+    it('treats undefined values as null (not as false or empty string)', () => {
+      // undefined isRemote should NOT match false
+      const keyUndefinedRemote = getCollectionCacheKey({ query: 'Engineer' });
+      const keyFalseRemote = getCollectionCacheKey({ query: 'Engineer', isRemote: false });
+      expect(keyUndefinedRemote).not.toBe(keyFalseRemote);
 
-      expect(keyUndefined).toBe(keyEmpty);
+      // undefined location should NOT match empty string
+      const keyUndefinedLocation = getCollectionCacheKey({ query: 'Engineer' });
+      const keyEmptyLocation = getCollectionCacheKey({ query: 'Engineer', location: '' });
+      expect(keyUndefinedLocation).not.toBe(keyEmptyLocation);
     });
   });
 });
@@ -102,6 +119,7 @@ describe('Request Deduplication Scenarios', () => {
       isRemote: false,
       datePosted: 'today',
       source: 'jobspy',
+      limit: 500,
     });
     const run2 = getCollectionCacheKey({
       query: 'Frontend Developer',
@@ -109,6 +127,7 @@ describe('Request Deduplication Scenarios', () => {
       isRemote: false,
       datePosted: 'today',
       source: 'jobspy',
+      limit: 500,
     });
 
     expect(run1).toBe(run2);
@@ -121,12 +140,14 @@ describe('Request Deduplication Scenarios', () => {
       location: 'Remote',
       isRemote: true,
       datePosted: 'week',
+      limit: 500,
     });
     const userB = getCollectionCacheKey({
       query: 'Machine Learning Engineer',
       location: 'Remote',
       isRemote: true,
       datePosted: 'week',
+      limit: 500,
     });
 
     expect(userA).toBe(userB);
@@ -138,15 +159,32 @@ describe('Request Deduplication Scenarios', () => {
       location: 'Remote',
       isRemote: true,
       datePosted: 'month', // First run backfill
+      limit: 1000,
     });
     const userB = getCollectionCacheKey({
       query: 'Machine Learning Engineer',
       location: 'Remote',
       isRemote: true,
       datePosted: 'today', // Subsequent scheduled run
+      limit: 500,
     });
 
     expect(userA).not.toBe(userB);
+  });
+
+  it('two subscriptions with different limits should NOT share cache', () => {
+    const manualScan = getCollectionCacheKey({
+      query: 'Developer',
+      datePosted: 'month',
+      limit: 1000, // Manual scan limit
+    });
+    const scheduledScan = getCollectionCacheKey({
+      query: 'Developer',
+      datePosted: 'month',
+      limit: 500, // Scheduled scan limit
+    });
+
+    expect(manualScan).not.toBe(scheduledScan);
   });
 
   it('location variants should have different cache keys', () => {
@@ -179,6 +217,7 @@ describe('Cache Key Length', () => {
       location: 'A very long location string with city, province, and country details',
       jobType: 'fulltime',
       datePosted: 'month',
+      limit: 1000,
     });
 
     expect(shortKey).toHaveLength(16);
