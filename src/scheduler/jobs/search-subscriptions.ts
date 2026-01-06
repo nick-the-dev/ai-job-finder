@@ -63,10 +63,10 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
       const jobTypeLabel = jobType ? ` (${jobType})` : '';
 
       for (const title of jobTitles) {
-        // Search for worldwide remote jobs (no location filter)
+        // Search for worldwide remote jobs (no location filter = global search)
         if (hasWorldwideRemote) {
           try {
-            logger.info('Scheduler', `  Collecting remote jobs for: "${title}"${jobTypeLabel}`);
+            logger.info('Scheduler', `  Collecting remote jobs globally for: "${title}"${jobTypeLabel}`);
             const jobs = await queueService.enqueueCollection({
               query: title,
               isRemote: true,
@@ -75,11 +75,12 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
               source: 'jobspy',
               skipCache,
               datePosted: datePosted === 'all' ? undefined : datePosted,
+              // No location = global search (LinkedIn searches globally, Indeed uses country_indeed default)
             }, priority);
-            logger.info('Scheduler', `  Found ${jobs.length} remote jobs for "${title}"${jobTypeLabel}`);
+            logger.info('Scheduler', `  Found ${jobs.length} remote jobs globally for "${title}"${jobTypeLabel}`);
             allRawJobs.push(...jobs);
           } catch (error) {
-            logger.error('Scheduler', `  Failed to collect remote jobs for "${title}"${jobTypeLabel}`, error);
+            logger.error('Scheduler', `  Failed to collect remote jobs globally for "${title}"${jobTypeLabel}`, error);
           }
         }
 
@@ -137,7 +138,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
       }
     }
   } else {
-    // Legacy mode: single location
+    // Legacy mode: single location (or no location = global search)
     for (const jobType of jobTypesToSearch) {
       const jobTypeLabel = jobType ? ` (${jobType})` : '';
 
@@ -146,7 +147,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
           logger.info('Scheduler', `  Collecting jobs for: "${title}"${jobTypeLabel}`);
           const jobs = await queueService.enqueueCollection({
             query: title,
-            location: legacyLocation ?? undefined,
+            location: legacyLocation ?? undefined, // undefined = global search
             isRemote: legacyIsRemote,
             jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
             limit,

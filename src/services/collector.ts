@@ -9,7 +9,7 @@ import type { Job } from '@prisma/client';
 
 interface CollectorInput {
   query: string;      // Job title + location
-  location?: string;
+  location?: string;  // If not provided, LinkedIn searches globally, Indeed uses country_indeed default
   isRemote?: boolean;
   jobType?: 'fulltime' | 'parttime' | 'internship' | 'contract'; // Filter by job type
   limit?: number;      // Target number of jobs to fetch
@@ -251,6 +251,9 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
   /**
    * Fetch jobs from JobSpy (Python microservice or direct API)
+   * Note: When location is not provided:
+   * - LinkedIn searches globally
+   * - Indeed/Glassdoor use their country_indeed default (usually USA)
    */
   private async fetchFromJobSpy(input: CollectorInput): Promise<RawJob[]> {
     const {
@@ -338,7 +341,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
         logger.info('Collector', `[JobSpy] Using multiple searches due to Indeed limitation`);
         const jobs = await this.fetchJobSpyWithIntersection(
           query,
-          location || 'USA',
+          location, // undefined = global search (LinkedIn global, Indeed uses country_indeed default)
           limit,
           hoursOld,
           jobType,
@@ -351,10 +354,13 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       // Single search - no conflicting filters
       const requestBody: Record<string, any> = {
         search_term: query,
-        location: location || 'USA',
         site_name: ['indeed', 'linkedin'],  // glassdoor disabled - location parsing broken
         results_wanted: limit,
       };
+      // Only add location if specified (undefined = global search for LinkedIn)
+      if (location) {
+        requestBody.location = location;
+      }
       // Only add is_remote if explicitly set (undefined = all jobs)
       if (isRemote !== undefined) {
         requestBody.is_remote = isRemote;
@@ -559,7 +565,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
    */
   private async fetchJobSpyWithIntersection(
     query: string,
-    location: string,
+    location: string | undefined, // undefined = global search
     limit: number,
     hoursOld: number | undefined,
     jobType: string | undefined,
@@ -574,15 +580,17 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     // Search 1: Filter by date (hours_old)
     const dateRequest: Record<string, any> = {
       search_term: query,
-      location,
       site_name: ['indeed', 'linkedin'],
       results_wanted: expandedLimit,
     };
+    if (location) {
+      dateRequest.location = location;
+    }
     if (hoursOld !== undefined) {
       dateRequest.hours_old = hoursOld;
     }
 
-    logger.info('Collector', `[JobSpy] Search 1: date filter (hours_old=${hoursOld})`);
+    logger.info('Collector', `[JobSpy] Search 1: date filter (hours_old=${hoursOld}, location=${location || 'global'})`);
     const dateResponse = await axios.post(`${jobspyUrl}/scrape`, dateRequest, { timeout: 120000 });
     const dateJobs = dateResponse.data.jobs || [];
     logger.info('Collector', `[JobSpy] Search 1 found ${dateJobs.length} recent jobs`);
@@ -590,10 +598,12 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     // Search 2: Filter by job_type and/or is_remote
     const typeRequest: Record<string, any> = {
       search_term: query,
-      location,
       site_name: ['indeed', 'linkedin'],
       results_wanted: expandedLimit,
     };
+    if (location) {
+      typeRequest.location = location;
+    }
     if (jobType) {
       typeRequest.job_type = jobType;
     }

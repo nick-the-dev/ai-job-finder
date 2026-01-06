@@ -91,6 +91,7 @@ router.post('/search', async (req: Request, res: Response, next: NextFunction) =
     // - location: "USA", isRemote: true → remote jobs for USA-based candidates
     // - location: "USA", isRemote: false → on-site jobs only in USA
     // - location: "New York" (no isRemote) → all jobs in New York (remote + on-site)
+    // - location: undefined/null → global search (LinkedIn global, Indeed uses country_indeed default)
     const locationIsRemote = req.body.location?.toLowerCase() === 'remote';
     const location = locationIsRemote ? undefined : req.body.location;
     // Only filter by remote if explicitly requested or location is "Remote"

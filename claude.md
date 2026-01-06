@@ -4,6 +4,10 @@ AI-powered job aggregation and matching system that collects jobs from multiple 
 
 > **Note**: We use the free JobSpy scraper as the primary data source. All optimizations and solutions should target JobSpy first. SerpAPI is available but requires a paid API key.
 
+## Critical Rules
+
+- **NEVER** include AI-generated footers in git commits. Do not add "Generated with Claude Code", "Co-Authored-By: Claude", or similar attribution lines to commit messages.
+
 ## Quick Start
 
 **Requirements:** Node.js 20+ (required for Prisma)
@@ -509,10 +513,15 @@ Access the admin dashboard at `/admin` with the `ADMIN_API_KEY` header.
 
 ### Features
 
+**Period Selection:**
+- Choose time range: 24 hours, 7 days, 30 days, or all time
+- Activity metrics update based on selected period
+- Period comparison shows % change vs previous period (e.g., "Last 7d vs Previous 7d")
+
 **Overview Cards:**
 - Total users, active today, new this week
 - Subscription counts (total, active, paused)
-- 24h activity (jobs scanned, matches, notifications)
+- Activity metrics (jobs scanned, matches, notifications) with % change indicators
 - Failed runs count with failure rate
 
 **Tabs:**
@@ -532,17 +541,18 @@ Click on any failed run row to expand error details showing:
 
 ### API Access
 
-All admin endpoints require the `ADMIN_API_KEY` header:
+All admin endpoints require the `X-Admin-Key` header:
 
 ```bash
-# Get dashboard HTML
-curl -H "ADMIN_API_KEY: your-key" http://localhost:3001/admin
+# Get overview with default period (24h)
+curl -H "X-Admin-Key: your-key" http://localhost:3001/admin/api/overview
 
-# Get overview data as JSON
-curl -H "ADMIN_API_KEY: your-key" http://localhost:3001/admin/api/overview
+# Get overview for specific period with comparison
+curl -H "X-Admin-Key: your-key" "http://localhost:3001/admin/api/overview?period=7d&compare=true"
+# Supported periods: 24h, 7d, 30d, all
 
 # Get recent runs with error context
-curl -H "ADMIN_API_KEY: your-key" http://localhost:3001/admin/api/runs
+curl -H "X-Admin-Key: your-key" http://localhost:3001/admin/api/runs
 ```
 
 ## Pre-Deploy Checklist
