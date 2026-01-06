@@ -4,6 +4,7 @@ import type {
   SubscriptionsResponse,
   RunsResponse,
   ErrorsResponse,
+  Period,
 } from './types';
 
 const API_BASE = '/admin/api';
@@ -43,8 +44,11 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
   return response.json();
 }
 
-export async function getOverview(): Promise<OverviewData> {
-  return fetchApi<OverviewData>('/overview');
+export async function getOverview(period: Period = '24h', compare = true): Promise<OverviewData> {
+  const params = new URLSearchParams();
+  params.set('period', period);
+  if (compare) params.set('compare', 'true');
+  return fetchApi<OverviewData>(`/overview?${params.toString()}`);
 }
 
 export async function getUsers(page = 1, limit = 20): Promise<UsersResponse> {

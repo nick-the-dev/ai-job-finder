@@ -55,6 +55,44 @@ function computeStatus(isActive: boolean, isPaused: boolean): string {
   return 'active';
 }
 
+// Period configurations for time-based queries
+type Period = '24h' | '7d' | '30d' | 'all';
+
+function getPeriodRange(period: Period): { start: Date | null; end: Date } {
+  const now = new Date();
+  switch (period) {
+    case '24h':
+      return { start: new Date(now.getTime() - 24 * 60 * 60 * 1000), end: now };
+    case '7d':
+      return { start: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000), end: now };
+    case '30d':
+      return { start: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000), end: now };
+    case 'all':
+      return { start: null, end: now };
+  }
+}
+
+function getPreviousPeriodRange(period: Period): { start: Date | null; end: Date } | null {
+  if (period === 'all') return null; // Can't compare "all time"
+
+  const now = new Date();
+  const periodMs = period === '24h' ? 24 * 60 * 60 * 1000
+                 : period === '7d' ? 7 * 24 * 60 * 60 * 1000
+                 : 30 * 24 * 60 * 60 * 1000;
+
+  return {
+    start: new Date(now.getTime() - 2 * periodMs),
+    end: new Date(now.getTime() - periodMs)
+  };
+}
+
+function parsePeriod(periodStr: string | undefined): Period {
+  if (periodStr === '7d' || periodStr === '30d' || periodStr === 'all') {
+    return periodStr;
+  }
+  return '24h'; // default
+}
+
 // Security middleware
 function requireAdminKey(req: Request, res: Response, next: NextFunction): void {
   // Check if admin is configured
@@ -90,14 +128,54 @@ router.use(express.static(adminUiPath));
 // Apply security middleware to API routes only
 router.use('/api', requireAdminKey);
 
+// Helper to fetch activity metrics for a given time range
+async function getActivityMetrics(db: ReturnType<typeof getDb>, start: Date | null, end: Date) {
+  const dateFilter = start ? { gte: start, lte: end } : { lte: end };
+
+  const [jobsScanned, matchesFound, notificationsSent, totalRuns, failedRuns] = await Promise.all([
+    db.subscriptionRun.aggregate({
+      where: { startedAt: dateFilter },
+      _sum: { jobsCollected: true },
+    }),
+    db.jobMatch.count({
+      where: { createdAt: dateFilter },
+    }),
+    db.subscriptionRun.aggregate({
+      where: { startedAt: dateFilter },
+      _sum: { notificationsSent: true },
+    }),
+    db.subscriptionRun.count({ where: { startedAt: dateFilter } }),
+    db.subscriptionRun.count({
+      where: { startedAt: dateFilter, status: 'failed' },
+    }),
+  ]);
+
+  return {
+    jobsScanned: jobsScanned._sum.jobsCollected ?? 0,
+    matchesFound,
+    notificationsSent: notificationsSent._sum.notificationsSent ?? 0,
+    totalRuns,
+    failedRuns,
+  };
+}
+
 // GET /admin/api/overview - Platform summary
-router.get('/api/overview', async (_req: Request, res: Response) => {
+// Query params:
+//   - period: '24h' | '7d' | '30d' | 'all' (default: '24h')
+//   - compare: 'true' to include previous period comparison
+router.get('/api/overview', async (req: Request, res: Response) => {
   try {
     const db = getDb();
+    const period = parsePeriod(req.query.period as string);
+    const includeComparison = req.query.compare === 'true';
+
     const now = new Date();
     const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
+    const { start: periodStart, end: periodEnd } = getPeriodRange(period);
+
+    // Get base stats (always needed)
     const [
       totalUsers,
       activeToday,
@@ -105,11 +183,6 @@ router.get('/api/overview', async (_req: Request, res: Response) => {
       totalSubscriptions,
       activeSubscriptions,
       pausedSubscriptions,
-      jobsScanned24h,
-      matchesFound24h,
-      notificationsSent24h,
-      recentRuns,
-      failedRuns24h,
     ] = await Promise.all([
       db.telegramUser.count(),
       db.telegramUser.count({ where: { lastActiveAt: { gte: oneDayAgo } } }),
@@ -117,24 +190,13 @@ router.get('/api/overview', async (_req: Request, res: Response) => {
       db.searchSubscription.count(),
       db.searchSubscription.count({ where: { isActive: true, isPaused: false } }),
       db.searchSubscription.count({ where: { isActive: true, isPaused: true } }),
-      db.subscriptionRun.aggregate({
-        where: { startedAt: { gte: oneDayAgo } },
-        _sum: { jobsCollected: true },
-      }),
-      db.jobMatch.count({
-        where: { createdAt: { gte: oneDayAgo } },
-      }),
-      db.subscriptionRun.aggregate({
-        where: { startedAt: { gte: oneDayAgo } },
-        _sum: { notificationsSent: true },
-      }),
-      db.subscriptionRun.count({ where: { startedAt: { gte: oneDayAgo } } }),
-      db.subscriptionRun.count({
-        where: { startedAt: { gte: oneDayAgo }, status: 'failed' },
-      }),
     ]);
 
-    res.json({
+    // Get activity metrics for selected period
+    const activityMetrics = await getActivityMetrics(db, periodStart, periodEnd);
+
+    // Build response
+    const response: Record<string, unknown> = {
       users: {
         total: totalUsers,
         activeToday,
@@ -145,15 +207,40 @@ router.get('/api/overview', async (_req: Request, res: Response) => {
         active: activeSubscriptions,
         paused: pausedSubscriptions,
       },
-      activity24h: {
-        jobsScanned: jobsScanned24h._sum.jobsCollected ?? 0,
-        matchesFound: matchesFound24h,
-        notificationsSent: notificationsSent24h._sum.notificationsSent ?? 0,
-        totalRuns: recentRuns,
-        failedRuns: failedRuns24h,
+      activity: {
+        ...activityMetrics,
+        period,
+        periodLabel: period === 'all' ? 'All Time' : `Last ${period}`,
       },
       timestamp: now.toISOString(),
-    });
+    };
+
+    // Add comparison if requested
+    if (includeComparison) {
+      const prevRange = getPreviousPeriodRange(period);
+      if (prevRange) {
+        const prevMetrics = await getActivityMetrics(db, prevRange.start, prevRange.end);
+
+        const calcChange = (current: number, previous: number): number | null => {
+          if (previous === 0) return current > 0 ? 100 : null;
+          return Math.round(((current - previous) / previous) * 100);
+        };
+
+        response.comparison = {
+          period: `Previous ${period}`,
+          activity: prevMetrics,
+          changes: {
+            jobsScanned: calcChange(activityMetrics.jobsScanned, prevMetrics.jobsScanned),
+            matchesFound: calcChange(activityMetrics.matchesFound, prevMetrics.matchesFound),
+            notificationsSent: calcChange(activityMetrics.notificationsSent, prevMetrics.notificationsSent),
+            totalRuns: calcChange(activityMetrics.totalRuns, prevMetrics.totalRuns),
+            failedRuns: calcChange(activityMetrics.failedRuns, prevMetrics.failedRuns),
+          },
+        };
+      }
+    }
+
+    res.json(response);
   } catch (error) {
     logger.error('Admin', 'Failed to get overview', error);
     res.status(500).json({ error: 'Failed to get overview' });

@@ -1,3 +1,13 @@
+export type Period = '24h' | '7d' | '30d' | 'all';
+
+export interface ActivityMetrics {
+  jobsScanned: number;
+  matchesFound: number;
+  notificationsSent: number;
+  totalRuns: number;
+  failedRuns: number;
+}
+
 export interface OverviewData {
   users: {
     total: number;
@@ -9,12 +19,20 @@ export interface OverviewData {
     active: number;
     paused: number;
   };
-  activity24h: {
-    jobsScanned: number;
-    matchesFound: number;
-    notificationsSent: number;
-    totalRuns: number;
-    failedRuns: number;
+  activity: ActivityMetrics & {
+    period: Period;
+    periodLabel: string;
+  };
+  comparison?: {
+    period: string;
+    activity: ActivityMetrics;
+    changes: {
+      jobsScanned: number | null;
+      matchesFound: number | null;
+      notificationsSent: number | null;
+      totalRuns: number | null;
+      failedRuns: number | null;
+    };
   };
   timestamp: string;
 }

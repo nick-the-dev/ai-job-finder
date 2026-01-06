@@ -20,6 +20,7 @@ import type {
   Subscription,
   Run,
   ErrorEntry,
+  Period,
 } from '@/api/types';
 
 function formatTimeAgo(dateStr: string | null): string {
@@ -145,7 +146,48 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
   );
 }
 
+function ChangeIndicator({ change }: { change: number | null }) {
+  if (change === null) return null;
+  const isPositive = change >= 0;
+  const color = isPositive ? 'text-green-500' : 'text-red-500';
+  const sign = isPositive ? '+' : '';
+  return (
+    <span className={`text-xs ml-2 ${color}`}>
+      {sign}{change}%
+    </span>
+  );
+}
+
+function PeriodSelector({ period, onChange }: { period: Period; onChange: (p: Period) => void }) {
+  const periods: { value: Period; label: string }[] = [
+    { value: '24h', label: '24h' },
+    { value: '7d', label: '7d' },
+    { value: '30d', label: '30d' },
+    { value: 'all', label: 'All' },
+  ];
+
+  return (
+    <div className="flex gap-1 bg-secondary/50 p-1 rounded-lg">
+      {periods.map(({ value, label }) => (
+        <button
+          key={value}
+          onClick={() => onChange(value)}
+          className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+            period === value
+              ? 'bg-primary text-primary-foreground'
+              : 'text-muted-foreground hover:text-foreground hover:bg-secondary'
+          }`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function OverviewCards({ data }: { data: OverviewData }) {
+  const { activity, comparison } = data;
+
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
       <Card>
@@ -174,41 +216,65 @@ function OverviewCards({ data }: { data: OverviewData }) {
 
       <Card>
         <CardHeader className="pb-2">
-          <CardDescription>Jobs Scanned (24h)</CardDescription>
-          <CardTitle className="text-3xl">{data.activity24h.jobsScanned.toLocaleString()}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">
-            {data.activity24h.matchesFound} matches found
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="pb-2">
-          <CardDescription>Notifications (24h)</CardDescription>
-          <CardTitle className="text-3xl">{data.activity24h.notificationsSent}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">
-            from {data.activity24h.totalRuns} runs
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="pb-2">
-          <CardDescription>Failed Runs (24h)</CardDescription>
-          <CardTitle className={`text-3xl ${data.activity24h.failedRuns > 0 ? 'text-destructive' : 'text-success'}`}>
-            {data.activity24h.failedRuns}
+          <CardDescription>Jobs Scanned ({activity.periodLabel})</CardDescription>
+          <CardTitle className="text-3xl flex items-center">
+            {activity.jobsScanned.toLocaleString()}
+            {comparison && <ChangeIndicator change={comparison.changes.jobsScanned} />}
           </CardTitle>
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">
-            {data.activity24h.totalRuns > 0
-              ? ((data.activity24h.failedRuns / data.activity24h.totalRuns) * 100).toFixed(1)
+            {activity.matchesFound} matches
+            {comparison && <ChangeIndicator change={comparison.changes.matchesFound} />}
+          </p>
+          {comparison && (
+            <p className="text-xs text-muted-foreground/70 mt-1">
+              vs {comparison.activity.jobsScanned.toLocaleString()} prev
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardDescription>Notifications ({activity.periodLabel})</CardDescription>
+          <CardTitle className="text-3xl flex items-center">
+            {activity.notificationsSent}
+            {comparison && <ChangeIndicator change={comparison.changes.notificationsSent} />}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">
+            from {activity.totalRuns} runs
+            {comparison && <ChangeIndicator change={comparison.changes.totalRuns} />}
+          </p>
+          {comparison && (
+            <p className="text-xs text-muted-foreground/70 mt-1">
+              vs {comparison.activity.notificationsSent} prev
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardDescription>Failed Runs ({activity.periodLabel})</CardDescription>
+          <CardTitle className={`text-3xl flex items-center ${activity.failedRuns > 0 ? 'text-destructive' : 'text-success'}`}>
+            {activity.failedRuns}
+            {comparison && <ChangeIndicator change={comparison.changes.failedRuns} />}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">
+            {activity.totalRuns > 0
+              ? ((activity.failedRuns / activity.totalRuns) * 100).toFixed(1)
               : 0}% failure rate
           </p>
+          {comparison && (
+            <p className="text-xs text-muted-foreground/70 mt-1">
+              vs {comparison.activity.failedRuns} prev
+            </p>
+          )}
         </CardContent>
       </Card>
     </div>
@@ -470,6 +536,7 @@ function Dashboard() {
   const [errors, setErrors] = useState<ErrorEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [period, setPeriod] = useState<Period>('24h');
 
   const loadRuns = async (page: number) => {
     const runsData = await getRuns(page, 100);
@@ -479,12 +546,22 @@ function Dashboard() {
     setRunsTotal(runsData.pagination.total);
   };
 
+  const loadOverview = async (p: Period) => {
+    const overviewData = await getOverview(p, true);
+    setOverview(overviewData);
+  };
+
+  const handlePeriodChange = (newPeriod: Period) => {
+    setPeriod(newPeriod);
+    loadOverview(newPeriod);
+  };
+
   useEffect(() => {
     async function loadData() {
       try {
         setLoading(true);
         const [overviewData, usersData, subsData, runsData, errorsData] = await Promise.all([
-          getOverview(),
+          getOverview(period, true),
           getUsers(),
           getSubscriptions(),
           getRuns(runsPage, 100),
@@ -564,12 +641,15 @@ function Dashboard() {
       <div className="max-w-7xl mx-auto">
         <div className="flex items-center justify-between mb-6">
           <h1 className="text-2xl font-bold">AI Job Finder Admin</h1>
-          <button
-            onClick={handleLogout}
-            className="px-4 py-2 text-sm bg-secondary text-secondary-foreground rounded-lg hover:bg-secondary/90"
-          >
-            Logout
-          </button>
+          <div className="flex items-center gap-4">
+            <PeriodSelector period={period} onChange={handlePeriodChange} />
+            <button
+              onClick={handleLogout}
+              className="px-4 py-2 text-sm bg-secondary text-secondary-foreground rounded-lg hover:bg-secondary/90"
+            >
+              Logout
+            </button>
+          </div>
         </div>
 
         {overview && <OverviewCards data={overview} />}

@@ -1,14 +1,23 @@
 import { getDb } from '../db/client.js';
 
+type Period = '24h' | '7d' | '30d' | 'all';
+
+interface ActivityMetrics {
+  jobsScanned: number;
+  matchesFound: number;
+  notificationsSent: number;
+  totalRuns: number;
+  failedRuns: number;
+}
+
 interface OverviewData {
   users: { total: number; activeToday: number; newThisWeek: number };
   subscriptions: { total: number; active: number; paused: number };
-  activity24h: {
-    jobsScanned: number;
-    matchesFound: number;
-    notificationsSent: number;
-    totalRuns: number;
-    failedRuns: number;
+  activity: ActivityMetrics & { period: Period; periodLabel: string };
+  comparison?: {
+    period: string;
+    activity: ActivityMetrics;
+    changes: Record<string, number | null>;
   };
 }
 
@@ -56,11 +65,71 @@ function computeStatus(isActive: boolean, isPaused: boolean): string {
   return 'active';
 }
 
-async function getOverviewData(): Promise<OverviewData> {
+function getPeriodRange(period: Period): { start: Date | null; end: Date } {
+  const now = new Date();
+  switch (period) {
+    case '24h':
+      return { start: new Date(now.getTime() - 24 * 60 * 60 * 1000), end: now };
+    case '7d':
+      return { start: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000), end: now };
+    case '30d':
+      return { start: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000), end: now };
+    case 'all':
+      return { start: null, end: now };
+  }
+}
+
+function getPreviousPeriodRange(period: Period): { start: Date | null; end: Date } | null {
+  if (period === 'all') return null;
+
+  const now = new Date();
+  const periodMs = period === '24h' ? 24 * 60 * 60 * 1000
+                 : period === '7d' ? 7 * 24 * 60 * 60 * 1000
+                 : 30 * 24 * 60 * 60 * 1000;
+
+  return {
+    start: new Date(now.getTime() - 2 * periodMs),
+    end: new Date(now.getTime() - periodMs)
+  };
+}
+
+async function getActivityMetrics(db: ReturnType<typeof getDb>, start: Date | null, end: Date): Promise<ActivityMetrics> {
+  const dateFilter = start ? { gte: start, lte: end } : { lte: end };
+
+  const [jobsScanned, matchesFound, notificationsSent, totalRuns, failedRuns] = await Promise.all([
+    db.subscriptionRun.aggregate({
+      where: { startedAt: dateFilter },
+      _sum: { jobsCollected: true },
+    }),
+    db.jobMatch.count({
+      where: { createdAt: dateFilter },
+    }),
+    db.subscriptionRun.aggregate({
+      where: { startedAt: dateFilter },
+      _sum: { notificationsSent: true },
+    }),
+    db.subscriptionRun.count({ where: { startedAt: dateFilter } }),
+    db.subscriptionRun.count({
+      where: { startedAt: dateFilter, status: 'failed' },
+    }),
+  ]);
+
+  return {
+    jobsScanned: jobsScanned._sum.jobsCollected ?? 0,
+    matchesFound,
+    notificationsSent: notificationsSent._sum.notificationsSent ?? 0,
+    totalRuns,
+    failedRuns,
+  };
+}
+
+async function getOverviewData(period: Period = '24h', includeComparison: boolean = true): Promise<OverviewData> {
   const db = getDb();
   const now = new Date();
   const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  const { start: periodStart, end: periodEnd } = getPeriodRange(period);
 
   const [
     totalUsers,
@@ -69,11 +138,6 @@ async function getOverviewData(): Promise<OverviewData> {
     totalSubscriptions,
     activeSubscriptions,
     pausedSubscriptions,
-    jobsScanned24h,
-    matchesFound24h,
-    notificationsSent24h,
-    totalRuns,
-    failedRuns24h,
   ] = await Promise.all([
     db.telegramUser.count(),
     db.telegramUser.count({ where: { lastActiveAt: { gte: oneDayAgo } } }),
@@ -81,34 +145,46 @@ async function getOverviewData(): Promise<OverviewData> {
     db.searchSubscription.count(),
     db.searchSubscription.count({ where: { isActive: true, isPaused: false } }),
     db.searchSubscription.count({ where: { isActive: true, isPaused: true } }),
-    db.subscriptionRun.aggregate({
-      where: { startedAt: { gte: oneDayAgo } },
-      _sum: { jobsCollected: true },
-    }),
-    db.jobMatch.count({
-      where: { createdAt: { gte: oneDayAgo } },
-    }),
-    db.subscriptionRun.aggregate({
-      where: { startedAt: { gte: oneDayAgo } },
-      _sum: { notificationsSent: true },
-    }),
-    db.subscriptionRun.count({ where: { startedAt: { gte: oneDayAgo } } }),
-    db.subscriptionRun.count({
-      where: { startedAt: { gte: oneDayAgo }, status: 'failed' },
-    }),
   ]);
 
-  return {
+  const activityMetrics = await getActivityMetrics(db, periodStart, periodEnd);
+
+  const result: OverviewData = {
     users: { total: totalUsers, activeToday, newThisWeek },
     subscriptions: { total: totalSubscriptions, active: activeSubscriptions, paused: pausedSubscriptions },
-    activity24h: {
-      jobsScanned: jobsScanned24h._sum.jobsCollected ?? 0,
-      matchesFound: matchesFound24h,
-      notificationsSent: notificationsSent24h._sum.notificationsSent ?? 0,
-      totalRuns,
-      failedRuns: failedRuns24h,
+    activity: {
+      ...activityMetrics,
+      period,
+      periodLabel: period === 'all' ? 'All Time' : `Last ${period}`,
     },
   };
+
+  // Add comparison if requested and not "all time"
+  if (includeComparison) {
+    const prevRange = getPreviousPeriodRange(period);
+    if (prevRange) {
+      const prevMetrics = await getActivityMetrics(db, prevRange.start, prevRange.end);
+
+      const calcChange = (current: number, previous: number): number | null => {
+        if (previous === 0) return current > 0 ? 100 : null;
+        return Math.round(((current - previous) / previous) * 100);
+      };
+
+      result.comparison = {
+        period: `Previous ${period}`,
+        activity: prevMetrics,
+        changes: {
+          jobsScanned: calcChange(activityMetrics.jobsScanned, prevMetrics.jobsScanned),
+          matchesFound: calcChange(activityMetrics.matchesFound, prevMetrics.matchesFound),
+          notificationsSent: calcChange(activityMetrics.notificationsSent, prevMetrics.notificationsSent),
+          totalRuns: calcChange(activityMetrics.totalRuns, prevMetrics.totalRuns),
+          failedRuns: calcChange(activityMetrics.failedRuns, prevMetrics.failedRuns),
+        },
+      };
+    }
+  }
+
+  return result;
 }
 
 async function getUsersData(): Promise<UserRow[]> {
@@ -261,9 +337,24 @@ function statusBadge(status: string): string {
   return `<span style="background:${color};color:white;padding:2px 8px;border-radius:4px;font-size:12px">${escapeHtml(status)}</span>`;
 }
 
-export async function generateDashboardHtml(): Promise<string> {
+function parsePeriod(periodStr: string | undefined): Period {
+  if (periodStr === '7d' || periodStr === '30d' || periodStr === 'all') {
+    return periodStr;
+  }
+  return '24h';
+}
+
+function formatChange(change: number | null): string {
+  if (change === null) return '';
+  const sign = change >= 0 ? '+' : '';
+  const color = change > 0 ? '#22c55e' : change < 0 ? '#ef4444' : '#64748b';
+  return `<span style="color:${color};font-size:12px;margin-left:5px">${sign}${change}%</span>`;
+}
+
+export async function generateDashboardHtml(periodParam?: string): Promise<string> {
+  const period = parsePeriod(periodParam);
   const [overview, users, subscriptions, recentRuns] = await Promise.all([
-    getOverviewData(),
+    getOverviewData(period, true),
     getUsersData(),
     getSubscriptionsData(),
     getRecentRuns(),
@@ -364,6 +455,34 @@ export async function generateDashboardHtml(): Promise<string> {
       margin-top: 10px;
     }
 
+    .period-selector {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+    .period-btn {
+      padding: 6px 14px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      color: #94a3b8;
+      cursor: pointer;
+      font-size: 13px;
+      text-decoration: none;
+    }
+    .period-btn:hover { background: #334155; color: #e2e8f0; }
+    .period-btn.active { background: #3b82f6; color: white; border-color: #3b82f6; }
+
+    .comparison-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 4px;
+      font-size: 11px;
+      color: #64748b;
+    }
+    .comparison-row .prev { opacity: 0.7; }
+
     .failed-row:hover { background: #2d1b1b !important; }
     .failed-row td:first-child::before {
       content: '▶ ';
@@ -380,6 +499,13 @@ export async function generateDashboardHtml(): Promise<string> {
   <div class="container">
     <h1>AI Job Finder Admin</h1>
 
+    <div class="period-selector">
+      <a href="?period=24h" class="period-btn ${overview.activity.period === '24h' ? 'active' : ''}">24 Hours</a>
+      <a href="?period=7d" class="period-btn ${overview.activity.period === '7d' ? 'active' : ''}">7 Days</a>
+      <a href="?period=30d" class="period-btn ${overview.activity.period === '30d' ? 'active' : ''}">30 Days</a>
+      <a href="?period=all" class="period-btn ${overview.activity.period === 'all' ? 'active' : ''}">All Time</a>
+    </div>
+
     <div class="cards">
       <div class="card">
         <div class="card-title">Total Users</div>
@@ -392,19 +518,22 @@ export async function generateDashboardHtml(): Promise<string> {
         <div class="card-sub">${overview.subscriptions.active} active, ${overview.subscriptions.paused} paused</div>
       </div>
       <div class="card">
-        <div class="card-title">Jobs Scanned (24h)</div>
-        <div class="card-value">${overview.activity24h.jobsScanned.toLocaleString()}</div>
-        <div class="card-sub">${overview.activity24h.matchesFound} matches found</div>
+        <div class="card-title">Jobs Scanned (${overview.activity.periodLabel})</div>
+        <div class="card-value">${overview.activity.jobsScanned.toLocaleString()}${overview.comparison ? formatChange(overview.comparison.changes.jobsScanned as number | null) : ''}</div>
+        <div class="card-sub">${overview.activity.matchesFound} matches${overview.comparison ? formatChange(overview.comparison.changes.matchesFound as number | null) : ''}</div>
+        ${overview.comparison ? `<div class="comparison-row"><span class="prev">vs ${overview.comparison.activity.jobsScanned.toLocaleString()} prev</span></div>` : ''}
       </div>
       <div class="card">
-        <div class="card-title">Notifications (24h)</div>
-        <div class="card-value">${overview.activity24h.notificationsSent}</div>
-        <div class="card-sub">from ${overview.activity24h.totalRuns} runs</div>
+        <div class="card-title">Notifications (${overview.activity.periodLabel})</div>
+        <div class="card-value">${overview.activity.notificationsSent}${overview.comparison ? formatChange(overview.comparison.changes.notificationsSent as number | null) : ''}</div>
+        <div class="card-sub">from ${overview.activity.totalRuns} runs${overview.comparison ? formatChange(overview.comparison.changes.totalRuns as number | null) : ''}</div>
+        ${overview.comparison ? `<div class="comparison-row"><span class="prev">vs ${overview.comparison.activity.notificationsSent} prev</span></div>` : ''}
       </div>
-      <div class="card ${overview.activity24h.failedRuns > 0 ? 'card-bad' : 'card-good'}">
-        <div class="card-title">Failed Runs (24h)</div>
-        <div class="card-value">${overview.activity24h.failedRuns}</div>
-        <div class="card-sub">${overview.activity24h.totalRuns > 0 ? ((overview.activity24h.failedRuns / overview.activity24h.totalRuns) * 100).toFixed(1) : 0}% failure rate</div>
+      <div class="card ${overview.activity.failedRuns > 0 ? 'card-bad' : 'card-good'}">
+        <div class="card-title">Failed Runs (${overview.activity.periodLabel})</div>
+        <div class="card-value">${overview.activity.failedRuns}${overview.comparison ? formatChange(overview.comparison.changes.failedRuns as number | null) : ''}</div>
+        <div class="card-sub">${overview.activity.totalRuns > 0 ? ((overview.activity.failedRuns / overview.activity.totalRuns) * 100).toFixed(1) : 0}% failure rate</div>
+        ${overview.comparison ? `<div class="comparison-row"><span class="prev">vs ${overview.comparison.activity.failedRuns} prev</span></div>` : ''}
       </div>
     </div>
 
