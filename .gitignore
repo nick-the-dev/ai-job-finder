@@ -32,3 +32,7 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+
+# Stryker mutation testing
+.stryker-tmp/
+reports/

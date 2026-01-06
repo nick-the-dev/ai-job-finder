@@ -902,7 +902,7 @@ async function createSubscription(
     // Auto-start the first search (fire-and-forget)
     const chatId = Number(ctx.telegramUser.chatId);
     markSubscriptionRunning(subscription.id);
-    runSingleSubscriptionSearch(subscription.id)
+    runSingleSubscriptionSearch(subscription.id, 'initial')
       .then(async (result) => {
         markSubscriptionFinished(subscription.id);
         if (result.notificationsSent > 0) {

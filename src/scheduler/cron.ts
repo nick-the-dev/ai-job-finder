@@ -165,7 +165,7 @@ async function checkDueSubscriptions(): Promise<void> {
 
       try {
         const startTime = Date.now();
-        const result = await runSingleSubscriptionSearch(sub.id);
+        const result = await runSingleSubscriptionSearch(sub.id, 'scheduled');
         const duration = ((Date.now() - startTime) / 1000).toFixed(1);
 
         // Update lastSearchAt on success
@@ -245,7 +245,7 @@ export async function triggerSearchNow(): Promise<{
 
   for (const sub of subscriptions) {
     try {
-      const result = await runSingleSubscriptionSearch(sub.id);
+      const result = await runSingleSubscriptionSearch(sub.id, 'manual');
       totalMatches += result.matchesFound;
       totalNotifications += result.notificationsSent;
     } catch (error) {

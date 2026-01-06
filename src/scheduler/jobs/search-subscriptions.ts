@@ -6,7 +6,7 @@ import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
 import { sendMatchSummary, type SubscriptionContext } from '../../telegram/services/notification.js';
 import { logger, createSubscriptionLogger, type SubscriptionLogger } from '../../utils/logger.js';
 import { queueService, PRIORITY, type Priority } from '../../queue/index.js';
-import { RunTracker, updateSkillStats, createMarketSnapshot, type ErrorContext } from '../../observability/index.js';
+import { RunTracker, formatTriggerLabel, updateSkillStats, createMarketSnapshot, type ErrorContext, type TriggerType } from '../../observability/index.js';
 import type { NormalizedJob, JobMatchResult, RawJob } from '../../core/types.js';
 import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
 
@@ -235,12 +235,15 @@ export interface MatchItem {
   isPreviouslyMatched: boolean;
 }
 
-// Run search for a single subscription (used for immediate scan)
-export async function runSingleSubscriptionSearch(subscriptionId: string): Promise<SingleSearchResult> {
+// Run search for a single subscription (used for immediate scan, initial run, or scheduled)
+export async function runSingleSubscriptionSearch(
+  subscriptionId: string,
+  triggerType: TriggerType = 'manual'
+): Promise<SingleSearchResult> {
   const db = getDb();
 
   // Start tracking the run
-  const runId = await RunTracker.start(subscriptionId, 'manual');
+  const runId = await RunTracker.start(subscriptionId, triggerType);
 
   const sub = await db.searchSubscription.findUnique({
     where: { id: subscriptionId },
@@ -294,7 +297,10 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     ? `@${sub.user.username}`
     : `user-${sub.user.telegramId}`;
 
-  logger.info('Scheduler', `[Manual] Scanning for ${userLabel}: ${sub.jobTitles.join(', ')}`);
+  // Capitalize trigger type for logs (manual -> Manual, scheduled -> Scheduled, initial -> Initial)
+  const triggerLabel = formatTriggerLabel(triggerType);
+
+  logger.info('Scheduler', `[${triggerLabel}] Scanning for ${userLabel}: ${sub.jobTitles.join(', ')}`);
 
   // Track current context for error reporting
   let errorContext: ErrorContext = {
@@ -330,7 +336,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   });
 
   errorContext.partialResults!.jobsCollected = allRawJobs.length;
-  logger.info('Scheduler', `[Manual] Total raw jobs collected: ${allRawJobs.length}`);
+  logger.info('Scheduler', `[${triggerLabel}] Total raw jobs collected: ${allRawJobs.length}`);
   subLogger.debug('Collection', `Collection complete: ${allRawJobs.length} raw jobs`);
 
   // Stage 2: Normalization
@@ -338,7 +344,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   subLogger.debug('Normalization', 'Starting normalization and deduplication');
   let normalizedJobs = await normalizer.execute(allRawJobs);
   errorContext.partialResults!.jobsNormalized = normalizedJobs.length;
-  logger.info('Scheduler', `[Manual] After dedup: ${normalizedJobs.length} unique jobs`);
+  logger.info('Scheduler', `[${triggerLabel}] After dedup: ${normalizedJobs.length} unique jobs`);
   subLogger.debug('Normalization', `Deduplication complete: ${normalizedJobs.length} unique jobs (removed ${allRawJobs.length - normalizedJobs.length} duplicates)`);
 
   // Apply exclusion filters
@@ -372,7 +378,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
   normalizedJobs = filterJobsByLocation(normalizedJobs, normalizedLocations, sub.location);
   const locationFiltered = beforeLocationFilter - normalizedJobs.length;
   if (locationFiltered > 0) {
-    logger.info('Scheduler', `[Manual] Filtered ${locationFiltered} jobs by location`);
+    logger.info('Scheduler', `[${triggerLabel}] Filtered ${locationFiltered} jobs by location`);
     subLogger.debug('Filter', `Location filter: removed ${locationFiltered} jobs that didn't match location criteria`);
   }
 
@@ -493,7 +499,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
       errorContext.partialResults!.jobsMatched = newMatches.length;
       subLogger.debug('Matching', `MATCH "${job.title}": score=${matchResult.score}, added to results`);
     } catch (error) {
-      logger.error('Scheduler', `[Manual] Failed to process job: ${job.title}`, error);
+      logger.error('Scheduler', `[${triggerLabel}] Failed to process job: ${job.title}`, error);
       subLogger.debug('Matching', `ERROR processing "${job.title}"`, error);
     }
   }
@@ -584,7 +590,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     notificationsSent,
   });
 
-  logger.info('Scheduler', `[Manual] Results: ${newMatches.length} new | ${stats.skippedAlreadySent} already sent | ${stats.skippedBelowScore} below threshold | ${stats.skippedCrossSubDuplicates} cross-sub skipped`);
+  logger.info('Scheduler', `[${triggerLabel}] Results: ${newMatches.length} new | ${stats.skippedAlreadySent} already sent | ${stats.skippedBelowScore} below threshold | ${stats.skippedCrossSubDuplicates} cross-sub skipped`);
 
   // Final debug summary
   subLogger.debug('Complete', '=== RUN COMPLETE ===', {
@@ -610,7 +616,7 @@ export async function runSingleSubscriptionSearch(subscriptionId: string): Promi
     errorContext.jobTitles = sub.jobTitles;
     errorContext.minScore = sub.minScore;
     errorContext.datePosted = sub.datePosted;
-    errorContext.triggerType = 'manual';
+    errorContext.triggerType = triggerType;
     errorContext.timestamp = new Date().toISOString();
 
     await RunTracker.fail(runId, error, errorContext);

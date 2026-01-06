@@ -819,7 +819,7 @@ Ready to get started?
     );
 
     // Run scan asynchronously (fire-and-forget) to avoid webhook timeout
-    runSingleSubscriptionSearch(subId)
+    runSingleSubscriptionSearch(subId, 'manual')
       .then(async (result) => {
         markSubscriptionFinished(subId);
 

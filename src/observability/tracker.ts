@@ -1,8 +1,16 @@
 import { getDb } from '../db/client.js';
 import { logger } from '../utils/logger.js';
 
-export type TriggerType = 'scheduled' | 'manual';
+export type TriggerType = 'scheduled' | 'manual' | 'initial';
 export type RunStatus = 'running' | 'completed' | 'failed';
+
+/**
+ * Format trigger type for display in logs
+ * Capitalizes first letter: 'scheduled' -> 'Scheduled'
+ */
+export function formatTriggerLabel(triggerType: TriggerType): string {
+  return triggerType.charAt(0).toUpperCase() + triggerType.slice(1);
+}
 
 export interface RunStats {
   jobsCollected?: number;

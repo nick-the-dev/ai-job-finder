@@ -12,6 +12,8 @@
     "search": "tsx scripts/run-search.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:mutation": "stryker run",
+    "test:mutation:open": "stryker run && open reports/mutation/mutation.html",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
@@ -36,6 +38,9 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@stryker-mutator/core": "^9.4.0",
+    "@stryker-mutator/typescript-checker": "^9.4.0",
+    "@stryker-mutator/vitest-runner": "^9.4.0",
     "@types/bull": "^4.10.0",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
