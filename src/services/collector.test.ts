@@ -219,6 +219,83 @@ describe('CollectorService Date Filter', () => {
   });
 });
 
+describe('Global/Worldwide Search', () => {
+  describe('Cache key generation for global search', () => {
+    it('generates consistent hash for global search (undefined location)', () => {
+      // Global search should have consistent cache key
+      const hash1 = getQueryHash('Software Engineer', undefined, true, 'jobspy', 'week');
+      const hash2 = getQueryHash('Software Engineer', undefined, true, 'jobspy', 'week');
+
+      expect(hash1).toBe(hash2);
+    });
+
+    it('generates different hash for global vs location-specific search', () => {
+      // Global search (undefined) vs specific location should be different
+      const globalHash = getQueryHash('Software Engineer', undefined, true, 'jobspy', 'week');
+      const usaHash = getQueryHash('Software Engineer', 'United States', true, 'jobspy', 'week');
+      const canadaHash = getQueryHash('Software Engineer', 'Canada', true, 'jobspy', 'week');
+
+      expect(globalHash).not.toBe(usaHash);
+      expect(globalHash).not.toBe(canadaHash);
+      expect(usaHash).not.toBe(canadaHash);
+    });
+
+    it('treats undefined location as global search in cache', () => {
+      // Undefined location = global search (LinkedIn searches globally, Indeed uses default)
+      const hash = getQueryHash('DevOps Engineer', undefined, true, 'jobspy');
+
+      // Should be a valid hash (16 char hex string)
+      expect(hash).toMatch(/^[a-f0-9]{16}$/);
+    });
+
+    it('worldwide remote search has unique cache key', () => {
+      // User wants remote jobs from anywhere in the world
+      const worldwideRemote = getQueryHash('Backend Developer', undefined, true, 'jobspy', 'week');
+
+      // User wants remote jobs from specific countries
+      const usRemote = getQueryHash('Backend Developer', 'United States', true, 'jobspy', 'week');
+      const ukRemote = getQueryHash('Backend Developer', 'United Kingdom', true, 'jobspy', 'week');
+
+      // All should be different
+      const hashes = [worldwideRemote, usRemote, ukRemote];
+      const uniqueHashes = new Set(hashes);
+      expect(uniqueHashes.size).toBe(3);
+    });
+  });
+
+  describe('Global search behavior', () => {
+    it('treats empty string location differently from undefined', () => {
+      // Empty string might mean user cleared location vs undefined meaning global
+      const emptyHash = getQueryHash('Software Engineer', '', true, 'jobspy');
+      const undefinedHash = getQueryHash('Software Engineer', undefined, true, 'jobspy');
+
+      expect(emptyHash).not.toBe(undefinedHash);
+    });
+
+    it('supports global search with job type filter', () => {
+      // Global search can still filter by job type
+      const globalFulltime = getQueryHash('Software Engineer', undefined, true, 'jobspy', 'week', 'fulltime');
+      const globalContract = getQueryHash('Software Engineer', undefined, true, 'jobspy', 'week', 'contract');
+      const globalNoType = getQueryHash('Software Engineer', undefined, true, 'jobspy', 'week', undefined);
+
+      const hashes = [globalFulltime, globalContract, globalNoType];
+      const uniqueHashes = new Set(hashes);
+      expect(uniqueHashes.size).toBe(3);
+    });
+
+    it('supports global search with date filter', () => {
+      // Global search can still filter by date
+      const globalToday = getQueryHash('Software Engineer', undefined, true, 'jobspy', 'today');
+      const globalWeek = getQueryHash('Software Engineer', undefined, true, 'jobspy', 'week');
+      const globalMonth = getQueryHash('Software Engineer', undefined, true, 'jobspy', 'month');
+
+      const hashes = [globalToday, globalWeek, globalMonth];
+      const uniqueHashes = new Set(hashes);
+      expect(uniqueHashes.size).toBe(3);
+    });
+  });
+});
+
 describe('Cache Key Isolation', () => {
   it('ensures subscription A with datePosted=month has different cache than subscription B with datePosted=today', () => {
     // This is the key scenario: two subscriptions for the same job search
