@@ -51,6 +51,9 @@ Score guidelines:
 - 1-29: Poor match
 - 0: Completely irrelevant (different field/industry entirely)
 
+IMPORTANT: Do NOT factor location into the score. The user has already filtered for their preferred locations.
+Only score based on skills, experience, and job requirements - never penalize for location mismatch.
+
 Salary extraction guidelines:
 - Look for salary ranges like "$100K-$150K", "$100,000 - $150,000", "100k-150k USD"
 - Look for hourly rates like "$50/hr", "$40-60 per hour"
