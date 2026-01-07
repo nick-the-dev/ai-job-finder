@@ -376,6 +376,9 @@ def patch_linkedin_for_worldwide():
     This patches the session's request method to add geoId=92000000 when no location
     is specified, enabling truly worldwide results while preserving all of jobspy's
     anti-detection features (retries, delays, session management, etc.)
+
+    IMPORTANT: We must restore the original session.get after each request to prevent
+    the patch from affecting subsequent location-specific requests.
     """
     from jobspy.linkedin import LinkedIn
 
@@ -383,7 +386,7 @@ def patch_linkedin_for_worldwide():
     original_scrape = LinkedIn.scrape
 
     def patched_scrape(self, scraper_input):
-        # If no location specified, patch the session to inject geoId
+        # Only patch if no location specified (worldwide search)
         if not scraper_input.location:
             original_get = self.session.get
 
@@ -395,8 +398,14 @@ def patch_linkedin_for_worldwide():
                 return original_get(url, params=params, **kwargs)
 
             self.session.get = patched_get
-
-        return original_scrape(self, scraper_input)
+            try:
+                return original_scrape(self, scraper_input)
+            finally:
+                # CRITICAL: Restore original session.get to prevent affecting other requests
+                self.session.get = original_get
+        else:
+            # Location specified - use original scrape without modification
+            return original_scrape(self, scraper_input)
 
     LinkedIn.scrape = patched_scrape
     logger.info("Patched LinkedIn scraper for worldwide search support")
@@ -426,49 +435,57 @@ def scrape(request: ScrapeRequest):
             # The monkey patch (patch_linkedin_for_worldwide) injects geoId=92000000
             # This preserves all of python-jobspy's features (anti-detection, retries, etc.)
             if "linkedin" in request.site_name:
-                logger.info(f"  LinkedIn: using patched scraper (geoId={LINKEDIN_WORLDWIDE_GEOID} will be injected)")
-                linkedin_kwargs = {
-                    "site_name": ["linkedin"],
-                    "search_term": request.search_term,
-                    "results_wanted": request.results_wanted,
-                    "hours_old": request.hours_old,
-                    # No location = monkey patch will inject geoId for worldwide
-                }
-                if request.is_remote is not None:
-                    linkedin_kwargs["is_remote"] = request.is_remote
-                if request.job_type is not None:
-                    linkedin_kwargs["job_type"] = request.job_type
+                try:
+                    logger.info(f"  LinkedIn: using patched scraper (geoId={LINKEDIN_WORLDWIDE_GEOID} will be injected)")
+                    linkedin_kwargs = {
+                        "site_name": ["linkedin"],
+                        "search_term": request.search_term,
+                        "results_wanted": request.results_wanted,
+                        "hours_old": request.hours_old,
+                        # No location = monkey patch will inject geoId for worldwide
+                    }
+                    if request.is_remote is not None:
+                        linkedin_kwargs["is_remote"] = request.is_remote
+                    if request.job_type is not None:
+                        linkedin_kwargs["job_type"] = request.job_type
 
-                linkedin_df = scrape_jobs(**linkedin_kwargs)
-                linkedin_jobs = df_to_jobs(linkedin_df)
+                    linkedin_df = scrape_jobs(**linkedin_kwargs)
+                    linkedin_jobs = df_to_jobs(linkedin_df)
 
-                # Debug: log location distribution
-                from collections import Counter
-                locations = [j.get("location", "null") for j in linkedin_jobs]
-                loc_counts = Counter(locations).most_common(10)
-                logger.info(f"  LinkedIn location distribution: {loc_counts}")
+                    # Debug: log location distribution
+                    from collections import Counter
+                    locations = [j.get("location", "null") for j in linkedin_jobs]
+                    loc_counts = Counter(locations).most_common(10)
+                    logger.info(f"  LinkedIn location distribution: {loc_counts}")
 
-                all_jobs.extend(linkedin_jobs)
+                    all_jobs.extend(linkedin_jobs)
+                except Exception as e:
+                    logger.error(f"  LinkedIn: failed ({e})")
 
-            # Indeed: use country_indeed="Canada" (no location)
+            # Indeed: use country_indeed="Canada" for global search
+            # Indeed doesn't support worldwide, so we default to Canada
             if "indeed" in request.site_name:
-                indeed_kwargs = {
-                    "site_name": ["indeed"],
-                    "search_term": request.search_term,
-                    "results_wanted": request.results_wanted,
-                    "hours_old": request.hours_old,
-                    "country_indeed": "Canada",
-                }
-                if request.is_remote is not None:
-                    indeed_kwargs["is_remote"] = request.is_remote
-                if request.job_type is not None:
-                    indeed_kwargs["job_type"] = request.job_type
+                try:
+                    indeed_kwargs = {
+                        "site_name": ["indeed"],
+                        "search_term": request.search_term,
+                        "results_wanted": request.results_wanted,
+                        "hours_old": request.hours_old,
+                        "country_indeed": "Canada",
+                    }
+                    if request.is_remote is not None:
+                        indeed_kwargs["is_remote"] = request.is_remote
+                    if request.job_type is not None:
+                        indeed_kwargs["job_type"] = request.job_type
 
-                logger.info(f"  Indeed: country_indeed=Canada")
-                indeed_df = scrape_jobs(**indeed_kwargs)
-                indeed_jobs = df_to_jobs(indeed_df)
-                logger.info(f"  Indeed: found {len(indeed_jobs)} jobs")
-                all_jobs.extend(indeed_jobs)
+                    logger.info(f"  Indeed: country_indeed=Canada")
+                    indeed_df = scrape_jobs(**indeed_kwargs)
+                    indeed_jobs = df_to_jobs(indeed_df)
+                    logger.info(f"  Indeed: found {len(indeed_jobs)} jobs")
+                    all_jobs.extend(indeed_jobs)
+                except Exception as e:
+                    # Don't lose LinkedIn results if Indeed fails
+                    logger.error(f"  Indeed: failed ({e}), continuing with LinkedIn results only")
 
             logger.info(f"Found {len(all_jobs)} jobs total (global search)")
             return {"jobs": all_jobs, "count": len(all_jobs)}
