@@ -369,6 +369,10 @@ def df_to_jobs(jobs_df) -> list:
 # LinkedIn geoId for worldwide search
 LINKEDIN_WORLDWIDE_GEOID = "92000000"
 
+# Thread-local storage to track which requests should inject geoId
+import threading
+_linkedin_worldwide_flag = threading.local()
+
 
 def patch_linkedin_for_worldwide():
     """Monkey-patch python-jobspy's LinkedIn scraper to inject geoId for worldwide search.
@@ -377,37 +381,62 @@ def patch_linkedin_for_worldwide():
     is specified, enabling truly worldwide results while preserving all of jobspy's
     anti-detection features (retries, delays, session management, etc.)
 
-    IMPORTANT: We must restore the original session.get after each request to prevent
-    the patch from affecting subsequent location-specific requests.
+    Uses thread-local storage to ensure concurrent requests don't interfere with each other:
+    - Request A (worldwide) sets flag, gets geoId injected
+    - Request B (Toronto) running concurrently does NOT set flag, no geoId injection
     """
     from jobspy.linkedin import LinkedIn
 
     # Store the original scrape method
     original_scrape = LinkedIn.scrape
+    # Store the original session.get at module load time (before any patching)
+    _original_session_get = {}  # Maps session id to original get method
 
     def patched_scrape(self, scraper_input):
-        # Only patch if no location specified (worldwide search)
-        if not scraper_input.location:
-            original_get = self.session.get
+        # Store original get method if not already stored for this session
+        session_id = id(self.session)
+        if session_id not in _original_session_get:
+            _original_session_get[session_id] = self.session.get
 
-            def patched_get(url, params=None, **kwargs):
-                if params is not None and "geoId" not in params:
-                    # Inject worldwide geoId for global search
-                    params["geoId"] = LINKEDIN_WORLDWIDE_GEOID
-                    logger.info(f"  Injected geoId={LINKEDIN_WORLDWIDE_GEOID} for worldwide search")
-                return original_get(url, params=params, **kwargs)
+        # Set thread-local flag based on whether this is a worldwide search
+        is_worldwide = not scraper_input.location
+        _linkedin_worldwide_flag.inject_geoid = is_worldwide
 
-            self.session.get = patched_get
-            try:
-                return original_scrape(self, scraper_input)
-            finally:
-                # CRITICAL: Restore original session.get to prevent affecting other requests
-                self.session.get = original_get
-        else:
-            # Location specified - use original scrape without modification
+        if is_worldwide:
+            logger.info(f"  LinkedIn: worldwide search, will inject geoId={LINKEDIN_WORLDWIDE_GEOID}")
+
+        try:
             return original_scrape(self, scraper_input)
+        finally:
+            # Clear the flag for this thread
+            _linkedin_worldwide_flag.inject_geoid = False
 
+    def create_patched_get(original_get):
+        """Create a patched get function that checks thread-local flag."""
+        def patched_get(url, params=None, **kwargs):
+            # Check thread-local flag to decide whether to inject geoId
+            should_inject = getattr(_linkedin_worldwide_flag, 'inject_geoid', False)
+            if should_inject and params is not None and "geoId" not in params:
+                params["geoId"] = LINKEDIN_WORLDWIDE_GEOID
+                logger.info(f"  Injected geoId={LINKEDIN_WORLDWIDE_GEOID} for worldwide search")
+            return original_get(url, params=params, **kwargs)
+        return patched_get
+
+    # Patch the LinkedIn class's scrape method
     LinkedIn.scrape = patched_scrape
+
+    # Also patch the session creation to wrap new sessions
+    from jobspy import util as jobspy_util
+    original_create_session = jobspy_util.create_session
+
+    def patched_create_session(*args, **kwargs):
+        session = original_create_session(*args, **kwargs)
+        # Wrap the session's get method
+        session.get = create_patched_get(session.get)
+        return session
+
+    jobspy_util.create_session = patched_create_session
+
     logger.info("Patched LinkedIn scraper for worldwide search support")
 
 

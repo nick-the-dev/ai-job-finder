@@ -175,10 +175,13 @@ function filterJobsByLocation(
   normalizedLocations: NormalizedLocation[] | null,
   legacyLocation: string | null
 ): NormalizedJob[] {
-  // Use normalized locations if available
-  if (normalizedLocations && normalizedLocations.length > 0) {
-    // No location filter if locations array is empty (user selected "Anywhere")
-    // Already handled: normalizedLocations.length > 0
+  // If normalizedLocations exists (even if empty), use the new system
+  // Empty array means "Anywhere" - no filtering
+  if (normalizedLocations !== null) {
+    if (normalizedLocations.length === 0) {
+      // User selected "Anywhere" - no location filter
+      return jobs;
+    }
 
     return jobs.filter(job =>
       LocationNormalizerAgent.matchesJob(normalizedLocations, {
@@ -188,7 +191,7 @@ function filterJobsByLocation(
     );
   }
 
-  // Legacy location filter
+  // Legacy location filter (only for old subscriptions without normalizedLocations)
   if (legacyLocation) {
     const locationParts = legacyLocation.toLowerCase().split(/[,\s]+/).filter(p => p.length > 2);
     return jobs.filter(job => {
