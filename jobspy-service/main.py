@@ -431,8 +431,36 @@ def patch_linkedin_for_worldwide():
 
     def patched_create_session(*args, **kwargs):
         session = original_create_session(*args, **kwargs)
-        # Wrap the session's get method
-        session.get = create_patched_get(session.get)
+        # Wrap the session's get method with geoId injection
+        original_get = session.get
+        session.get = create_patched_get(original_get)
+
+        # Also wrap get/post with longer timeout (30s instead of default 10s)
+        # to prevent timeouts on slow Indeed/LinkedIn responses
+        DEFAULT_TIMEOUT = 30
+
+        def get_with_timeout(url, params=None, timeout=DEFAULT_TIMEOUT, **kwargs):
+            return session.get.__wrapped__(url, params=params, timeout=timeout, **kwargs) if hasattr(session.get, '__wrapped__') else create_patched_get(original_get)(url, params=params, timeout=timeout, **kwargs)
+
+        def post_with_timeout(url, data=None, timeout=DEFAULT_TIMEOUT, **kwargs):
+            return original_post(url, data=data, timeout=timeout, **kwargs)
+
+        original_post = session.post
+        # Store reference to patched get for timeout wrapper
+        patched_get = session.get
+        patched_get.__wrapped__ = original_get
+
+        def get_with_geoid_and_timeout(url, params=None, timeout=DEFAULT_TIMEOUT, **kwargs):
+            # Check thread-local flag to decide whether to inject geoId
+            should_inject = getattr(_linkedin_worldwide_flag, 'inject_geoid', False)
+            if should_inject and params is not None and "geoId" not in params:
+                params["geoId"] = LINKEDIN_WORLDWIDE_GEOID
+                logger.info(f"  Injected geoId={LINKEDIN_WORLDWIDE_GEOID} for worldwide search")
+            return original_get(url, params=params, timeout=timeout, **kwargs)
+
+        session.get = get_with_geoid_and_timeout
+        session.post = post_with_timeout
+
         return session
 
     jobspy_util.create_session = patched_create_session
