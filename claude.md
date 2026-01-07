@@ -295,6 +295,7 @@ OPENROUTER_MODEL=xiaomi/mimo-v2-flash:free
 
 # JobSpy (Primary - Free scraper)
 JOBSPY_URL=http://localhost:8000
+# Production: https://jobspy.49-12-207-132.sslip.io
 
 # SerpAPI (Optional - Paid)
 SERPAPI_API_KEY=...
