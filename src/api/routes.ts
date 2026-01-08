@@ -26,11 +26,69 @@ const matcher = new MatcherAgent();
 const queryExpander = new QueryExpanderAgent();
 
 /**
- * Health check
+ * Health check (basic)
  */
 router.get('/health', (req: Request, res: Response) => {
   logger.info('API', 'Health check');
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+/**
+ * Health check (detailed) - Shows database, redis, and run failure rate
+ */
+router.get('/health/detailed', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const db = getDb();
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+
+    // Check database
+    let dbOk = false;
+    try {
+      await db.$queryRaw`SELECT 1`;
+      dbOk = true;
+    } catch {
+      dbOk = false;
+    }
+
+    // Check redis
+    const redisOk = isRedisConnected();
+
+    // Get recent run stats
+    const recentRuns = await db.subscriptionRun.findMany({
+      where: { startedAt: { gte: oneHourAgo } },
+      select: { status: true },
+    });
+
+    const runningCount = recentRuns.filter(r => r.status === 'running').length;
+    const failedCount = recentRuns.filter(r => r.status === 'failed').length;
+    const completedCount = recentRuns.filter(r => r.status === 'completed').length;
+    const totalRuns = recentRuns.length;
+    const failureRate = totalRuns > 0 ? failedCount / totalRuns : 0;
+
+    // Determine overall status
+    const isHealthy = dbOk && redisOk && failureRate < 0.5;
+    const isDegraded = dbOk && (!redisOk || failureRate >= 0.5);
+    const status = isHealthy ? 'healthy' : isDegraded ? 'degraded' : 'unhealthy';
+
+    res.json({
+      status,
+      timestamp: new Date().toISOString(),
+      components: {
+        database: dbOk ? 'ok' : 'error',
+        redis: redisOk ? 'ok' : 'unavailable',
+      },
+      recentRuns: {
+        period: '1h',
+        total: totalRuns,
+        running: runningCount,
+        completed: completedCount,
+        failed: failedCount,
+        failureRate: `${(failureRate * 100).toFixed(1)}%`,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 /**

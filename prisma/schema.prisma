@@ -250,13 +250,25 @@ model SubscriptionRun {
   completedAt     DateTime? @map("completed_at")
   durationMs      Int?     @map("duration_ms")
 
+  // Progress tracking (for real-time visibility)
+  currentStage      String?  @map("current_stage")    // "collection" | "normalization" | "matching" | "notification"
+  progressPercent   Int      @default(0) @map("progress_percent")
+  progressDetail    String?  @map("progress_detail")  // e.g., "Matching job 15/50"
+  checkpoint        Json?    @map("checkpoint")       // For resume on restart
+
   // Metrics
   jobsCollected     Int    @default(0) @map("jobs_collected")
   jobsAfterDedup    Int    @default(0) @map("jobs_after_dedup")
   jobsMatched       Int    @default(0) @map("jobs_matched")
   notificationsSent Int    @default(0) @map("notifications_sent")
 
-  // Error tracking
+  // Granular error tracking
+  collectionQueriesTotal   Int @default(0) @map("collection_queries_total")
+  collectionQueriesFailed  Int @default(0) @map("collection_queries_failed")
+  matchingJobsTotal        Int @default(0) @map("matching_jobs_total")
+  matchingJobsFailed       Int @default(0) @map("matching_jobs_failed")
+
+  // Error details
   errorMessage    String?  @map("error_message")
   errorStack      String?  @map("error_stack")
   failedStage     String?  @map("failed_stage")  // "collection" | "normalization" | "matching" | "notification"

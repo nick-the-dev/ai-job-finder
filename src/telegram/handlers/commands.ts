@@ -12,6 +12,32 @@ import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
 import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
 
 /**
+ * Helper function to create a text-based progress bar.
+ * @param percent Progress percentage (0-100)
+ * @returns Text-based progress bar
+ */
+function getProgressBar(percent: number): string {
+  const filled = Math.round(Math.min(100, Math.max(0, percent)) / 10);
+  const empty = 10 - filled;
+  return '▓'.repeat(filled) + '░'.repeat(empty);
+}
+
+/**
+ * Format stage name for display.
+ */
+function formatStageName(stage: string | null): string {
+  const stageLabels: Record<string, string> = {
+    collection: 'Collecting jobs',
+    normalization: 'Deduplicating',
+    matching: 'Matching jobs',
+    notification: 'Sending results',
+    completed: 'Completed',
+    starting: 'Starting',
+  };
+  return stageLabels[stage || 'starting'] || stage || 'In progress';
+}
+
+/**
  * Format job types for display.
  * Converts internal values to user-friendly labels.
  */
@@ -137,19 +163,45 @@ Ready to get started?
       return;
     }
 
+    // Check for active runs for each subscription
+    const activeRuns = await db.subscriptionRun.findMany({
+      where: {
+        subscriptionId: { in: subs.map((s) => s.id) },
+        status: 'running',
+      },
+      select: {
+        subscriptionId: true,
+        currentStage: true,
+        progressPercent: true,
+        progressDetail: true,
+      },
+    });
+    const activeRunMap = new Map(activeRuns.map((r) => [r.subscriptionId, r]));
+
     // Build message with subscription list
     let message = `<b>📋 Your Subscriptions (${subs.length})</b>\n\n`;
 
     for (let i = 0; i < subs.length; i++) {
       const sub = subs[i];
-      const status = sub.isPaused ? '⏸️ Paused' : '✅ Active';
+      const activeRun = activeRunMap.get(sub.id);
       const location = formatLocationDisplay(sub.normalizedLocations, sub.location, sub.isRemote);
 
       message += `<b>${i + 1}. ${sub.jobTitles.slice(0, 2).join(', ')}</b>`;
       if (sub.jobTitles.length > 2) message += ` +${sub.jobTitles.length - 2}`;
       message += '\n';
-      message += `   ${status} | 📍 ${location} | Score ≥${sub.minScore}\n`;
-      message += `   💼 ${formatJobTypesDisplay(sub.jobTypes)}\n`;
+
+      // Show progress if running, otherwise show status
+      if (activeRun) {
+        const progress = activeRun.progressPercent ?? 0;
+        const progressBar = getProgressBar(progress);
+        const stageName = formatStageName(activeRun.currentStage);
+        message += `   🔄 <b>Running:</b> ${progressBar} ${progress}%\n`;
+        message += `   ${stageName}\n`;
+      } else {
+        const status = sub.isPaused ? '⏸️ Paused' : '✅ Active';
+        message += `   ${status} | 📍 ${location} | Score ≥${sub.minScore}\n`;
+        message += `   💼 ${formatJobTypesDisplay(sub.jobTypes)}\n`;
+      }
       message += `   📬 ${sub._count.sentNotifications} matches\n\n`;
     }
 
@@ -703,18 +755,44 @@ Ready to get started?
       return;
     }
 
+    // Check for active runs for each subscription
+    const activeRuns = await db.subscriptionRun.findMany({
+      where: {
+        subscriptionId: { in: subs.map((s) => s.id) },
+        status: 'running',
+      },
+      select: {
+        subscriptionId: true,
+        currentStage: true,
+        progressPercent: true,
+        progressDetail: true,
+      },
+    });
+    const activeRunMap = new Map(activeRuns.map((r) => [r.subscriptionId, r]));
+
     let message = `<b>📋 Your Subscriptions (${subs.length})</b>\n\n`;
 
     for (let i = 0; i < subs.length; i++) {
       const sub = subs[i];
-      const status = sub.isPaused ? '⏸️ Paused' : '✅ Active';
+      const activeRun = activeRunMap.get(sub.id);
       const location = formatLocationDisplay(sub.normalizedLocations, sub.location, sub.isRemote);
 
       message += `<b>${i + 1}. ${sub.jobTitles.slice(0, 2).join(', ')}</b>`;
       if (sub.jobTitles.length > 2) message += ` +${sub.jobTitles.length - 2}`;
       message += '\n';
-      message += `   ${status} | 📍 ${location} | Score ≥${sub.minScore}\n`;
-      message += `   💼 ${formatJobTypesDisplay(sub.jobTypes)}\n`;
+
+      // Show progress if running, otherwise show status
+      if (activeRun) {
+        const progress = activeRun.progressPercent ?? 0;
+        const progressBar = getProgressBar(progress);
+        const stageName = formatStageName(activeRun.currentStage);
+        message += `   🔄 <b>Running:</b> ${progressBar} ${progress}%\n`;
+        message += `   ${stageName}\n`;
+      } else {
+        const status = sub.isPaused ? '⏸️ Paused' : '✅ Active';
+        message += `   ${status} | 📍 ${location} | Score ≥${sub.minScore}\n`;
+        message += `   💼 ${formatJobTypesDisplay(sub.jobTypes)}\n`;
+      }
       message += `   📬 ${sub._count.sentNotifications} matches\n\n`;
     }
 
@@ -792,7 +870,7 @@ Ready to get started?
     const chatId = Number(sub.user.chatId);
 
     // Check if subscription is already running (prevents concurrent runs)
-    if (isSubscriptionRunning(subId)) {
+    if (await isSubscriptionRunning(subId)) {
       await ctx.answerCallbackQuery({ text: '⏳ A scan is already in progress for this subscription' });
       await ctx.editMessageText(
         '⏳ <b>Scan Already Running</b>\n\n' +
@@ -807,8 +885,12 @@ Ready to get started?
       return;
     }
 
-    // Mark as running before starting
-    markSubscriptionRunning(subId);
+    // Acquire lock before starting
+    const lockAcquired = await markSubscriptionRunning(subId);
+    if (!lockAcquired) {
+      await ctx.answerCallbackQuery({ text: '⏳ Already running...' });
+      return;
+    }
 
     // Answer callback immediately and update message
     await ctx.answerCallbackQuery({ text: '🔍 Starting scan...' });
@@ -821,7 +903,7 @@ Ready to get started?
     // Run scan asynchronously (fire-and-forget) to avoid webhook timeout
     runSingleSubscriptionSearch(subId, 'manual')
       .then(async (result) => {
-        markSubscriptionFinished(subId);
+        await markSubscriptionFinished(subId);
 
         const keyboard = new InlineKeyboard()
           .text('📋 My Subscriptions', 'sub:list')
@@ -849,7 +931,7 @@ Ready to get started?
         logger.info('Telegram', `Manual scan completed for subscription ${subId}: ${result.matchesFound} matches`);
       })
       .catch(async (error) => {
-        markSubscriptionFinished(subId);
+        await markSubscriptionFinished(subId);
         logger.error('Telegram', `Manual scan failed for subscription ${subId}`, error);
 
         await ctx.api.sendMessage(

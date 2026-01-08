@@ -6,7 +6,7 @@ import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
 import { sendMatchSummary, type SubscriptionContext } from '../../telegram/services/notification.js';
 import { logger, createSubscriptionLogger, type SubscriptionLogger } from '../../utils/logger.js';
 import { queueService, PRIORITY, type Priority } from '../../queue/index.js';
-import { RunTracker, formatTriggerLabel, updateSkillStats, createMarketSnapshot, type ErrorContext, type TriggerType } from '../../observability/index.js';
+import { RunTracker, formatTriggerLabel, updateSkillStats, createMarketSnapshot, type ErrorContext, type TriggerType, type ProgressUpdate } from '../../observability/index.js';
 import type { NormalizedJob, JobMatchResult, RawJob } from '../../core/types.js';
 import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
 
@@ -27,15 +27,132 @@ interface CollectionParams {
   skipCache: boolean;
   priority: Priority;
   subLogger?: SubscriptionLogger; // Optional subscription-scoped logger for debug mode
+  onProgress?: (current: number, total: number, detail: string) => Promise<void>; // Progress callback
+}
+
+interface CollectionError {
+  query: string;
+  location?: string;
+  jobType?: string;
+  error: string;
+}
+
+interface CollectionResult {
+  jobs: RawJob[];
+  queriesTotal: number;
+  queriesFailed: number;
+  errors: CollectionError[];
+}
+
+/**
+ * Dynamic progress calculator that adjusts phase allocations based on actual job counts.
+ *
+ * Time estimates:
+ * - Each collection query: ~4 seconds
+ * - Normalization: ~0.5 seconds per 100 jobs (negligible)
+ * - Each matching call: ~1.5 seconds (when cache miss, ~0.1s for cache hit - average ~1s)
+ * - Notifications: ~0.5 seconds per batch
+ *
+ * This ensures progress reflects actual time/complexity remaining.
+ */
+class ProgressCalculator {
+  private collectionPercent: number = 30;
+  private normalizationPercent: number = 5;
+  private matchingPercent: number = 60;
+  private notificationPercent: number = 5;
+  private collectionEndPercent: number = 30;
+  private normalizationEndPercent: number = 35;
+  private matchingEndPercent: number = 95;
+
+  constructor(queryCount: number, estimatedJobCount: number = 0) {
+    // Initial estimate before we know job count
+    // Collection is the only work we're sure about
+    this.recalculate(queryCount, estimatedJobCount);
+  }
+
+  /**
+   * Recalculate phase allocations based on actual counts.
+   * Called after collection when we know the real job count.
+   */
+  recalculate(queryCount: number, jobCount: number) {
+    // Time estimates in seconds
+    const collectionTime = queryCount * 4;          // ~4s per query
+    const normalizationTime = Math.max(0.5, jobCount * 0.005); // ~0.5s per 100 jobs, min 0.5s
+    const matchingTime = jobCount * 1.0;            // ~1s per job (avg of cache hit/miss)
+    const notificationTime = 1;                     // ~1s for sending
+
+    const totalTime = collectionTime + normalizationTime + matchingTime + notificationTime;
+
+    // Calculate percentages (ensure minimum 5% for each visible phase)
+    this.collectionPercent = Math.max(5, Math.round(100 * collectionTime / totalTime));
+    this.normalizationPercent = Math.max(2, Math.round(100 * normalizationTime / totalTime));
+    this.matchingPercent = Math.max(5, Math.round(100 * matchingTime / totalTime));
+    this.notificationPercent = Math.max(3, Math.round(100 * notificationTime / totalTime));
+
+    // Normalize to 100%
+    const total = this.collectionPercent + this.normalizationPercent + this.matchingPercent + this.notificationPercent;
+    const scale = 100 / total;
+    this.collectionPercent = Math.round(this.collectionPercent * scale);
+    this.normalizationPercent = Math.round(this.normalizationPercent * scale);
+    this.matchingPercent = Math.round(this.matchingPercent * scale);
+    this.notificationPercent = 100 - this.collectionPercent - this.normalizationPercent - this.matchingPercent;
+
+    // Cache end percentages for easier calculation
+    this.collectionEndPercent = this.collectionPercent;
+    this.normalizationEndPercent = this.collectionEndPercent + this.normalizationPercent;
+    this.matchingEndPercent = this.normalizationEndPercent + this.matchingPercent;
+  }
+
+  /** Get progress during collection phase (0 to collectionEnd%) */
+  collection(current: number, total: number): number {
+    const phaseProgress = total > 0 ? current / total : 0;
+    return Math.round(phaseProgress * this.collectionPercent);
+  }
+
+  /** Get progress at start of normalization */
+  normalizationStart(): number {
+    return this.collectionEndPercent;
+  }
+
+  /** Get progress at end of normalization */
+  normalizationEnd(): number {
+    return this.normalizationEndPercent;
+  }
+
+  /** Get progress during matching phase (normalizationEnd% to matchingEnd%) */
+  matching(current: number, total: number): number {
+    const phaseProgress = total > 0 ? current / total : 0;
+    return this.normalizationEndPercent + Math.round(phaseProgress * this.matchingPercent);
+  }
+
+  /** Get progress at start of notification */
+  notificationStart(): number {
+    return this.matchingEndPercent;
+  }
+
+  /** Get allocation summary for debugging */
+  getAllocations(): { collection: number; normalization: number; matching: number; notification: number } {
+    return {
+      collection: this.collectionPercent,
+      normalization: this.normalizationPercent,
+      matching: this.matchingPercent,
+      notification: this.notificationPercent,
+    };
+  }
 }
 
 /**
  * Collect jobs for a subscription, supporting multi-location search.
  * Uses normalizedLocations if available, falls back to legacy location/isRemote.
+ * Returns detailed result with error tracking for reliability.
  */
-async function collectJobsForSubscription(params: CollectionParams): Promise<RawJob[]> {
-  const { jobTitles, normalizedLocations, legacyLocation, legacyIsRemote, jobTypes, datePosted, limit, skipCache, priority, subLogger } = params;
+async function collectJobsForSubscription(params: CollectionParams): Promise<CollectionResult> {
+  const { jobTitles, normalizedLocations, legacyLocation, legacyIsRemote, jobTypes, datePosted, limit, skipCache, priority, subLogger, onProgress } = params;
   const allRawJobs: RawJob[] = [];
+  const errors: CollectionError[] = [];
+  let queriesTotal = 0;
+  let queriesFailed = 0;
+  let queriesCompleted = 0;
 
   // Debug mode: Log detailed collection parameters
   subLogger?.debug('Collection', 'Starting job collection with params', {
@@ -65,6 +182,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
       for (const title of jobTitles) {
         // Search for worldwide remote jobs (no location filter = global search)
         if (hasWorldwideRemote) {
+          queriesTotal++;
           try {
             logger.info('Scheduler', `  Collecting remote jobs globally for: "${title}"${jobTypeLabel}`);
             const jobs = await queueService.enqueueCollection({
@@ -79,7 +197,12 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
             }, priority);
             logger.info('Scheduler', `  Found ${jobs.length} remote jobs globally for "${title}"${jobTypeLabel}`);
             allRawJobs.push(...jobs);
+            queriesCompleted++;
+            await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`);
           } catch (error) {
+            queriesFailed++;
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            errors.push({ query: title, jobType, error: errorMsg });
             logger.error('Scheduler', `  Failed to collect remote jobs globally for "${title}"${jobTypeLabel}`, error);
           }
         }
@@ -90,6 +213,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
           if (variants.length === 0) variants.push(loc.country);
 
           for (const variant of variants) {
+            queriesTotal++;
             try {
               logger.info('Scheduler', `  Collecting remote jobs for: "${title}" in "${variant}"${jobTypeLabel}`);
               const jobs = await queueService.enqueueCollection({
@@ -104,7 +228,12 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
               }, priority);
               logger.info('Scheduler', `  Found ${jobs.length} remote jobs for "${title}" in "${variant}"${jobTypeLabel}`);
               allRawJobs.push(...jobs);
+              queriesCompleted++;
+              await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`);
             } catch (error) {
+              queriesFailed++;
+              const errorMsg = error instanceof Error ? error.message : String(error);
+              errors.push({ query: title, location: variant, jobType, error: errorMsg });
               logger.error('Scheduler', `  Failed to collect remote jobs for "${title}" in "${variant}"${jobTypeLabel}`, error);
             }
           }
@@ -116,6 +245,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
           if (variants.length === 0) variants.push(loc.display);
 
           for (const variant of variants) {
+            queriesTotal++;
             try {
               logger.info('Scheduler', `  Collecting jobs for: "${title}" in "${variant}"${jobTypeLabel}`);
               const jobs = await queueService.enqueueCollection({
@@ -130,7 +260,12 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
               }, priority);
               logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}" in "${variant}"${jobTypeLabel}`);
               allRawJobs.push(...jobs);
+              queriesCompleted++;
+              await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`);
             } catch (error) {
+              queriesFailed++;
+              const errorMsg = error instanceof Error ? error.message : String(error);
+              errors.push({ query: title, location: variant, jobType, error: errorMsg });
               logger.error('Scheduler', `  Failed to collect jobs for "${title}" in "${variant}"${jobTypeLabel}`, error);
             }
           }
@@ -143,6 +278,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
       const jobTypeLabel = jobType ? ` (${jobType})` : '';
 
       for (const title of jobTitles) {
+        queriesTotal++;
         try {
           logger.info('Scheduler', `  Collecting jobs for: "${title}"${jobTypeLabel}`);
           const jobs = await queueService.enqueueCollection({
@@ -157,14 +293,24 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Raw
           }, priority);
           logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}"${jobTypeLabel}`);
           allRawJobs.push(...jobs);
+          queriesCompleted++;
+          await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`);
         } catch (error) {
+          queriesFailed++;
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          errors.push({ query: title, location: legacyLocation ?? undefined, jobType, error: errorMsg });
           logger.error('Scheduler', `  Failed to collect jobs for "${title}"${jobTypeLabel}`, error);
         }
       }
     }
   }
 
-  return allRawJobs;
+  return {
+    jobs: allRawJobs,
+    queriesTotal,
+    queriesFailed,
+    errors,
+  };
 }
 
 /**
@@ -316,16 +462,31 @@ export async function runSingleSubscriptionSearch(
   const normalizedLocations = sub.normalizedLocations as NormalizedLocation[] | null;
   const datePosted = (sub.datePosted || 'month') as DatePostedType;
 
-  // Stage 1: Collection
+  // Extract job types from subscription
+  const jobTypes = (sub.jobTypes ?? []) as string[];
+
+  // Estimate query count for initial progress allocation
+  // (titles × locations × jobTypes, or just titles if no specific locations/types)
+  const locationCount = normalizedLocations?.length || (sub.location ? 1 : 1);
+  const jobTypeCount = jobTypes.length || 1;
+  const estimatedQueryCount = sub.jobTitles.length * locationCount * jobTypeCount;
+
+  // Create progress calculator with initial estimate (will recalculate after collection)
+  const progress = new ProgressCalculator(estimatedQueryCount, 100); // Assume ~100 jobs initially
+
+  // Stage 1: Collection (dynamic % based on job count)
   errorContext.stage = 'collection';
   errorContext.query = sub.jobTitles.join(', ');
   errorContext.location = sub.location ?? (normalizedLocations ? LocationNormalizerAgent.formatForDisplaySingleLine(normalizedLocations) : undefined);
 
-  // Extract job types from subscription
-  const jobTypes = (sub.jobTypes ?? []) as string[];
+  await RunTracker.updateProgress(runId, {
+    stage: 'collection',
+    percent: 1,
+    detail: `Starting collection for ${sub.jobTitles.length} job titles`,
+  });
 
   subLogger.debug('Collection', 'Starting collection stage');
-  const allRawJobs = await collectJobsForSubscription({
+  const collectionResult = await collectJobsForSubscription({
     jobTitles: sub.jobTitles,
     normalizedLocations,
     legacyLocation: sub.location,
@@ -336,14 +497,43 @@ export async function runSingleSubscriptionSearch(
     skipCache: true, // Manual scans always fetch fresh results
     priority: PRIORITY.MANUAL_SCAN,
     subLogger,
+    onProgress: async (current, total, detail) => {
+      const percent = progress.collection(current, total);
+      await RunTracker.updateProgress(runId, {
+        stage: 'collection',
+        percent,
+        detail,
+        checkpoint: { stage: 'collection', queriesCompleted: current, queriesTotal: total },
+      });
+    },
   });
 
-  errorContext.partialResults!.jobsCollected = allRawJobs.length;
-  logger.info('Scheduler', `[${triggerLabel}] Total raw jobs collected: ${allRawJobs.length}`);
-  subLogger.debug('Collection', `Collection complete: ${allRawJobs.length} raw jobs`);
+  const allRawJobs = collectionResult.jobs;
 
-  // Stage 2: Normalization
+  // Check for collection failure - if ALL queries failed and we got 0 jobs, fail the run
+  if (collectionResult.queriesFailed > 0 && allRawJobs.length === 0) {
+    const errorMsg = `Collection failed: ${collectionResult.queriesFailed}/${collectionResult.queriesTotal} queries failed with 0 jobs collected`;
+    errorContext.collectionErrors = collectionResult.errors;
+    throw new Error(errorMsg);
+  }
+
+  errorContext.partialResults!.jobsCollected = allRawJobs.length;
+  logger.info('Scheduler', `[${triggerLabel}] Total raw jobs collected: ${allRawJobs.length} (${collectionResult.queriesFailed}/${collectionResult.queriesTotal} queries failed)`);
+  subLogger.debug('Collection', `Collection complete: ${allRawJobs.length} raw jobs, ${collectionResult.queriesFailed} failed queries`);
+
+  // Recalculate progress allocations now that we know actual job count
+  // This adjusts phase percentages so remaining time estimate is accurate
+  progress.recalculate(collectionResult.queriesTotal, allRawJobs.length);
+  subLogger.debug('Progress', `Recalculated progress allocations for ${allRawJobs.length} jobs`, progress.getAllocations());
+
+  // Stage 2: Normalization (dynamic % based on job count)
   errorContext.stage = 'normalization';
+  await RunTracker.updateProgress(runId, {
+    stage: 'normalization',
+    percent: progress.normalizationStart(),
+    detail: `Deduplicating ${allRawJobs.length} jobs`,
+  });
+
   subLogger.debug('Normalization', 'Starting normalization and deduplication');
   let normalizedJobs = await normalizer.execute(allRawJobs);
   errorContext.partialResults!.jobsNormalized = normalizedJobs.length;
@@ -387,15 +577,24 @@ export async function runSingleSubscriptionSearch(
 
   subLogger.debug('Filter', `After all filters: ${normalizedJobs.length} jobs ready for matching`);
 
-  // Stage 3: Matching
+  // Stage 3: Matching (dynamic % based on job count - usually the largest phase)
   errorContext.stage = 'matching';
   const newMatches: MatchItem[] = [];
   const stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 };
 
+  await RunTracker.updateProgress(runId, {
+    stage: 'matching',
+    percent: progress.normalizationEnd(),
+    detail: `Starting matching for ${normalizedJobs.length} jobs`,
+  });
+
   subLogger.debug('Matching', `Starting matching stage for ${normalizedJobs.length} jobs`);
   let matchedCount = 0;
+  let matchingErrors = 0;
+  const totalJobsToMatch = normalizedJobs.length;
 
-  for (const job of normalizedJobs) {
+  for (let jobIndex = 0; jobIndex < normalizedJobs.length; jobIndex++) {
+    const job = normalizedJobs[jobIndex];
     // Update context for each job being matched
     errorContext.jobTitle = job.title;
     errorContext.company = job.company;
@@ -501,30 +700,53 @@ export async function runSingleSubscriptionSearch(
       newMatches.push({ job, match: matchResult, matchId: jobMatchId, isPreviouslyMatched });
       errorContext.partialResults!.jobsMatched = newMatches.length;
       subLogger.debug('Matching', `MATCH "${job.title}": score=${matchResult.score}, added to results`);
+
+      // Update progress every 5 jobs or on last job
+      if ((jobIndex + 1) % 5 === 0 || jobIndex === totalJobsToMatch - 1) {
+        const percent = progress.matching(jobIndex + 1, totalJobsToMatch);
+        await RunTracker.updateProgress(runId, {
+          stage: 'matching',
+          percent,
+          detail: `Matched ${jobIndex + 1}/${totalJobsToMatch} jobs (${newMatches.length} new matches)`,
+          checkpoint: { stage: 'matching', currentIndex: jobIndex, matchedJobIds: newMatches.map(m => m.matchId) },
+        });
+      }
     } catch (error) {
+      matchingErrors++;
       logger.error('Scheduler', `[${triggerLabel}] Failed to process job: ${job.title}`, error);
       subLogger.debug('Matching', `ERROR processing "${job.title}"`, error);
+      // Continue to next job (intentional - partial results OK)
     }
   }
 
-  subLogger.debug('Matching', `Matching complete: processed ${matchedCount} jobs, found ${newMatches.length} new matches`);
+  subLogger.debug('Matching', `Matching complete: processed ${matchedCount} jobs, found ${newMatches.length} new matches, ${matchingErrors} errors`);
 
   // Clear job-specific context after matching loop
   delete errorContext.jobTitle;
   delete errorContext.company;
 
-  // Update run stats mid-execution
+  // Update run stats mid-execution with error tracking
   await RunTracker.update(runId, {
     jobsCollected: allRawJobs.length,
     jobsAfterDedup: normalizedJobs.length,
     jobsMatched: newMatches.length,
+    collectionQueriesTotal: collectionResult.queriesTotal,
+    collectionQueriesFailed: collectionResult.queriesFailed,
+    matchingJobsTotal: totalJobsToMatch,
+    matchingJobsFailed: matchingErrors,
   });
 
   let notificationsSent = 0;
 
   if (newMatches.length > 0) {
-    // Stage 4: Notification
+    // Stage 4: Notification (final phase)
     errorContext.stage = 'notification';
+    await RunTracker.updateProgress(runId, {
+      stage: 'notification',
+      percent: progress.notificationStart(),
+      detail: `Sending ${newMatches.length} notifications`,
+    });
+
     newMatches.sort((a, b) => b.match.score - a.match.score);
 
     subLogger.debug('Notification', `Sending ${newMatches.length} notifications to chat ${sub.user.chatId}`);
@@ -585,12 +807,16 @@ export async function runSingleSubscriptionSearch(
     data: { lastSearchAt: new Date() },
   });
 
-  // Complete the run tracking
+  // Complete the run tracking with error stats
   await RunTracker.complete(runId, {
     jobsCollected: allRawJobs.length,
     jobsAfterDedup: normalizedJobs.length,
     jobsMatched: newMatches.length,
     notificationsSent,
+    collectionQueriesTotal: collectionResult.queriesTotal,
+    collectionQueriesFailed: collectionResult.queriesFailed,
+    matchingJobsTotal: totalJobsToMatch,
+    matchingJobsFailed: matchingErrors,
   });
 
   logger.info('Scheduler', `[${triggerLabel}] Results: ${newMatches.length} new | ${stats.skippedAlreadySent} already sent | ${stats.skippedBelowScore} below threshold | ${stats.skippedCrossSubDuplicates} cross-sub skipped`);
@@ -719,11 +945,19 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       errorContext.minScore = sub.minScore;
       errorContext.datePosted = sub.datePosted;
 
-      // Stage 1: Collection
-      errorContext.stage = 'collection';
-
       // Extract job types from subscription
       const jobTypes = (sub.jobTypes ?? []) as string[];
+
+      // Estimate query count for progress allocation
+      const locationCount = normalizedLocations?.length || (sub.location ? 1 : 1);
+      const jobTypeCount = jobTypes.length || 1;
+      const estimatedQueryCount = sub.jobTitles.length * locationCount * jobTypeCount;
+
+      // Create progress calculator (will recalculate after collection when we know job count)
+      const progress = new ProgressCalculator(estimatedQueryCount, 100);
+
+      // Stage 1: Collection (dynamic % based on job count)
+      errorContext.stage = 'collection';
 
       // First run: use user's configured datePosted to backfill historical jobs
       // Subsequent runs: use 'today' since older jobs were already processed
@@ -735,8 +969,14 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         logger.info('Scheduler', `  First run - using user's datePosted: ${datePosted}`);
       }
 
+      await RunTracker.updateProgress(runId, {
+        stage: 'collection',
+        percent: 1,
+        detail: `Starting collection for ${sub.jobTitles.length} job titles`,
+      });
+
       subLogger.debug('Collection', 'Starting collection stage');
-      const allRawJobs = await collectJobsForSubscription({
+      const collectionResult = await collectJobsForSubscription({
         jobTitles: sub.jobTitles,
         normalizedLocations,
         legacyLocation: sub.location,
@@ -747,14 +987,42 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         skipCache: false,
         priority: PRIORITY.SCHEDULED,
         subLogger,
+        onProgress: async (current, total, detail) => {
+          const percent = progress.collection(current, total);
+          await RunTracker.updateProgress(runId, {
+            stage: 'collection',
+            percent,
+            detail,
+            checkpoint: { stage: 'collection', queriesCompleted: current, queriesTotal: total },
+          });
+        },
       });
 
-      errorContext.partialResults!.jobsCollected = allRawJobs.length;
-      logger.info('Scheduler', `  Total collected: ${allRawJobs.length} raw jobs`);
-      subLogger.debug('Collection', `Collection complete: ${allRawJobs.length} raw jobs`);
+      const allRawJobs = collectionResult.jobs;
 
-      // Stage 2: Normalization
+      // Check for collection failure - if ALL queries failed and we got 0 jobs, fail the run
+      if (collectionResult.queriesFailed > 0 && allRawJobs.length === 0) {
+        const errorMsg = `Collection failed: ${collectionResult.queriesFailed}/${collectionResult.queriesTotal} queries failed with 0 jobs collected`;
+        errorContext.collectionErrors = collectionResult.errors;
+        throw new Error(errorMsg);
+      }
+
+      errorContext.partialResults!.jobsCollected = allRawJobs.length;
+      logger.info('Scheduler', `  Total collected: ${allRawJobs.length} raw jobs (${collectionResult.queriesFailed}/${collectionResult.queriesTotal} queries failed)`);
+      subLogger.debug('Collection', `Collection complete: ${allRawJobs.length} raw jobs, ${collectionResult.queriesFailed} failed queries`);
+
+      // Recalculate progress allocations now that we know actual job count
+      progress.recalculate(collectionResult.queriesTotal, allRawJobs.length);
+      subLogger.debug('Progress', `Recalculated progress allocations for ${allRawJobs.length} jobs`, progress.getAllocations());
+
+      // Stage 2: Normalization (dynamic % based on job count)
       errorContext.stage = 'normalization';
+      await RunTracker.updateProgress(runId, {
+        stage: 'normalization',
+        percent: progress.normalizationStart(),
+        detail: `Deduplicating ${allRawJobs.length} jobs`,
+      });
+
       subLogger.debug('Normalization', 'Starting normalization and deduplication');
       let normalizedJobs = await normalizer.execute(allRawJobs);
       errorContext.partialResults!.jobsNormalized = normalizedJobs.length;
@@ -804,15 +1072,24 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
 
       subLogger.debug('Filter', `After all filters: ${normalizedJobs.length} jobs ready for matching`);
 
-      // Stage 3: Matching
+      // Stage 3: Matching (dynamic % based on job count - usually the largest phase)
       errorContext.stage = 'matching';
       const newMatches: MatchItem[] = [];
       const stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 };
 
+      await RunTracker.updateProgress(runId, {
+        stage: 'matching',
+        percent: progress.normalizationEnd(),
+        detail: `Starting matching for ${normalizedJobs.length} jobs`,
+      });
+
       subLogger.debug('Matching', `Starting matching stage for ${normalizedJobs.length} jobs`);
       let matchedCount = 0;
+      let matchingErrors = 0;
+      const totalJobsToMatch = normalizedJobs.length;
 
-      for (const job of normalizedJobs) {
+      for (let jobIndex = 0; jobIndex < normalizedJobs.length; jobIndex++) {
+        const job = normalizedJobs[jobIndex];
         errorContext.jobTitle = job.title;
         errorContext.company = job.company;
 
@@ -930,13 +1207,26 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
           newMatches.push({ job, match: matchResult, matchId: jobMatchId, isPreviouslyMatched });
           errorContext.partialResults!.jobsMatched = newMatches.length;
           subLogger.debug('Matching', `MATCH "${job.title}": score=${matchResult.score}, added to results`);
+
+          // Update progress every 5 jobs or on last job
+          if ((jobIndex + 1) % 5 === 0 || jobIndex === totalJobsToMatch - 1) {
+            const percent = progress.matching(jobIndex + 1, totalJobsToMatch);
+            await RunTracker.updateProgress(runId, {
+              stage: 'matching',
+              percent,
+              detail: `Matched ${jobIndex + 1}/${totalJobsToMatch} jobs (${newMatches.length} new matches)`,
+              checkpoint: { stage: 'matching', currentIndex: jobIndex, matchedJobIds: newMatches.map(m => m.matchId) },
+            });
+          }
         } catch (error) {
+          matchingErrors++;
           logger.error('Scheduler', `  Failed to process job: ${job.title}`, error);
           subLogger.debug('Matching', `ERROR processing "${job.title}"`, error);
+          // Continue to next job (intentional - partial results OK)
         }
       }
 
-      subLogger.debug('Matching', `Matching complete: processed ${matchedCount} jobs, found ${newMatches.length} new matches`);
+      subLogger.debug('Matching', `Matching complete: processed ${matchedCount} jobs, found ${newMatches.length} new matches, ${matchingErrors} errors`);
 
       // Clear job-specific context after matching loop
       delete errorContext.jobTitle;
@@ -947,8 +1237,14 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
 
       let notificationsSent = 0;
       if (newMatches.length > 0) {
-        // Stage 4: Notification
+        // Stage 4: Notification (final phase)
         errorContext.stage = 'notification';
+        await RunTracker.updateProgress(runId, {
+          stage: 'notification',
+          percent: progress.notificationStart(),
+          detail: `Sending ${newMatches.length} notifications`,
+        });
+
         newMatches.sort((a, b) => b.match.score - a.match.score);
 
         subLogger.debug('Notification', `Sending ${newMatches.length} notifications to chat ${sub.user.chatId}`);
@@ -1016,12 +1312,16 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         data: { lastSearchAt: new Date() },
       });
 
-      // Complete the run tracking
+      // Complete the run tracking with error stats
       await RunTracker.complete(runId, {
         jobsCollected: allRawJobs.length,
         jobsAfterDedup: normalizedJobs.length,
         jobsMatched: newMatches.length,
         notificationsSent,
+        collectionQueriesTotal: collectionResult.queriesTotal,
+        collectionQueriesFailed: collectionResult.queriesFailed,
+        matchingJobsTotal: totalJobsToMatch,
+        matchingJobsFailed: matchingErrors,
       });
 
       // Final debug summary

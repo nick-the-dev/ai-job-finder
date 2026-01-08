@@ -901,10 +901,14 @@ async function createSubscription(
 
     // Auto-start the first search (fire-and-forget)
     const chatId = Number(ctx.telegramUser.chatId);
-    markSubscriptionRunning(subscription.id);
-    runSingleSubscriptionSearch(subscription.id, 'initial')
-      .then(async (result) => {
-        markSubscriptionFinished(subscription.id);
+    markSubscriptionRunning(subscription.id).then((lockAcquired) => {
+      if (!lockAcquired) {
+        logger.warn('Telegram', `Failed to acquire lock for initial scan of ${subscription.id}`);
+        return;
+      }
+      runSingleSubscriptionSearch(subscription.id, 'initial')
+        .then(async (result) => {
+          await markSubscriptionFinished(subscription.id);
         if (result.notificationsSent > 0) {
           await ctx.api.sendMessage(
             chatId,
@@ -937,12 +941,13 @@ async function createSubscription(
               "I'll keep searching every hour and notify you when I find something.",
             { parse_mode: 'HTML' }
           );
-        }
-      })
-      .catch((error) => {
-        markSubscriptionFinished(subscription.id);
-        logger.error('Telegram', `Auto-scan failed for new subscription ${subscription.id}`, error);
-      });
+          }
+        })
+        .catch(async (error) => {
+          await markSubscriptionFinished(subscription.id);
+          logger.error('Telegram', `Auto-scan failed for new subscription ${subscription.id}`, error);
+        });
+    });
   } catch (error) {
     logger.error('Telegram', 'Failed to create subscription', error);
     await ctx.reply(

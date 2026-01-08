@@ -34,7 +34,8 @@ npm run dev
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Health check |
+| `/health` | GET | Health check (basic) |
+| `/health/detailed` | GET | Detailed health check (DB, Redis, run failure rate) |
 | `/search` | POST | Search jobs and analyze matches |
 | `/jobs` | GET | List all collected jobs |
 | `/matches` | GET | List all job matches with scores |
@@ -44,6 +45,7 @@ npm run dev
 | `/admin/api/users` | GET | List users with subscription counts |
 | `/admin/api/subscriptions` | GET | List all subscriptions |
 | `/admin/api/runs` | GET | Recent subscription runs with error details |
+| `/admin/api/runs/active` | GET | Currently running subscriptions with progress |
 
 ## Example: Search Jobs
 
@@ -555,6 +557,70 @@ curl -H "X-Admin-Key: your-key" "http://localhost:3001/admin/api/overview?period
 # Get recent runs with error context
 curl -H "X-Admin-Key: your-key" http://localhost:3001/admin/api/runs
 ```
+
+## Production Access (Dokploy)
+
+The app is deployed on Dokploy. Use MCP tools or direct database access for debugging.
+
+### Dokploy MCP Tools
+```
+# List all projects
+mcp__dokploy-mcp__project-all
+
+# Get specific project details
+mcp__dokploy-mcp__project-one (projectId: "k6eBmZX5lnUQKO6hIG4rx")
+
+# Get application details (includes env vars, deployments)
+mcp__dokploy-mcp__application-one (applicationId: "WwAhBC4wwMePhxOWcdA0x")
+
+# Get postgres details (includes credentials)
+mcp__dokploy-mcp__postgres-one (postgresId: "JgLBkbIA5CiiSLNvw2DJW")
+```
+
+### Direct Production Database Access
+```bash
+# Connect to production PostgreSQL
+PGPASSWORD="jobfinder-prod-2024" psql -h 49-12-207-132.sslip.io -p 5433 -U jobfinder -d jobfinder
+
+# Example: Check user subscriptions
+PGPASSWORD="jobfinder-prod-2024" psql -h 49-12-207-132.sslip.io -p 5433 -U jobfinder -d jobfinder -c "
+SELECT u.username, s.id, s.is_active, s.next_run_at, s.last_search_at
+FROM telegram_users u
+JOIN search_subscriptions s ON u.id = s.user_id
+WHERE u.username ILIKE '%USERNAME%';
+"
+
+# Example: Check subscription runs
+PGPASSWORD="jobfinder-prod-2024" psql -h 49-12-207-132.sslip.io -p 5433 -U jobfinder -d jobfinder -c "
+SELECT id, status, trigger_type, started_at, completed_at, jobs_collected, error_message
+FROM subscription_runs
+WHERE subscription_id = 'SUB_ID'
+ORDER BY started_at DESC LIMIT 5;
+"
+```
+
+### Production API Endpoints
+```bash
+# Health check
+curl https://ai-job-finder.49-12-207-132.sslip.io/health
+
+# Queue status
+curl https://ai-job-finder.49-12-207-132.sslip.io/queue/status
+
+# Admin dashboard (requires API key)
+curl -H "X-Admin-Key: 0d5957a79527672e0c85ba5eb09ccd1c8d53a3006178527e6767642ebc8d2a88" \
+  https://ai-job-finder.49-12-207-132.sslip.io/admin/api/overview
+```
+
+### Key Production IDs
+| Resource | ID |
+|----------|-----|
+| Project | k6eBmZX5lnUQKO6hIG4rx |
+| API Application | WwAhBC4wwMePhxOWcdA0x |
+| JobSpy Application | oUAtxv2saqf6YDD2p1vAZ |
+| PostgreSQL | JgLBkbIA5CiiSLNvw2DJW |
+| Redis | gO3wRu7MzirhB3-ckVxXF |
+| Environment | Kro5pHv7mnTIcyRZ33Z7K |
 
 ## Pre-Deploy Checklist
 

@@ -5,7 +5,7 @@ import { logger } from './utils/logger.js';
 import { router, errorHandler } from './api/routes.js';
 import { getDb, disconnectDb } from './db/client.js';
 import { initBot, stopBot } from './telegram/bot.js';
-import { initScheduler, stopScheduler } from './scheduler/cron.js';
+import { initScheduler, stopScheduler, handleInterruptedRuns } from './scheduler/cron.js';
 import {
   initRedis,
   disconnectRedis,
@@ -126,6 +126,10 @@ async function start() {
 
     // Initialize scheduler for hourly job searches
     initScheduler();
+
+    // Handle any runs that were interrupted by previous restart
+    await handleInterruptedRuns();
+    logger.info('Server', 'Checked for interrupted runs');
 
     // Start observability cleanup scheduler
     startCleanupScheduler();

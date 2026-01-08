@@ -1,8 +1,10 @@
+import { Prisma } from '@prisma/client';
 import { getDb } from '../db/client.js';
 import { logger } from '../utils/logger.js';
 
-export type TriggerType = 'scheduled' | 'manual' | 'initial';
+export type TriggerType = 'scheduled' | 'manual' | 'initial' | 'resumed';
 export type RunStatus = 'running' | 'completed' | 'failed';
+export type RunStage = 'collection' | 'normalization' | 'matching' | 'notification' | 'completed';
 
 /**
  * Format trigger type for display in logs
@@ -17,6 +19,18 @@ export interface RunStats {
   jobsAfterDedup?: number;
   jobsMatched?: number;
   notificationsSent?: number;
+  // Granular error tracking
+  collectionQueriesTotal?: number;
+  collectionQueriesFailed?: number;
+  matchingJobsTotal?: number;
+  matchingJobsFailed?: number;
+}
+
+export interface ProgressUpdate {
+  stage: RunStage;
+  percent: number;
+  detail?: string;
+  checkpoint?: Record<string, unknown>;
 }
 
 export type FailedStage = 'collection' | 'normalization' | 'matching' | 'notification';
@@ -74,8 +88,35 @@ export class RunTracker {
         jobsAfterDedup: stats.jobsAfterDedup,
         jobsMatched: stats.jobsMatched,
         notificationsSent: stats.notificationsSent,
+        collectionQueriesTotal: stats.collectionQueriesTotal,
+        collectionQueriesFailed: stats.collectionQueriesFailed,
+        matchingJobsTotal: stats.matchingJobsTotal,
+        matchingJobsFailed: stats.matchingJobsFailed,
       },
     });
+  }
+
+  /**
+   * Update progress for real-time visibility
+   * Call this throughout the run to show exact stage and %
+   */
+  static async updateProgress(runId: string, progress: ProgressUpdate): Promise<void> {
+    const db = getDb();
+
+    try {
+      await db.subscriptionRun.update({
+        where: { id: runId },
+        data: {
+          currentStage: progress.stage,
+          progressPercent: progress.percent,
+          progressDetail: progress.detail,
+          checkpoint: progress.checkpoint ? JSON.parse(JSON.stringify(progress.checkpoint)) : undefined,
+        },
+      });
+    } catch (error) {
+      // Don't fail the run if progress update fails
+      logger.warn('RunTracker', `Failed to update progress for run ${runId}: ${error}`);
+    }
   }
 
   /**
@@ -106,6 +147,15 @@ export class RunTracker {
         jobsAfterDedup: stats.jobsAfterDedup ?? run.jobsAfterDedup,
         jobsMatched: stats.jobsMatched ?? run.jobsMatched,
         notificationsSent: stats.notificationsSent ?? run.notificationsSent,
+        // Error tracking
+        collectionQueriesTotal: stats.collectionQueriesTotal ?? run.collectionQueriesTotal,
+        collectionQueriesFailed: stats.collectionQueriesFailed ?? run.collectionQueriesFailed,
+        matchingJobsTotal: stats.matchingJobsTotal ?? run.matchingJobsTotal,
+        matchingJobsFailed: stats.matchingJobsFailed ?? run.matchingJobsFailed,
+        // Clear progress (run is done)
+        currentStage: 'completed',
+        progressPercent: 100,
+        progressDetail: null,
       },
     });
 
@@ -239,5 +289,83 @@ export class RunTracker {
         ? completed.reduce((sum, r) => sum + (r.durationMs || 0), 0) / completed.length
         : 0,
     };
+  }
+
+  /**
+   * Find interrupted runs that can be resumed after restart
+   * Returns runs that were 'running' within the last hour and have checkpoint data
+   */
+  static async findInterruptedRuns() {
+    const db = getDb();
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+
+    return db.subscriptionRun.findMany({
+      where: {
+        status: 'running',
+        checkpoint: { not: Prisma.DbNull },
+        startedAt: { gte: oneHourAgo },
+      },
+      include: {
+        subscription: {
+          include: {
+            user: {
+              select: { username: true, chatId: true },
+            },
+          },
+        },
+      },
+      orderBy: { startedAt: 'desc' },
+    });
+  }
+
+  /**
+   * Get currently active (running) runs
+   * Used by admin dashboard for live progress display
+   */
+  static async getActiveRuns() {
+    const db = getDb();
+
+    return db.subscriptionRun.findMany({
+      where: { status: 'running' },
+      include: {
+        subscription: {
+          select: {
+            jobTitles: true,
+            user: {
+              select: { username: true, firstName: true },
+            },
+          },
+        },
+      },
+      orderBy: { startedAt: 'desc' },
+    });
+  }
+
+  /**
+   * Mark all stale running runs as failed
+   * Called on startup to clean up runs that were interrupted without checkpoint
+   */
+  static async failStaleRuns(maxAgeHours: number = 24): Promise<number> {
+    const db = getDb();
+    const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000);
+
+    const result = await db.subscriptionRun.updateMany({
+      where: {
+        status: 'running',
+        startedAt: { lt: cutoff },
+      },
+      data: {
+        status: 'failed',
+        completedAt: new Date(),
+        errorMessage: 'Run exceeded maximum duration - marked as stale',
+        failedStage: 'unknown',
+      },
+    });
+
+    if (result.count > 0) {
+      logger.info('RunTracker', `Marked ${result.count} stale runs as failed`);
+    }
+
+    return result.count;
   }
 }

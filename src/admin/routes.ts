@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { RunTracker } from '../observability/tracker.js';
 
 const router = Router();
 
@@ -687,6 +688,60 @@ router.get('/api/errors', async (req: Request, res: Response) => {
   } catch (error) {
     logger.error('Admin', 'Failed to get errors', error);
     res.status(500).json({ error: 'Failed to get errors' });
+  }
+});
+
+// GET /admin/api/runs/active - Currently running subscriptions with progress
+router.get('/api/runs/active', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+
+    const activeRuns = await db.subscriptionRun.findMany({
+      where: { status: 'running' },
+      orderBy: { startedAt: 'desc' },
+      select: {
+        id: true,
+        startedAt: true,
+        currentStage: true,
+        progressPercent: true,
+        progressDetail: true,
+        jobsCollected: true,
+        jobsMatched: true,
+        subscription: {
+          select: {
+            id: true,
+            jobTitles: true,
+            location: true,
+            user: {
+              select: {
+                username: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    res.json({
+      runs: activeRuns.map((r) => ({
+        runId: r.id,
+        subscriptionId: r.subscription.id,
+        username: r.subscription.user.username,
+        jobTitles: r.subscription.jobTitles.slice(0, 2).join(', '),
+        location: r.subscription.location || 'Remote',
+        stage: r.currentStage || 'starting',
+        progress: r.progressPercent ?? 0,
+        detail: r.progressDetail || 'In progress...',
+        jobsCollected: r.jobsCollected ?? 0,
+        jobsMatched: r.jobsMatched ?? 0,
+        duration: Math.round((Date.now() - r.startedAt.getTime()) / 1000),
+        startedAt: r.startedAt.toISOString(),
+      })),
+      count: activeRuns.length,
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to get active runs', error);
+    res.status(500).json({ error: 'Failed to get active runs' });
   }
 });
 
