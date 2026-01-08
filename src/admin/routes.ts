@@ -180,17 +180,18 @@ router.get('/api/overview', async (req: Request, res: Response) => {
       totalUsers,
       activeToday,
       newThisWeek,
-      totalSubscriptions,
       activeSubscriptions,
       pausedSubscriptions,
     ] = await Promise.all([
       db.telegramUser.count(),
       db.telegramUser.count({ where: { lastActiveAt: { gte: oneDayAgo } } }),
       db.telegramUser.count({ where: { createdAt: { gte: oneWeekAgo } } }),
-      db.searchSubscription.count(),
       db.searchSubscription.count({ where: { isActive: true, isPaused: false } }),
       db.searchSubscription.count({ where: { isActive: true, isPaused: true } }),
     ]);
+
+    // Total is sum of active + paused (excludes deleted/inactive subscriptions)
+    const totalSubscriptions = activeSubscriptions + pausedSubscriptions;
 
     // Get activity metrics for selected period
     const activityMetrics = await getActivityMetrics(db, periodStart, periodEnd);
@@ -267,23 +268,26 @@ router.get('/api/users', async (req: Request, res: Response) => {
           firstName: true,
           createdAt: true,
           lastActiveAt: true,
-          _count: {
-            select: { subscriptions: true },
-          },
         },
       }),
       db.telegramUser.count(),
     ]);
 
-    // Get subscription stats for each user
+    // Get subscription stats for each user (only count isActive: true subscriptions)
     const usersWithStats = await Promise.all(
       users.map(async (user) => {
-        const activeSubsCount = await db.searchSubscription.count({
-          where: { userId: user.id, isActive: true, isPaused: false },
-        });
+        const [activeSubsCount, totalSubsCount] = await Promise.all([
+          db.searchSubscription.count({
+            where: { userId: user.id, isActive: true, isPaused: false },
+          }),
+          db.searchSubscription.count({
+            where: { userId: user.id, isActive: true },
+          }),
+        ]);
         return {
           ...user,
           telegramId: user.telegramId.toString(), // Convert BigInt to string for JSON
+          _count: { subscriptions: totalSubsCount }, // Only count active subscriptions
           activeSubscriptions: activeSubsCount,
         };
       })

@@ -135,17 +135,18 @@ async function getOverviewData(period: Period = '24h', includeComparison: boolea
     totalUsers,
     activeToday,
     newThisWeek,
-    totalSubscriptions,
     activeSubscriptions,
     pausedSubscriptions,
   ] = await Promise.all([
     db.telegramUser.count(),
     db.telegramUser.count({ where: { lastActiveAt: { gte: oneDayAgo } } }),
     db.telegramUser.count({ where: { createdAt: { gte: oneWeekAgo } } }),
-    db.searchSubscription.count(),
     db.searchSubscription.count({ where: { isActive: true, isPaused: false } }),
     db.searchSubscription.count({ where: { isActive: true, isPaused: true } }),
   ]);
+
+  // Total is sum of active + paused (excludes deleted/inactive subscriptions)
+  const totalSubscriptions = activeSubscriptions + pausedSubscriptions;
 
   const activityMetrics = await getActivityMetrics(db, periodStart, periodEnd);
 
@@ -198,22 +199,27 @@ async function getUsersData(): Promise<UserRow[]> {
       username: true,
       createdAt: true,
       lastActiveAt: true,
-      _count: { select: { subscriptions: true } },
     },
   });
 
+  // Get subscription stats for each user (only count isActive: true subscriptions)
   return Promise.all(
     users.map(async (u) => {
-      const activeCount = await db.searchSubscription.count({
-        where: { userId: u.id, isActive: true, isPaused: false },
-      });
+      const [activeCount, totalCount] = await Promise.all([
+        db.searchSubscription.count({
+          where: { userId: u.id, isActive: true, isPaused: false },
+        }),
+        db.searchSubscription.count({
+          where: { userId: u.id, isActive: true },
+        }),
+      ]);
       return {
         id: u.id,
         username: u.username,
         telegramId: u.telegramId,
         createdAt: u.createdAt,
         lastActiveAt: u.lastActiveAt,
-        subscriptionCount: u._count.subscriptions,
+        subscriptionCount: totalCount, // Only count active subscriptions (not deleted)
         activeSubscriptions: activeCount,
       };
     })
