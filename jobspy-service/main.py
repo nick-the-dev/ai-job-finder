@@ -369,6 +369,45 @@ def df_to_jobs(jobs_df) -> list:
 # LinkedIn geoId for worldwide search
 LINKEDIN_WORLDWIDE_GEOID = "92000000"
 
+# Indeed has a hardcoded 10s timeout that causes failures on slow connections
+INDEED_TIMEOUT = 30
+
+
+def patch_indeed_timeout():
+    """Monkey-patch python-jobspy's Indeed scraper to use a longer timeout.
+
+    The Indeed scraper has a hardcoded timeout=10 which causes "Read timed out"
+    errors on slower connections or when Indeed's API is slow.
+    """
+    from jobspy.indeed import Indeed
+
+    original_scrape = Indeed.scrape
+
+    def patched_scrape(self, scraper_input):
+        # Patch the session's post method to use a longer timeout
+        original_post = self.session.post
+
+        def patched_post(*args, **kwargs):
+            # Override the timeout if it's the default 10s
+            if kwargs.get("timeout") == 10:
+                kwargs["timeout"] = INDEED_TIMEOUT
+                logger.info(f"  Indeed: increased timeout to {INDEED_TIMEOUT}s")
+            return original_post(*args, **kwargs)
+
+        self.session.post = patched_post
+
+        try:
+            return original_scrape(self, scraper_input)
+        finally:
+            self.session.post = original_post
+
+    Indeed.scrape = patched_scrape
+    logger.info(f"Patched Indeed scraper timeout: {INDEED_TIMEOUT}s")
+
+
+# Apply Indeed timeout patch at module load
+patch_indeed_timeout()
+
 
 def patch_linkedin_for_worldwide():
     """Monkey-patch python-jobspy's LinkedIn scraper to inject geoId for worldwide search.
