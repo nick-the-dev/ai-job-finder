@@ -237,19 +237,18 @@ async function checkDueSubscriptions(): Promise<void> {
     for (const sub of dueSubscriptions) {
       const userName = sub.user?.firstName || sub.user?.username || 'Unknown';
 
-      // Set nextRunAt to far in the future to prevent re-selection while processing
-      // We'll update it to the correct time after processing completes
-      await db.searchSubscription.update({
-        where: { id: sub.id },
-        data: { nextRunAt: new Date(Date.now() + 24 * 60 * 60 * 1000) }, // 24 hours
-      });
-
-      // Acquire lock (prevents concurrent runs across instances)
+      // Acquire lock FIRST (prevents concurrent runs across instances)
       const lockAcquired = await acquireSubscriptionLock(sub.id);
       if (!lockAcquired) {
         logger.warn('Scheduler', `Skipping ${userName} - subscription already running (locked)`);
         continue;
       }
+
+      // Only update nextRunAt AFTER lock is acquired to prevent being stuck if lock fails
+      await db.searchSubscription.update({
+        where: { id: sub.id },
+        data: { nextRunAt: new Date(Date.now() + 24 * 60 * 60 * 1000) }, // 24 hours
+      });
 
       logger.info('Scheduler', `Processing subscription for ${userName} (${sub.jobTitles.join(', ')})`);
 

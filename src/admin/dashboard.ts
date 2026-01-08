@@ -57,6 +57,10 @@ interface RecentRun {
   failedStage: string | null;
   errorMessage: string | null;
   errorContext: Record<string, unknown> | null;
+  // Progress fields for running subscriptions
+  currentStage: string | null;
+  progressPercent: number;
+  progressDetail: string | null;
 }
 
 function computeStatus(isActive: boolean, isPaused: boolean): string {
@@ -281,6 +285,9 @@ async function getRecentRuns(): Promise<RecentRun[]> {
       failedStage: true,
       errorMessage: true,
       errorContext: true,
+      currentStage: true,
+      progressPercent: true,
+      progressDetail: true,
       subscription: {
         select: {
           jobTitles: true,
@@ -303,6 +310,9 @@ async function getRecentRuns(): Promise<RecentRun[]> {
     failedStage: r.failedStage,
     errorMessage: r.errorMessage,
     errorContext: r.errorContext as Record<string, unknown> | null,
+    currentStage: r.currentStage,
+    progressPercent: r.progressPercent ?? 0,
+    progressDetail: r.progressDetail,
   }));
 }
 
@@ -499,6 +509,43 @@ export async function generateDashboardHtml(periodParam?: string): Promise<strin
       content: '▼ ';
     }
     .error-details:hover { background: transparent !important; }
+
+    /* Progress bar styles */
+    .progress-container {
+      width: 100%;
+      height: 18px;
+      background: #334155;
+      border-radius: 4px;
+      position: relative;
+      overflow: hidden;
+    }
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #3b82f6, #22c55e);
+      border-radius: 4px;
+      transition: width 0.3s ease;
+    }
+    .progress-text {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 11px;
+      font-weight: 500;
+      color: white;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+    }
+    .progress-detail {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-top: 4px;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .running-row { background: #1e3a5f !important; }
+    .running-row:hover { background: #234876 !important; }
   </style>
 </head>
 <body>
@@ -629,14 +676,22 @@ export async function generateDashboardHtml(periodParam?: string): Promise<strin
           ${recentRuns
             .map(
               (r, i) => `
-            <tr class="${r.status === 'failed' ? 'failed-row' : ''}" ${r.status === 'failed' ? `onclick="toggleError(${i})"` : ''} style="${r.status === 'failed' ? 'cursor:pointer' : ''}">
+            <tr class="${r.status === 'failed' ? 'failed-row' : r.status === 'running' ? 'running-row' : ''}" ${r.status === 'failed' ? `onclick="toggleError(${i})"` : ''} style="${r.status === 'failed' ? 'cursor:pointer' : ''}">
               <td>${escapeHtml(r.username) || '<em>No username</em>'}</td>
               <td class="truncate" title="${escapeHtml(r.subJobTitles.join(', '))}">${escapeHtml(r.subJobTitles.slice(0, 2).join(', '))}${r.subJobTitles.length > 2 ? '...' : ''}</td>
-              <td>${statusBadge(r.status)}${r.failedStage ? ` <span style="color:#94a3b8;font-size:11px">@ ${escapeHtml(r.failedStage)}</span>` : ''}</td>
+              <td>
+                ${r.status === 'running' ? `
+                  <div class="progress-container">
+                    <div class="progress-bar" style="width: ${r.progressPercent}%"></div>
+                    <span class="progress-text">${r.progressPercent}% - ${escapeHtml(r.currentStage) || 'starting'}</span>
+                  </div>
+                  <div class="progress-detail" title="${escapeHtml(r.progressDetail)}">${escapeHtml(r.progressDetail) || 'In progress...'}</div>
+                ` : `${statusBadge(r.status)}${r.failedStage ? ` <span style="color:#94a3b8;font-size:11px">@ ${escapeHtml(r.failedStage)}</span>` : ''}`}
+              </td>
               <td>${r.jobsCollected}</td>
               <td>${r.jobsMatched}</td>
               <td>${r.notificationsSent}</td>
-              <td>${r.durationMs ? `${(r.durationMs / 1000).toFixed(1)}s` : '-'}</td>
+              <td>${r.status === 'running' ? `${Math.round((Date.now() - r.startedAt.getTime()) / 1000)}s` : r.durationMs ? `${(r.durationMs / 1000).toFixed(1)}s` : '-'}</td>
               <td>${formatTimeAgo(r.startedAt)}</td>
             </tr>
             ${r.status === 'failed' ? `
@@ -696,6 +751,14 @@ export async function generateDashboardHtml(periodParam?: string): Promise<strin
         errorRow.style.display = 'none';
         parentRow.classList.remove('expanded');
       }
+    }
+
+    // Auto-refresh if there are running subscriptions
+    const hasRunning = ${recentRuns.some(r => r.status === 'running')};
+    if (hasRunning) {
+      setTimeout(() => {
+        window.location.reload();
+      }, 10000); // Refresh every 10 seconds when runs are active
     }
   </script>
 </body>
