@@ -4,6 +4,10 @@ import { JobMatchSchema, JobMatchJsonSchema, type JobMatchOutput } from '../sche
 import type { NormalizedJob, JobMatchResult } from '../core/types.js';
 import type { IAgent, VerifiedOutput } from '../core/interfaces.js';
 
+// Maximum description length to send to LLM (chars)
+// Long descriptions with legal text, benefits, etc. can hang the API
+const MAX_DESCRIPTION_LENGTH = 6000;
+
 interface MatcherInput {
   job: NormalizedJob;
   resumeText: string;
@@ -61,6 +65,14 @@ Salary extraction guidelines:
 - Set isHourly: true for hourly rates, false for annual salaries
 - If no salary is mentioned anywhere in the description, return null`;
 
+    // Truncate very long descriptions to prevent LLM hangs/timeouts
+    let description = job.description || '';
+    const wasTruncated = description.length > MAX_DESCRIPTION_LENGTH;
+    if (wasTruncated) {
+      description = description.substring(0, MAX_DESCRIPTION_LENGTH) + '\n\n[Description truncated for analysis]';
+      logger.debug('Matcher', `Truncated description for "${job.title}" @ ${job.company}: ${job.description.length} → ${MAX_DESCRIPTION_LENGTH} chars`);
+    }
+
     const userPrompt = `Analyze this job against the candidate's resume.
 
 JOB POSTING:
@@ -71,7 +83,7 @@ Remote: ${job.isRemote ? 'Yes' : 'No'}
 ${job.salaryMin ? `Salary: ${job.salaryCurrency || 'USD'} ${job.salaryMin}${job.salaryMax ? ` - ${job.salaryMax}` : ''}` : ''}
 
 Description:
-${job.description}
+${description}
 
 ---
 
