@@ -15,10 +15,14 @@ interface Message {
   content: string;
 }
 
+// Request timeout (60 seconds should be enough for any LLM call)
+const REQUEST_TIMEOUT_MS = 60000;
+
 interface LLMOptions {
   temperature?: number;
   maxTokens?: number;
   maxRetries?: number;
+  timeout?: number;
 }
 
 /**
@@ -66,7 +70,7 @@ export async function callLLM<T>(
   jsonSchema: object,
   options: LLMOptions = {}
 ): Promise<T> {
-  const { temperature = 0.1, maxTokens = 2000, maxRetries = MAX_RETRIES } = options;
+  const { temperature = 0.1, maxTokens = 2000, maxRetries = MAX_RETRIES, timeout = REQUEST_TIMEOUT_MS } = options;
 
   // Add instruction to respond with JSON
   const lastMessage = messages[messages.length - 1];
@@ -104,6 +108,7 @@ Respond ONLY with a valid JSON object. No other text.`,
             'HTTP-Referer': 'https://github.com/ai-job-finder',
             'X-Title': 'AI Job Finder',
           },
+          timeout, // Prevent hanging on slow/stuck API calls
         }
       );
 
@@ -146,23 +151,26 @@ Respond ONLY with a valid JSON object. No other text.`,
       if (axios.isAxiosError(error)) {
         const status = error.response?.status;
         const retryAfter = error.response?.headers?.['retry-after'];
+        const isTimeout = error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT';
 
-        // Retry on rate limit (429) or server errors (5xx)
-        if (status === 429 || (status && status >= 500)) {
+        // Retry on timeout, rate limit (429), or server errors (5xx)
+        if (isTimeout || status === 429 || (status && status >= 500)) {
           if (attempt < maxRetries) {
             const delay = getBackoffDelay(attempt, retryAfter ? parseInt(retryAfter) : undefined);
-            logger.warn('LLM', `Rate limited (${status}), waiting ${Math.round(delay / 1000)}s before retry...`);
+            const reason = isTimeout ? 'timeout' : `status ${status}`;
+            logger.warn('LLM', `Request failed (${reason}), waiting ${Math.round(delay / 1000)}s before retry...`);
             await sleep(delay);
-            lastError = new Error(`LLM API error: ${status}`);
+            lastError = new Error(`LLM API error: ${reason}`);
             continue;
           }
         }
 
         logger.error('LLM', 'API error', {
           status,
+          code: error.code,
           data: error.response?.data,
         });
-        throw new Error(`LLM API error: ${status}`);
+        throw new Error(`LLM API error: ${isTimeout ? 'timeout' : status}`);
       }
       throw error;
     }
