@@ -298,7 +298,7 @@ export class QueueService {
         salaryMax: job.salaryMax,
         salaryCurrency: job.salaryCurrency,
         applicationUrl: job.applicationUrl,
-        postedDate: job.postedDate?.toISOString(),
+        postedDate: job.postedDate instanceof Date ? job.postedDate.toISOString() : job.postedDate,
         source: job.source,
         sourceId: job.sourceId,
       },
