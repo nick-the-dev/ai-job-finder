@@ -20,10 +20,13 @@ const CLEANUP_SCHEDULE = '*/5 * * * *';
 const MAX_PER_MINUTE = 5;
 
 // Runs stuck for longer than this are considered failed (ms)
-const STUCK_RUN_THRESHOLD = 24 * 60 * 60 * 1000; // 24 hours
+const STUCK_RUN_THRESHOLD = 2 * 60 * 60 * 1000; // 2 hours (reduced from 24h for faster detection)
 
-// Default lock TTL in seconds (10 minutes - should be longer than max expected run time)
-const LOCK_TTL_SECONDS = 600;
+// Default lock TTL in seconds (30 minutes - should be longer than max expected run time)
+const LOCK_TTL_SECONDS = 1800; // Increased from 10 min to handle long runs
+
+// Maximum run duration before forced termination (ms)
+const MAX_RUN_DURATION_MS = 30 * 60 * 1000; // 30 minutes max per run
 
 // Redis key prefix for subscription locks
 const LOCK_KEY_PREFIX = 'lock:subscription:';
@@ -236,13 +239,18 @@ async function checkDueSubscriptions(): Promise<void> {
 
     for (const sub of dueSubscriptions) {
       const userName = sub.user?.firstName || sub.user?.username || 'Unknown';
+      const subIdShort = sub.id.slice(0, 8);
+
+      logger.info('Scheduler', `[${subIdShort}] >>> Attempting lock for ${userName} (${sub.jobTitles.join(', ')})`);
 
       // Acquire lock FIRST (prevents concurrent runs across instances)
       const lockAcquired = await acquireSubscriptionLock(sub.id);
       if (!lockAcquired) {
-        logger.warn('Scheduler', `Skipping ${userName} - subscription already running (locked)`);
+        logger.warn('Scheduler', `[${subIdShort}] LOCK FAILED for ${userName} - subscription already running (locked)`);
         continue;
       }
+
+      logger.info('Scheduler', `[${subIdShort}] LOCK ACQUIRED for ${userName}`);
 
       // Only update nextRunAt AFTER lock is acquired to prevent being stuck if lock fails
       await db.searchSubscription.update({
@@ -250,11 +258,26 @@ async function checkDueSubscriptions(): Promise<void> {
         data: { nextRunAt: new Date(Date.now() + 24 * 60 * 60 * 1000) }, // 24 hours
       });
 
-      logger.info('Scheduler', `Processing subscription for ${userName} (${sub.jobTitles.join(', ')})`);
+      logger.info('Scheduler', `[${subIdShort}] >>> RUN START for ${userName} (${sub.jobTitles.join(', ')})`);
+
+      const startTime = Date.now();
+      let runCompleted = false;
+      let runError: Error | null = null;
 
       try {
-        const startTime = Date.now();
-        const result = await runSingleSubscriptionSearch(sub.id, 'scheduled');
+        // Wrap with timeout to prevent infinite hangs
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error(`Run timed out after ${MAX_RUN_DURATION_MS / 1000 / 60} minutes`));
+          }, MAX_RUN_DURATION_MS);
+        });
+
+        const result = await Promise.race([
+          runSingleSubscriptionSearch(sub.id, 'scheduled'),
+          timeoutPromise,
+        ]);
+
+        runCompleted = true;
         const duration = ((Date.now() - startTime) / 1000).toFixed(1);
 
         // Success: schedule next run at normal interval
@@ -269,10 +292,14 @@ async function checkDueSubscriptions(): Promise<void> {
 
         logger.info(
           'Scheduler',
-          `Completed for ${userName} in ${duration}s | ${result.matchesFound} matches | ${result.notificationsSent} notifications | Next run: ${nextRunAt.toISOString()}`
+          `[${subIdShort}] <<< RUN COMPLETE for ${userName} in ${duration}s | ${result.matchesFound} matches | ${result.notificationsSent} notifications | Next run: ${nextRunAt.toISOString()}`
         );
       } catch (error) {
-        logger.error('Scheduler', `Failed for ${userName}`, error);
+        runError = error instanceof Error ? error : new Error(String(error));
+        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+        const isTimeout = runError.message.includes('timed out');
+
+        logger.error('Scheduler', `[${subIdShort}] <<< RUN FAILED for ${userName} after ${duration}s (timeout: ${isTimeout})`, error);
 
         // Failure: schedule retry in 5 minutes (shorter than normal interval)
         const retryDelay = 5 * 60 * 1000; // 5 minutes
@@ -282,9 +309,10 @@ async function checkDueSubscriptions(): Promise<void> {
           data: { nextRunAt: retryAt },
         });
 
-        logger.info('Scheduler', `Scheduled retry for ${userName} at ${retryAt.toISOString()}`);
+        logger.info('Scheduler', `[${subIdShort}] Scheduled retry for ${userName} at ${retryAt.toISOString()}`);
       } finally {
         await releaseSubscriptionLock(sub.id);
+        logger.info('Scheduler', `[${subIdShort}] LOCK RELEASED for ${userName}`);
       }
     }
   } catch (error) {
