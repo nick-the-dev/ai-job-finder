@@ -12,11 +12,15 @@ const collector = new CollectorService();
  */
 export async function processCollectionJob(job: Job<CollectionJobData>): Promise<RawJob[]> {
   const { query, location, isRemote, jobType, limit, source, skipCache, datePosted, requestId } = job.data;
+  const workerStartTime = Date.now();
 
   const jobTypeLabel = jobType ? ` [${jobType}]` : '';
-  logger.info('Worker:Collection', `[${requestId}] Processing: "${query}"${jobTypeLabel} (${source}, limit: ${limit})`);
+  logger.info('Worker:Collection', `[${requestId}] >>> WORKER START (jobId=${job.id}): "${query}"${jobTypeLabel} @ ${location || 'any'} (${source}, limit: ${limit})`);
 
   try {
+    logger.info('Worker:Collection', `[${requestId}] Calling collector.execute()...`);
+    const collectStartTime = Date.now();
+
     const jobs = await collector.execute({
       query,
       location,
@@ -28,10 +32,13 @@ export async function processCollectionJob(job: Job<CollectionJobData>): Promise
       datePosted,
     });
 
-    logger.info('Worker:Collection', `[${requestId}] Collected ${jobs.length} jobs`);
+    const collectDuration = Date.now() - collectStartTime;
+    const totalDuration = Date.now() - workerStartTime;
+    logger.info('Worker:Collection', `[${requestId}] <<< WORKER DONE (jobId=${job.id}): Collected ${jobs.length} jobs in ${collectDuration}ms (total: ${totalDuration}ms)`);
     return jobs;
   } catch (error) {
-    logger.error('Worker:Collection', `[${requestId}] Failed`, error);
+    const totalDuration = Date.now() - workerStartTime;
+    logger.error('Worker:Collection', `[${requestId}] <<< WORKER FAILED (jobId=${job.id}) after ${totalDuration}ms`, error);
     throw error;
   }
 }

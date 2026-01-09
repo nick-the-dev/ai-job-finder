@@ -299,9 +299,10 @@ async function checkDueSubscriptions(): Promise<void> {
  * This function:
  * 1. Fails any stale runs (older than 24 hours)
  * 2. Finds recent interrupted runs with checkpoint data
- * 3. Marks them as failed with a descriptive message
- * 4. Releases their locks so they can re-run on next schedule
- * 5. Optionally schedules an immediate re-run for the subscription
+ * 3. Finds runs stuck without checkpoint (stuck at "Starting collection")
+ * 4. Marks them as failed with a descriptive message
+ * 5. Releases their locks so they can re-run on next schedule
+ * 6. Schedules an immediate re-run for the subscription
  *
  * This is called on startup to ensure no runs are permanently stuck.
  */
@@ -315,48 +316,61 @@ export async function handleInterruptedRuns(): Promise<void> {
       logger.info('Scheduler', `Cleaned up ${staleCount} stale run(s) on startup`);
     }
 
-    // Step 2: Find recent interrupted runs (within last hour)
+    // Step 2: Find recent interrupted runs WITH checkpoint (within last hour)
     const interruptedRuns = await RunTracker.findInterruptedRuns();
 
-    if (interruptedRuns.length === 0) {
-      logger.debug('Scheduler', 'No interrupted runs to handle');
+    // Step 3: Find runs stuck WITHOUT checkpoint (running > 10 min with no checkpoint)
+    const stuckRuns = await RunTracker.findStuckRunsWithoutCheckpoint(10);
+
+    // Combine both sets
+    const allStuckRuns = [...interruptedRuns, ...stuckRuns];
+
+    if (allStuckRuns.length === 0) {
+      logger.debug('Scheduler', 'No interrupted/stuck runs to handle');
       return;
     }
 
-    logger.info('Scheduler', `Found ${interruptedRuns.length} interrupted run(s) from previous instance`);
+    logger.info('Scheduler', `Found ${interruptedRuns.length} interrupted + ${stuckRuns.length} stuck runs from previous instance`);
 
-    for (const run of interruptedRuns) {
+    for (const run of allStuckRuns) {
       const checkpoint = run.checkpoint as Record<string, unknown> | null;
       const stage = run.currentStage || 'unknown';
       const percent = run.progressPercent || 0;
       const username = run.subscription.user?.username || 'unknown';
+      const hasCheckpoint = checkpoint !== null;
 
       // Calculate how long it was running before interruption
       const durationMs = Date.now() - run.startedAt.getTime();
       const durationMin = Math.round(durationMs / 1000 / 60);
 
       // Log what was interrupted
+      const runType = hasCheckpoint ? 'Interrupted' : 'Stuck (no checkpoint)';
       logger.info(
         'Scheduler',
-        `Interrupted run ${run.id} for @${username}: stage=${stage}, progress=${percent}%, duration=${durationMin}min`
+        `${runType} run ${run.id} for @${username}: stage=${stage}, progress=${percent}%, duration=${durationMin}min`
       );
 
       // Mark the run as failed with descriptive message
+      const errorMessage = hasCheckpoint
+        ? `Run interrupted by server restart at ${stage} stage (${percent}% complete)`
+        : `Run stuck at ${stage} stage for ${durationMin} minutes (no progress, likely blocked on queue)`;
+
       await db.subscriptionRun.update({
         where: { id: run.id },
         data: {
           status: 'failed',
           completedAt: new Date(),
           durationMs,
-          errorMessage: `Run interrupted by server restart at ${stage} stage (${percent}% complete)`,
+          errorMessage,
           failedStage: stage,
           // Preserve checkpoint in errorContext for debugging
           errorContext: JSON.parse(JSON.stringify({
-            reason: 'server_restart',
+            reason: hasCheckpoint ? 'server_restart' : 'stuck_no_progress',
             interruptedAt: new Date().toISOString(),
             stage,
             percent,
             checkpoint,
+            progressDetail: run.progressDetail,
           })),
         },
       });
@@ -373,11 +387,11 @@ export async function handleInterruptedRuns(): Promise<void> {
 
       logger.info(
         'Scheduler',
-        `Marked interrupted run ${run.id} as failed and scheduled immediate re-run for @${username}`
+        `Marked ${runType.toLowerCase()} run ${run.id} as failed and scheduled immediate re-run for @${username}`
       );
     }
 
-    logger.info('Scheduler', `Handled ${interruptedRuns.length} interrupted run(s) - they will re-run shortly`);
+    logger.info('Scheduler', `Handled ${allStuckRuns.length} interrupted/stuck run(s) - they will re-run shortly`);
   } catch (error) {
     logger.error('Scheduler', 'Failed to handle interrupted runs', error);
   }

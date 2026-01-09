@@ -105,6 +105,8 @@ export class QueueService {
     priority: Priority = PRIORITY.API_REQUEST
   ): Promise<RawJob[]> {
     const requestId = generateRequestId();
+    const startTime = Date.now();
+    logger.info('QueueService', `[${requestId}] >>> enqueueCollection START: "${params.query}" @ ${params.location || 'any'} (cache=${requestCache.size} entries)`);
 
     // Check in-memory request cache for deduplication (unless skipCache is true)
     if (!params.skipCache) {
@@ -112,11 +114,20 @@ export class QueueService {
       const cached = requestCache.get(cacheKey);
 
       if (cached && Date.now() - cached.timestamp < REQUEST_CACHE_TTL) {
-        logger.debug('QueueService', `[${requestId}] Request cache hit for "${params.query}" (key: ${cacheKey})`);
-        // Return a copy of the cached jobs to prevent mutation issues
-        const cachedJobs = await cached.promise;
-        return [...cachedJobs];
+        const cacheAge = Math.round((Date.now() - cached.timestamp) / 1000);
+        logger.info('QueueService', `[${requestId}] CACHE HIT for "${params.query}" (key: ${cacheKey}, age: ${cacheAge}s) - waiting for existing promise...`);
+        try {
+          // Return a copy of the cached jobs to prevent mutation issues
+          const cachedJobs = await cached.promise;
+          logger.info('QueueService', `[${requestId}] CACHE RESOLVED for "${params.query}" with ${cachedJobs.length} jobs in ${Date.now() - startTime}ms`);
+          return [...cachedJobs];
+        } catch (cacheError) {
+          logger.error('QueueService', `[${requestId}] CACHE PROMISE FAILED for "${params.query}" after ${Date.now() - startTime}ms`, cacheError);
+          throw cacheError;
+        }
       }
+
+      logger.info('QueueService', `[${requestId}] CACHE MISS for "${params.query}" (key: ${cacheKey}) - creating new request`);
 
       // Create the actual request and cache it
       const requestPromise = this.executeCollection(params, requestId, priority);
@@ -126,16 +137,22 @@ export class QueueService {
       });
 
       try {
-        return await requestPromise;
+        const result = await requestPromise;
+        logger.info('QueueService', `[${requestId}] <<< enqueueCollection DONE: "${params.query}" returned ${result.length} jobs in ${Date.now() - startTime}ms`);
+        return result;
       } catch (error) {
         // Remove from cache on error so it can be retried
         requestCache.delete(cacheKey);
+        logger.error('QueueService', `[${requestId}] <<< enqueueCollection FAILED: "${params.query}" after ${Date.now() - startTime}ms`, error);
         throw error;
       }
     }
 
     // skipCache=true: bypass request cache
-    return this.executeCollection(params, requestId, priority);
+    logger.info('QueueService', `[${requestId}] SKIP CACHE - executing directly`);
+    const result = await this.executeCollection(params, requestId, priority);
+    logger.info('QueueService', `[${requestId}] <<< enqueueCollection DONE (no cache): "${params.query}" returned ${result.length} jobs in ${Date.now() - startTime}ms`);
+    return result;
   }
 
   /**
@@ -146,17 +163,30 @@ export class QueueService {
     requestId: string,
     priority: Priority
   ): Promise<RawJob[]> {
+    const execStartTime = Date.now();
     const { collectionQueue } = getQueues();
+
+    logger.info('QueueService', `[${requestId}] executeCollection: checking queue availability...`);
 
     if (!collectionQueue || !isRedisConnected()) {
       if (config.QUEUE_FALLBACK_ENABLED) {
-        logger.debug('QueueService', `[${requestId}] Fallback: direct collection`);
+        logger.info('QueueService', `[${requestId}] executeCollection: Redis unavailable, using FALLBACK`);
         return this.directCollection(params);
       }
       throw new Error('Queue unavailable and fallback disabled');
     }
 
-    logger.debug('QueueService', `[${requestId}] Enqueueing collection: "${params.query}"`);
+    // Get queue stats for visibility
+    const [waiting, active, completed, failed] = await Promise.all([
+      collectionQueue.getWaitingCount(),
+      collectionQueue.getActiveCount(),
+      collectionQueue.getCompletedCount(),
+      collectionQueue.getFailedCount(),
+    ]);
+    logger.info('QueueService', `[${requestId}] executeCollection: Queue stats - waiting=${waiting}, active=${active}, completed=${completed}, failed=${failed}`);
+
+    logger.info('QueueService', `[${requestId}] executeCollection: Adding job to queue for "${params.query}"...`);
+    const addStartTime = Date.now();
 
     const job = await collectionQueue.add(
       { ...params, requestId, priority },
@@ -173,13 +203,29 @@ export class QueueService {
       }
     );
 
+    const jobId = job.id;
+    logger.info('QueueService', `[${requestId}] executeCollection: Job added to queue (jobId=${jobId}) in ${Date.now() - addStartTime}ms, now waiting for result...`);
+
     try {
+      // Set up a progress logger while waiting
+      const progressInterval = setInterval(async () => {
+        const jobState = await job.getState();
+        const elapsed = Math.round((Date.now() - execStartTime) / 1000);
+        logger.info('QueueService', `[${requestId}] executeCollection: WAITING for jobId=${jobId}, state=${jobState}, elapsed=${elapsed}s`);
+      }, 10000); // Log every 10 seconds
+
       const result = await waitWithTimeout<RawJob[]>(job, COLLECTION_TIMEOUT);
+
+      clearInterval(progressInterval);
+      logger.info('QueueService', `[${requestId}] executeCollection: Job ${jobId} completed with ${result.length} jobs in ${Date.now() - execStartTime}ms`);
       return result;
     } catch (error) {
       // Log timeout errors with context for debugging
+      const jobState = await job.getState().catch(() => 'unknown');
       if (error instanceof Error && error.message.includes('timed out')) {
-        logger.error('QueueService', `[${requestId}] Collection timed out for "${params.query}" (location: ${params.location || 'any'})`, error);
+        logger.error('QueueService', `[${requestId}] executeCollection: TIMEOUT for "${params.query}" (jobId=${jobId}, state=${jobState}, elapsed=${Date.now() - execStartTime}ms)`);
+      } else {
+        logger.error('QueueService', `[${requestId}] executeCollection: FAILED for "${params.query}" (jobId=${jobId}, state=${jobState})`, error);
       }
       throw error;
     }

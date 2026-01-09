@@ -319,6 +319,34 @@ export class RunTracker {
   }
 
   /**
+   * Find runs that are stuck without a checkpoint (early failure)
+   * These runs got stuck before saving any checkpoint data and should be failed
+   * @param minAgeMinutes - Only return runs older than this (default: 10 minutes)
+   */
+  static async findStuckRunsWithoutCheckpoint(minAgeMinutes: number = 10) {
+    const db = getDb();
+    const cutoff = new Date(Date.now() - minAgeMinutes * 60 * 1000);
+
+    return db.subscriptionRun.findMany({
+      where: {
+        status: 'running',
+        checkpoint: { equals: Prisma.DbNull },
+        startedAt: { lt: cutoff },
+      },
+      include: {
+        subscription: {
+          include: {
+            user: {
+              select: { username: true, chatId: true },
+            },
+          },
+        },
+      },
+      orderBy: { startedAt: 'desc' },
+    });
+  }
+
+  /**
    * Get currently active (running) runs
    * Used by admin dashboard for live progress display
    */
