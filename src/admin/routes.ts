@@ -984,6 +984,64 @@ router.post('/api/diagnostics/fail-stuck', async (req: Request, res: Response) =
   }
 });
 
+// POST /admin/api/diagnostics/clear-lock/:subscriptionId - Manually clear a Redis lock
+// Use this when a run is stuck but the run record was already marked as failed
+router.post('/api/diagnostics/clear-lock/:subscriptionId', async (req: Request, res: Response) => {
+  try {
+    const { subscriptionId } = req.params;
+
+    if (!subscriptionId || subscriptionId.length < 8) {
+      res.status(400).json({ error: 'Invalid subscription ID' });
+      return;
+    }
+
+    await releaseSubscriptionLock(subscriptionId);
+    logger.info('Admin', `Manually cleared lock for subscription ${subscriptionId.slice(0, 8)}`);
+
+    res.json({
+      message: `Lock cleared for subscription ${subscriptionId.slice(0, 8)}`,
+      subscriptionId,
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to clear lock', error);
+    res.status(500).json({ error: 'Failed to clear lock' });
+  }
+});
+
+// POST /admin/api/diagnostics/clear-all-locks - Clear all Redis locks (emergency recovery)
+router.post('/api/diagnostics/clear-all-locks', async (req: Request, res: Response) => {
+  try {
+    const redis = getRedis();
+
+    if (!redis || !isRedisConnected()) {
+      res.status(503).json({ error: 'Redis not connected' });
+      return;
+    }
+
+    // Find all lock keys
+    const lockKeys = await redis.keys('lock:subscription:*');
+
+    if (lockKeys.length === 0) {
+      res.json({ message: 'No locks to clear', count: 0 });
+      return;
+    }
+
+    // Delete all locks
+    await redis.del(...lockKeys);
+
+    logger.info('Admin', `Cleared ${lockKeys.length} subscription locks (emergency recovery)`);
+
+    res.json({
+      message: `Cleared ${lockKeys.length} locks`,
+      count: lockKeys.length,
+      locks: lockKeys.map(k => k.replace('lock:subscription:', '').slice(0, 8)),
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to clear all locks', error);
+    res.status(500).json({ error: 'Failed to clear all locks' });
+  }
+});
+
 // SPA catch-all: serve index.html for any non-API route
 // This enables client-side routing in the React app
 router.get('*', (_req: Request, res: Response) => {

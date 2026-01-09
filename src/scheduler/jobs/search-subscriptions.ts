@@ -639,6 +639,8 @@ export async function runSingleSubscriptionSearch(
         jobMatchId = cached.id;
         subLogger.debug('Matching', `Cache HIT for "${job.title}": score=${matchResult.score}`);
       } else {
+        // Log BEFORE calling LLM so we know which job is being processed if it hangs
+        logger.info('Scheduler', `[${triggerLabel}] Matching job ${jobIndex + 1}/${totalJobsToMatch}: "${job.title}" @ ${job.company} (desc: ${job.description?.length || 0} chars)`);
         subLogger.debug('Matching', `Cache MISS for "${job.title}" - calling LLM matcher`);
         matchResult = await matcher.execute({ job, resumeText: sub.resumeText });
         subLogger.debug('Matching', `LLM match result for "${job.title}": score=${matchResult.score}`, {
@@ -1149,6 +1151,8 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
             subLogger.debug('Matching', `Cache HIT for "${job.title}": score=${matchResult.score}`);
           } else {
             // Need to create new match via LLM
+            // Log BEFORE calling LLM so we know which job is being processed if it hangs
+            logger.info('Scheduler', `  Matching job ${jobIndex + 1}/${totalJobsToMatch}: "${job.title}" @ ${job.company} (desc: ${job.description?.length || 0} chars)`);
             subLogger.debug('Matching', `Cache MISS for "${job.title}" - calling LLM matcher`);
             matchResult = await matcher.execute({
               job,
