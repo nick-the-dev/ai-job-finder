@@ -479,6 +479,9 @@ export async function runSingleSubscriptionSearch(
   errorContext.query = sub.jobTitles.join(', ');
   errorContext.location = sub.location ?? (normalizedLocations ? LocationNormalizerAgent.formatForDisplaySingleLine(normalizedLocations) : undefined);
 
+  const stageStartTime = Date.now();
+  logger.info('Scheduler', `[${triggerLabel}] >>> STAGE: collection - Starting for ${sub.jobTitles.length} job titles`);
+
   await RunTracker.updateProgress(runId, {
     stage: 'collection',
     percent: 1,
@@ -518,7 +521,8 @@ export async function runSingleSubscriptionSearch(
   }
 
   errorContext.partialResults!.jobsCollected = allRawJobs.length;
-  logger.info('Scheduler', `[${triggerLabel}] Total raw jobs collected: ${allRawJobs.length} (${collectionResult.queriesFailed}/${collectionResult.queriesTotal} queries failed)`);
+  const collectionDuration = ((Date.now() - stageStartTime) / 1000).toFixed(1);
+  logger.info('Scheduler', `[${triggerLabel}] <<< STAGE: collection - Completed in ${collectionDuration}s: ${allRawJobs.length} jobs (${collectionResult.queriesFailed}/${collectionResult.queriesTotal} queries failed)`);
   subLogger.debug('Collection', `Collection complete: ${allRawJobs.length} raw jobs, ${collectionResult.queriesFailed} failed queries`);
 
   // Recalculate progress allocations now that we know actual job count
@@ -528,6 +532,9 @@ export async function runSingleSubscriptionSearch(
 
   // Stage 2: Normalization (dynamic % based on job count)
   errorContext.stage = 'normalization';
+  const normalizationStartTime = Date.now();
+  logger.info('Scheduler', `[${triggerLabel}] >>> STAGE: normalization - Deduplicating ${allRawJobs.length} jobs`);
+
   await RunTracker.updateProgress(runId, {
     stage: 'normalization',
     percent: progress.normalizationStart(),
@@ -575,10 +582,15 @@ export async function runSingleSubscriptionSearch(
     subLogger.debug('Filter', `Location filter: removed ${locationFiltered} jobs that didn't match location criteria`);
   }
 
+  const normalizationDuration = ((Date.now() - normalizationStartTime) / 1000).toFixed(1);
+  logger.info('Scheduler', `[${triggerLabel}] <<< STAGE: normalization - Completed in ${normalizationDuration}s: ${normalizedJobs.length} jobs after filters`);
   subLogger.debug('Filter', `After all filters: ${normalizedJobs.length} jobs ready for matching`);
 
   // Stage 3: Matching (dynamic % based on job count - usually the largest phase)
   errorContext.stage = 'matching';
+  const matchingStartTime = Date.now();
+  logger.info('Scheduler', `[${triggerLabel}] >>> STAGE: matching - Processing ${normalizedJobs.length} jobs`);
+
   const newMatches: MatchItem[] = [];
   const stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 };
 
@@ -719,6 +731,8 @@ export async function runSingleSubscriptionSearch(
     }
   }
 
+  const matchingDuration = ((Date.now() - matchingStartTime) / 1000).toFixed(1);
+  logger.info('Scheduler', `[${triggerLabel}] <<< STAGE: matching - Completed in ${matchingDuration}s: ${newMatches.length} new matches, ${matchingErrors} errors`);
   subLogger.debug('Matching', `Matching complete: processed ${matchedCount} jobs, found ${newMatches.length} new matches, ${matchingErrors} errors`);
 
   // Clear job-specific context after matching loop
@@ -741,6 +755,9 @@ export async function runSingleSubscriptionSearch(
   if (newMatches.length > 0) {
     // Stage 4: Notification (final phase)
     errorContext.stage = 'notification';
+    const notificationStartTime = Date.now();
+    logger.info('Scheduler', `[${triggerLabel}] >>> STAGE: notification - Sending ${newMatches.length} notifications`);
+
     await RunTracker.updateProgress(runId, {
       stage: 'notification',
       percent: progress.notificationStart(),
@@ -779,8 +796,11 @@ export async function runSingleSubscriptionSearch(
     });
 
     notificationsSent = created.count;
+    const notificationDuration = ((Date.now() - notificationStartTime) / 1000).toFixed(1);
+    logger.info('Scheduler', `[${triggerLabel}] <<< STAGE: notification - Completed in ${notificationDuration}s: ${notificationsSent} notifications sent`);
     subLogger.debug('Notification', `Notification stage complete: ${notificationsSent} notifications recorded`);
   } else {
+    logger.info('Scheduler', `[${triggerLabel}] <<< STAGE: notification - Skipped (no new matches)`);
     subLogger.debug('Notification', 'No new matches to send');
   }
 

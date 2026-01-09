@@ -6,6 +6,10 @@ import { logger } from '../utils/logger.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { RunTracker } from '../observability/tracker.js';
+import { isSubscriptionRunning, releaseSubscriptionLock } from '../scheduler/cron.js';
+import { isRedisConnected, getRedis } from '../queue/redis.js';
+import { queueService } from '../queue/service.js';
+import { getQueues } from '../queue/queues.js';
 
 const router = Router();
 
@@ -742,6 +746,239 @@ router.get('/api/runs/active', async (req: Request, res: Response) => {
   } catch (error) {
     logger.error('Admin', 'Failed to get active runs', error);
     res.status(500).json({ error: 'Failed to get active runs' });
+  }
+});
+
+// GET /admin/api/diagnostics - System diagnostics for debugging stuck runs
+router.get('/api/diagnostics', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+
+    // Get all runs that are in "running" state
+    const runningRuns = await db.subscriptionRun.findMany({
+      where: { status: 'running' },
+      orderBy: { startedAt: 'asc' },
+      select: {
+        id: true,
+        subscriptionId: true,
+        startedAt: true,
+        updatedAt: true,  // Shows last progress update time
+        currentStage: true,
+        progressPercent: true,
+        progressDetail: true,
+        checkpoint: true,
+        subscription: {
+          select: {
+            jobTitles: true,
+            nextRunAt: true,
+            user: { select: { username: true } },
+          },
+        },
+      },
+    });
+
+    // Check lock status for each running run
+    const runsWithDiagnostics = await Promise.all(
+      runningRuns.map(async (run) => {
+        const now = Date.now();
+        const durationMs = now - run.startedAt.getTime();
+        const timeSinceUpdateMs = now - run.updatedAt.getTime();
+        const isLocked = await isSubscriptionRunning(run.subscriptionId);
+
+        return {
+          runId: run.id,
+          subscriptionId: run.subscriptionId.slice(0, 8),
+          username: run.subscription.user?.username || 'unknown',
+          jobTitles: run.subscription.jobTitles.slice(0, 2).join(', '),
+          startedAt: run.startedAt.toISOString(),
+          lastUpdated: run.updatedAt.toISOString(),
+          durationMinutes: Math.round(durationMs / 60000),
+          minutesSinceLastUpdate: Math.round(timeSinceUpdateMs / 60000),
+          stage: run.currentStage || 'unknown',
+          progress: run.progressPercent || 0,
+          progressDetail: run.progressDetail,
+          hasCheckpoint: run.checkpoint !== null,
+          lockStatus: isLocked ? 'LOCKED' : 'UNLOCKED',
+          nextRunAt: run.subscription.nextRunAt?.toISOString(),
+          // Only flag actual problems, NOT slow runs (runs can legitimately take 1+ hour)
+          warnings: [
+            // Lock missing is a real problem - indicates race condition or crash
+            ...(!isLocked ? ['Lock missing - possible race condition or server crash'] : []),
+          ],
+        };
+      })
+    );
+
+    // Get queue stats
+    const { collectionQueue, matchingQueue } = getQueues();
+    let queueStats = null;
+
+    if (collectionQueue && matchingQueue && isRedisConnected()) {
+      const [
+        collWaiting, collActive, collCompleted, collFailed,
+        matchWaiting, matchActive, matchCompleted, matchFailed,
+      ] = await Promise.all([
+        collectionQueue.getWaitingCount(),
+        collectionQueue.getActiveCount(),
+        collectionQueue.getCompletedCount(),
+        collectionQueue.getFailedCount(),
+        matchingQueue.getWaitingCount(),
+        matchingQueue.getActiveCount(),
+        matchingQueue.getCompletedCount(),
+        matchingQueue.getFailedCount(),
+      ]);
+
+      queueStats = {
+        collection: { waiting: collWaiting, active: collActive, completed: collCompleted, failed: collFailed },
+        matching: { waiting: matchWaiting, active: matchActive, completed: matchCompleted, failed: matchFailed },
+      };
+    }
+
+    // Get Redis lock info
+    const redis = getRedis();
+    let lockInfo: Array<{ key: string; subscription: string; value: unknown }> = [];
+    if (redis && isRedisConnected()) {
+      try {
+        const keys = await redis.keys('lock:subscription:*');
+        for (const key of keys) {
+          const value = await redis.get(key);
+          lockInfo.push({
+            key,
+            subscription: key.replace('lock:subscription:', '').slice(0, 8),
+            value: value ? JSON.parse(value) : null,
+          });
+        }
+      } catch (e) {
+        logger.warn('Admin', 'Failed to get Redis lock info', e);
+      }
+    }
+
+    // Get recent failed runs
+    const recentFailures = await db.subscriptionRun.findMany({
+      where: {
+        status: 'failed',
+        startedAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+      },
+      orderBy: { startedAt: 'desc' },
+      take: 10,
+      select: {
+        id: true,
+        startedAt: true,
+        durationMs: true,
+        failedStage: true,
+        errorMessage: true,
+        subscription: {
+          select: {
+            jobTitles: true,
+            user: { select: { username: true } },
+          },
+        },
+      },
+    });
+
+    // Get request cache stats
+    const cacheStats = queueService.getRequestCacheStats();
+
+    res.json({
+      timestamp: new Date().toISOString(),
+      summary: {
+        runningCount: runningRuns.length,
+        runsWithWarnings: runsWithDiagnostics.filter(r => r.warnings.length > 0).length,
+        redisConnected: isRedisConnected(),
+        activeLocks: lockInfo.length,
+        requestCacheSize: cacheStats.size,
+      },
+      runningRuns: runsWithDiagnostics,
+      queueStats,
+      locks: lockInfo,
+      recentFailures: recentFailures.map(f => ({
+        runId: f.id,
+        username: f.subscription.user?.username || 'unknown',
+        jobTitles: f.subscription.jobTitles.slice(0, 2).join(', '),
+        startedAt: f.startedAt.toISOString(),
+        durationSeconds: f.durationMs ? Math.round(f.durationMs / 1000) : null,
+        failedStage: f.failedStage,
+        errorMessage: f.errorMessage?.slice(0, 200),
+      })),
+      requestCache: cacheStats,
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to get diagnostics', error);
+    res.status(500).json({ error: 'Failed to get diagnostics' });
+  }
+});
+
+// POST /admin/api/diagnostics/fail-stuck - Manually fail stuck runs
+// NOTE: This is for MANUAL intervention only. Use this when you've investigated
+// and determined a run is actually stuck (e.g., lock missing, no progress for hours).
+// Runs can legitimately take 1+ hour, so time alone is NOT a reason to fail.
+router.post('/api/diagnostics/fail-stuck', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    // Default to 2 hours - runs can take 1 hour legitimately
+    const { minAgeMinutes = 120 } = req.body;
+
+    const cutoff = new Date(Date.now() - minAgeMinutes * 60 * 1000);
+
+    // Find runs that are stuck
+    const stuckRuns = await db.subscriptionRun.findMany({
+      where: {
+        status: 'running',
+        startedAt: { lt: cutoff },
+      },
+      select: {
+        id: true,
+        subscriptionId: true,
+        startedAt: true,
+        currentStage: true,
+      },
+    });
+
+    if (stuckRuns.length === 0) {
+      res.json({ message: 'No stuck runs found', count: 0 });
+      return;
+    }
+
+    // Mark them as failed and release locks
+    const now = new Date();
+    for (const run of stuckRuns) {
+      const durationMs = now.getTime() - run.startedAt.getTime();
+      await db.subscriptionRun.update({
+        where: { id: run.id },
+        data: {
+          status: 'failed',
+          completedAt: now,
+          durationMs,
+          errorMessage: `Manually marked as failed after ${Math.round(durationMs / 60000)} minutes (admin action)`,
+          failedStage: run.currentStage || 'unknown',
+        },
+      });
+
+      // Release the lock for this subscription
+      await releaseSubscriptionLock(run.subscriptionId);
+
+      // Schedule immediate retry
+      await db.searchSubscription.update({
+        where: { id: run.subscriptionId },
+        data: { nextRunAt: new Date(Date.now() + 60 * 1000) }, // Retry in 1 minute
+      });
+    }
+
+    logger.info('Admin', `Manually failed ${stuckRuns.length} stuck runs`);
+
+    res.json({
+      message: `Failed ${stuckRuns.length} stuck runs`,
+      count: stuckRuns.length,
+      failedRuns: stuckRuns.map(r => ({
+        runId: r.id,
+        subscriptionId: r.subscriptionId.slice(0, 8),
+        stage: r.currentStage,
+        duration: Math.round((now.getTime() - r.startedAt.getTime()) / 60000) + ' min',
+      })),
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to fail stuck runs', error);
+    res.status(500).json({ error: 'Failed to fail stuck runs' });
   }
 });
 

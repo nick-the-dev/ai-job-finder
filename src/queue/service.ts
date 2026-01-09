@@ -208,10 +208,31 @@ export class QueueService {
 
     try {
       // Set up a progress logger while waiting
+      let lastState = 'unknown';
+      let stateUnchangedCount = 0;
       const progressInterval = setInterval(async () => {
-        const jobState = await job.getState();
-        const elapsed = Math.round((Date.now() - execStartTime) / 1000);
-        logger.info('QueueService', `[${requestId}] executeCollection: WAITING for jobId=${jobId}, state=${jobState}, elapsed=${elapsed}s`);
+        try {
+          const jobState = await job.getState();
+          const elapsed = Math.round((Date.now() - execStartTime) / 1000);
+
+          // Track if job state is stuck (same state for multiple checks)
+          if (jobState === lastState) {
+            stateUnchangedCount++;
+          } else {
+            stateUnchangedCount = 0;
+            lastState = jobState;
+          }
+
+          const stuckWarning = stateUnchangedCount >= 6 ? ' [POTENTIALLY STUCK - state unchanged for 60s]' : '';
+          logger.info('QueueService', `[${requestId}] executeCollection: WAITING jobId=${jobId}, state=${jobState}, elapsed=${elapsed}s${stuckWarning}`);
+
+          // If stuck in active for too long, something might be wrong
+          if (jobState === 'active' && stateUnchangedCount >= 12) {
+            logger.warn('QueueService', `[${requestId}] executeCollection: Job ${jobId} stuck in active state for >2min - worker may be unresponsive`);
+          }
+        } catch (e) {
+          logger.warn('QueueService', `[${requestId}] executeCollection: Failed to get job state`, e);
+        }
       }, 10000); // Log every 10 seconds
 
       const result = await waitWithTimeout<RawJob[]>(job, COLLECTION_TIMEOUT);
@@ -222,10 +243,23 @@ export class QueueService {
     } catch (error) {
       // Log timeout errors with context for debugging
       const jobState = await job.getState().catch(() => 'unknown');
+      const elapsed = Date.now() - execStartTime;
+
       if (error instanceof Error && error.message.includes('timed out')) {
-        logger.error('QueueService', `[${requestId}] executeCollection: TIMEOUT for "${params.query}" (jobId=${jobId}, state=${jobState}, elapsed=${Date.now() - execStartTime}ms)`);
+        logger.error('QueueService', `[${requestId}] executeCollection: TIMEOUT for "${params.query}" (jobId=${jobId}, state=${jobState}, elapsed=${elapsed}ms) - job may be stuck in queue or worker is unresponsive`);
+
+        // Try to get more diagnostic info
+        try {
+          const [qWaiting, qActive] = await Promise.all([
+            collectionQueue.getWaitingCount(),
+            collectionQueue.getActiveCount(),
+          ]);
+          logger.error('QueueService', `[${requestId}] executeCollection: Queue state at timeout - waiting=${qWaiting}, active=${qActive}`);
+        } catch (e) {
+          // Ignore diagnostic errors
+        }
       } else {
-        logger.error('QueueService', `[${requestId}] executeCollection: FAILED for "${params.query}" (jobId=${jobId}, state=${jobState})`, error);
+        logger.error('QueueService', `[${requestId}] executeCollection: FAILED for "${params.query}" (jobId=${jobId}, state=${jobState}, elapsed=${elapsed}ms)`, error);
       }
       throw error;
     }
