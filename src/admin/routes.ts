@@ -762,7 +762,6 @@ router.get('/api/diagnostics', async (req: Request, res: Response) => {
         id: true,
         subscriptionId: true,
         startedAt: true,
-        updatedAt: true,  // Shows last progress update time
         currentStage: true,
         progressPercent: true,
         progressDetail: true,
@@ -780,9 +779,7 @@ router.get('/api/diagnostics', async (req: Request, res: Response) => {
     // Check lock status for each running run
     const runsWithDiagnostics = await Promise.all(
       runningRuns.map(async (run) => {
-        const now = Date.now();
-        const durationMs = now - run.startedAt.getTime();
-        const timeSinceUpdateMs = now - run.updatedAt.getTime();
+        const durationMs = Date.now() - run.startedAt.getTime();
         const isLocked = await isSubscriptionRunning(run.subscriptionId);
 
         return {
@@ -791,9 +788,7 @@ router.get('/api/diagnostics', async (req: Request, res: Response) => {
           username: run.subscription.user?.username || 'unknown',
           jobTitles: run.subscription.jobTitles.slice(0, 2).join(', '),
           startedAt: run.startedAt.toISOString(),
-          lastUpdated: run.updatedAt.toISOString(),
           durationMinutes: Math.round(durationMs / 60000),
-          minutesSinceLastUpdate: Math.round(timeSinceUpdateMs / 60000),
           stage: run.currentStage || 'unknown',
           progress: run.progressPercent || 0,
           progressDetail: run.progressDetail,
