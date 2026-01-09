@@ -25,64 +25,35 @@ export type BatchProgressCallback = (
 ) => Promise<void>;
 
 /**
- * Adaptive batch processor configuration
- */
-interface BatchProcessorConfig {
-  initialBatchSize: number;
-  minBatchSize: number;
-  maxBatchSize: number;
-  initialDelayMs: number;
-  minDelayMs: number;
-  maxDelayMs: number;
-  rateUpThreshold: number;      // Success rate to increase speed
-  rateDownThreshold: number;    // Success rate to decrease speed
-  rateWindowSize: number;       // Number of batches to consider for rate calculation
-}
-
-const DEFAULT_CONFIG: BatchProcessorConfig = {
-  initialBatchSize: 5,
-  minBatchSize: 1,
-  maxBatchSize: 10,
-  initialDelayMs: 1000,
-  minDelayMs: 500,
-  maxDelayMs: 10000,
-  rateUpThreshold: 0.95,        // Speed up if 95%+ success
-  rateDownThreshold: 0.8,       // Slow down if <80% success
-  rateWindowSize: 3,            // Consider last 3 batches
-};
-
-/**
- * Adaptive batch processor for LLM matching via Bull queue.
+ * Simple adaptive batch processor for LLM matching.
  *
- * Features:
- * - Enqueues jobs in batches to Bull queue
- * - Detects rate limits and errors
- * - Dynamically adjusts batch size and delay based on success rate
- * - Provides progress callbacks for UI updates
+ * Adjusts batch size and delay based purely on API response:
+ * - Success: speed up (larger batches, shorter delays)
+ * - Rate limit: slow down significantly
+ * - Provider error (502/503): slow down moderately
+ * - Multiple consecutive errors: enter cooldown
  */
 export class AdaptiveBatchProcessor {
-  private config: BatchProcessorConfig;
-  private currentBatchSize: number;
-  private currentDelayMs: number;
-  private recentSuccessRates: number[] = [];
+  // Start aggressive - API will tell us if it's too much
+  private batchSize = 10;
+  private delayMs = 0;
+
+  // Track consecutive success/error for adaptive behavior
+  private consecutiveSuccesses = 0;
+  private consecutiveErrors = 0;
+
   private stats = {
     totalProcessed: 0,
     totalSuccess: 0,
     totalCached: 0,
     totalErrors: 0,
     rateLimitHits: 0,
+    providerErrors: 0,
     batchesProcessed: 0,
   };
 
-  constructor(config: Partial<BatchProcessorConfig> = {}) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
-    this.currentBatchSize = this.config.initialBatchSize;
-    this.currentDelayMs = this.config.initialDelayMs;
-  }
-
   /**
    * Batch lookup cached matches from database.
-   * Returns a Map of contentHash -> cached result for quick lookup.
    */
   private async batchCacheLookup(
     jobs: NormalizedJob[],
@@ -93,7 +64,6 @@ export class AdaptiveBatchProcessor {
 
     if (jobs.length === 0) return cacheMap;
 
-    // Batch query: find all jobs that have matches for this resumeHash
     const contentHashes = jobs.map(j => j.contentHash);
 
     const cachedJobs = await db.job.findMany({
@@ -133,7 +103,6 @@ export class AdaptiveBatchProcessor {
 
   /**
    * Process all jobs with adaptive batching.
-   * First checks cache in batch, then only sends uncached jobs to LLM queue.
    */
   async processAll(
     jobs: NormalizedJob[],
@@ -142,28 +111,21 @@ export class AdaptiveBatchProcessor {
     priority: Priority = PRIORITY.SCHEDULED,
     onProgress?: BatchProgressCallback
   ): Promise<MatchingResult[]> {
-    logger.info('BatchProcessor', `Starting adaptive batch processing for ${jobs.length} jobs`);
+    logger.info('BatchProcessor', `Starting batch processing for ${jobs.length} jobs`);
 
-    // Step 1: Batch cache lookup - get all cached matches in one query
-    logger.info('BatchProcessor', `Checking cache for ${jobs.length} jobs...`);
+    // Batch cache lookup
     const cacheStartTime = Date.now();
     const cacheMap = await this.batchCacheLookup(jobs, resumeHash);
-    const cacheLookupTime = Date.now() - cacheStartTime;
-    logger.info('BatchProcessor', `Cache lookup complete: ${cacheMap.size}/${jobs.length} cached (${cacheLookupTime}ms)`);
+    logger.info('BatchProcessor', `Cache: ${cacheMap.size}/${jobs.length} cached (${Date.now() - cacheStartTime}ms)`);
 
-    // Step 2: Separate cached vs uncached jobs
+    // Separate cached vs uncached
     const cachedResults: MatchingResult[] = [];
     const uncachedJobs: NormalizedJob[] = [];
 
     for (const job of jobs) {
       const cached = cacheMap.get(job.contentHash);
       if (cached) {
-        cachedResults.push({
-          job,
-          match: cached.match,
-          cached: true,
-          jobMatchId: cached.jobMatchId,
-        });
+        cachedResults.push({ job, match: cached.match, cached: true, jobMatchId: cached.jobMatchId });
         this.stats.totalProcessed++;
         this.stats.totalSuccess++;
         this.stats.totalCached++;
@@ -172,83 +134,58 @@ export class AdaptiveBatchProcessor {
       }
     }
 
-    logger.info('BatchProcessor',
-      `Cache results: ${cachedResults.length} from cache, ${uncachedJobs.length} need LLM processing`
-    );
-
-    // Step 3: Process uncached jobs through queue with adaptive batching
     const allResults: MatchingResult[] = [...cachedResults];
     let processed = cachedResults.length;
 
-    // Call progress for cached results
     if (onProgress && cachedResults.length > 0) {
       await onProgress(processed, jobs.length, cachedResults);
     }
 
-    // If no uncached jobs, we're done
     if (uncachedJobs.length === 0) {
-      logger.info('BatchProcessor', `All ${jobs.length} jobs were cached - no LLM calls needed`);
+      logger.info('BatchProcessor', `All ${jobs.length} jobs cached - no LLM calls needed`);
       return allResults;
     }
 
-    logger.info('BatchProcessor',
-      `Processing ${uncachedJobs.length} uncached jobs with adaptive batching (batchSize=${this.currentBatchSize}, delay=${this.currentDelayMs}ms)`
-    );
+    logger.info('BatchProcessor', `Processing ${uncachedJobs.length} uncached jobs (starting: batch=${this.batchSize}, delay=${this.delayMs}ms)`);
 
     let uncachedProcessed = 0;
 
     while (uncachedProcessed < uncachedJobs.length) {
-      const batchStart = uncachedProcessed;
-      const batchEnd = Math.min(uncachedProcessed + this.currentBatchSize, uncachedJobs.length);
-      const batch = uncachedJobs.slice(batchStart, batchEnd);
+      const batch = uncachedJobs.slice(uncachedProcessed, uncachedProcessed + this.batchSize);
 
-      logger.info('BatchProcessor',
-        `Processing batch ${this.stats.batchesProcessed + 1}: ${batch.length} jobs (${batchStart + 1}-${batchEnd} of ${uncachedJobs.length} uncached)`
-      );
+      logger.info('BatchProcessor', `Batch ${this.stats.batchesProcessed + 1}: ${batch.length} jobs (batch=${this.batchSize}, delay=${this.delayMs}ms)`);
 
       const batchStartTime = Date.now();
       const batchResults = await this.processBatch(batch, resumeText, resumeHash, priority);
       const batchDuration = Date.now() - batchStartTime;
 
       allResults.push(...batchResults);
-      uncachedProcessed = batchEnd;
+      uncachedProcessed += batch.length;
       processed = cachedResults.length + uncachedProcessed;
       this.stats.batchesProcessed++;
 
-      // Calculate success rate for this batch (only uncached, since all cached succeeded)
-      const successCount = batchResults.filter(r => r.match !== null).length;
-      const successRate = batch.length > 0 ? successCount / batch.length : 1;
-      this.updateAdaptiveParameters(successRate, batchResults);
+      // Adapt based on results
+      this.adaptFromResults(batchResults);
 
-      // Log batch stats
       const errors = batchResults.filter(r => r.error).length;
-      logger.info('BatchProcessor',
-        `Batch ${this.stats.batchesProcessed} complete: ${successCount}/${batch.length} success, ${errors} errors, ${batchDuration}ms ` +
-        `(total: ${processed}/${jobs.length})`
-      );
+      logger.info('BatchProcessor', `Batch done: ${batch.length - errors}/${batch.length} success, ${batchDuration}ms (total: ${processed}/${jobs.length})`);
 
-      // Call progress callback
       if (onProgress) {
         await onProgress(processed, jobs.length, batchResults);
       }
 
-      // Delay before next batch (unless this is the last batch)
-      if (uncachedProcessed < uncachedJobs.length) {
-        logger.debug('BatchProcessor', `Waiting ${this.currentDelayMs}ms before next batch...`);
-        await this.delay(this.currentDelayMs);
+      // Delay before next batch
+      if (uncachedProcessed < uncachedJobs.length && this.delayMs > 0) {
+        await this.delay(this.delayMs);
       }
     }
 
-    logger.info('BatchProcessor',
-      `Batch processing complete: ${this.stats.totalProcessed} processed, ${this.stats.totalSuccess} success, ` +
-      `${this.stats.totalCached} cached, ${this.stats.totalErrors} errors, ${this.stats.rateLimitHits} rate limits`
-    );
-
+    logger.info('BatchProcessor', `Complete: ${this.stats.totalSuccess} success, ${this.stats.totalErrors} errors, ${this.stats.rateLimitHits} rate limits`);
     return allResults;
   }
 
   /**
-   * Process a single batch of jobs in parallel via Bull queue
+   * Process a single batch of jobs in parallel
    */
   private async processBatch(
     batch: NormalizedJob[],
@@ -256,32 +193,24 @@ export class AdaptiveBatchProcessor {
     resumeHash: string,
     priority: Priority
   ): Promise<MatchingResult[]> {
-    // Enqueue all jobs in batch simultaneously
     const promises = batch.map(job =>
       this.processWithErrorHandling(job, resumeText, resumeHash, priority)
     );
 
-    // Wait for all to complete (or fail)
     const results = await Promise.allSettled(promises);
 
     return results.map((result, idx) => {
       if (result.status === 'fulfilled') {
         return result.value;
       } else {
-        // Handle rejected promise
         const error = result.reason instanceof Error ? result.reason.message : String(result.reason);
-        return {
-          job: batch[idx],
-          match: null,
-          cached: false,
-          error,
-        };
+        return { job: batch[idx], match: null, cached: false, error };
       }
     });
   }
 
   /**
-   * Process a single job with error handling and rate limit detection
+   * Process a single job with error handling
    */
   private async processWithErrorHandling(
     job: NormalizedJob,
@@ -293,126 +222,106 @@ export class AdaptiveBatchProcessor {
 
     try {
       const result = await queueService.enqueueMatching(job, resumeText, resumeHash, priority);
-
       this.stats.totalSuccess++;
-      if (result.cached) {
-        this.stats.totalCached++;
-      }
-
-      return {
-        job,
-        match: result.match,
-        cached: result.cached,
-        jobMatchId: result.jobMatchId,
-      };
+      if (result.cached) this.stats.totalCached++;
+      return { job, match: result.match, cached: result.cached, jobMatchId: result.jobMatchId };
     } catch (error) {
       this.stats.totalErrors++;
       const errorMessage = error instanceof Error ? error.message : String(error);
 
-      // Detect rate limit errors
       if (this.isRateLimitError(errorMessage)) {
         this.stats.rateLimitHits++;
-        logger.warn('BatchProcessor', `Rate limit detected for job "${job.title}": ${errorMessage}`);
+        logger.warn('BatchProcessor', `Rate limit: ${job.title}`);
+      } else if (this.isProviderError(errorMessage)) {
+        this.stats.providerErrors++;
+        logger.warn('BatchProcessor', `Provider error: ${job.title}`);
       } else {
-        logger.error('BatchProcessor', `Error processing job "${job.title}": ${errorMessage}`);
+        logger.error('BatchProcessor', `Error: ${job.title}: ${errorMessage}`);
       }
 
-      return {
-        job,
-        match: null,
-        cached: false,
-        error: errorMessage,
-      };
+      return { job, match: null, cached: false, error: errorMessage };
     }
   }
 
   /**
-   * Detect if an error is a rate limit error
+   * Adapt batch size and delay based on batch results
    */
-  private isRateLimitError(errorMessage: string): boolean {
-    const rateLimitPatterns = [
-      /rate.?limit/i,
-      /429/i,
-      /too.?many.?requests/i,
-      /quota.?exceeded/i,
-      /throttl/i,
-      /capacity/i,
-    ];
-    return rateLimitPatterns.some(pattern => pattern.test(errorMessage));
-  }
+  private adaptFromResults(batchResults: MatchingResult[]): void {
+    const hasRateLimit = batchResults.some(r => r.error && this.isRateLimitError(r.error));
+    const hasProviderError = batchResults.some(r => r.error && this.isProviderError(r.error));
+    const hasAnyError = batchResults.some(r => r.error);
+    const allSuccess = !hasAnyError;
 
-  /**
-   * Update batch size and delay based on recent success rates
-   */
-  private updateAdaptiveParameters(successRate: number, batchResults: MatchingResult[]): void {
-    // Track recent success rates
-    this.recentSuccessRates.push(successRate);
-    if (this.recentSuccessRates.length > this.config.rateWindowSize) {
-      this.recentSuccessRates.shift();
-    }
+    if (hasRateLimit) {
+      // Rate limit - back off hard
+      this.batchSize = Math.max(1, Math.floor(this.batchSize / 2));
+      this.delayMs = Math.max(this.delayMs, 1000) * 2;
+      this.consecutiveSuccesses = 0;
+      this.consecutiveErrors++;
+      logger.warn('BatchProcessor', `Rate limit! Slowing: batch=${this.batchSize}, delay=${this.delayMs}ms`);
+    } else if (hasProviderError) {
+      // Provider error (502/503) - moderate slowdown
+      this.batchSize = Math.max(1, Math.floor(this.batchSize * 0.7));
+      this.delayMs = Math.max(this.delayMs, 500) * 1.5;
+      this.consecutiveSuccesses = 0;
+      this.consecutiveErrors++;
+      logger.warn('BatchProcessor', `Provider error! Slowing: batch=${this.batchSize}, delay=${this.delayMs}ms`);
+    } else if (this.consecutiveErrors >= 3) {
+      // Cooldown mode after multiple errors
+      this.batchSize = Math.max(1, Math.floor(this.batchSize / 2));
+      this.delayMs = 5000;
+      logger.warn('BatchProcessor', `Cooldown mode: batch=${this.batchSize}, delay=${this.delayMs}ms`);
+    } else if (allSuccess) {
+      // All success - speed up
+      this.consecutiveSuccesses++;
+      this.consecutiveErrors = 0;
 
-    // Calculate average success rate over window
-    const avgSuccessRate = this.recentSuccessRates.reduce((a, b) => a + b, 0) / this.recentSuccessRates.length;
+      // Only speed up after 2+ consecutive successes (stability check)
+      if (this.consecutiveSuccesses >= 2) {
+        const newBatchSize = Math.floor(this.batchSize * 1.5);
+        const newDelay = Math.max(0, Math.floor(this.delayMs * 0.5));
 
-    // Check for rate limit errors specifically
-    const hasRateLimitError = batchResults.some(r => r.error && this.isRateLimitError(r.error));
-
-    if (hasRateLimitError) {
-      // Rate limit hit - significantly slow down
-      this.currentBatchSize = Math.max(this.config.minBatchSize, Math.floor(this.currentBatchSize / 2));
-      this.currentDelayMs = Math.min(this.config.maxDelayMs, this.currentDelayMs * 2);
-      logger.warn('BatchProcessor',
-        `Rate limit detected! Reducing speed: batchSize=${this.currentBatchSize}, delay=${this.currentDelayMs}ms`
-      );
-    } else if (avgSuccessRate >= this.config.rateUpThreshold && this.recentSuccessRates.length >= this.config.rateWindowSize) {
-      // High success rate - speed up gradually
-      const newBatchSize = Math.min(this.config.maxBatchSize, this.currentBatchSize + 1);
-      const newDelay = Math.max(this.config.minDelayMs, Math.floor(this.currentDelayMs * 0.9));
-
-      if (newBatchSize !== this.currentBatchSize || newDelay !== this.currentDelayMs) {
-        this.currentBatchSize = newBatchSize;
-        this.currentDelayMs = newDelay;
-        logger.info('BatchProcessor',
-          `Success rate high (${(avgSuccessRate * 100).toFixed(1)}%), speeding up: batchSize=${this.currentBatchSize}, delay=${this.currentDelayMs}ms`
-        );
+        if (newBatchSize !== this.batchSize || newDelay !== this.delayMs) {
+          this.batchSize = newBatchSize;
+          this.delayMs = newDelay;
+          logger.info('BatchProcessor', `Speeding up: batch=${this.batchSize}, delay=${this.delayMs}ms`);
+        }
       }
-    } else if (avgSuccessRate < this.config.rateDownThreshold) {
-      // Low success rate - slow down
-      this.currentBatchSize = Math.max(this.config.minBatchSize, this.currentBatchSize - 1);
-      this.currentDelayMs = Math.min(this.config.maxDelayMs, Math.floor(this.currentDelayMs * 1.5));
-      logger.warn('BatchProcessor',
-        `Success rate low (${(avgSuccessRate * 100).toFixed(1)}%), slowing down: batchSize=${this.currentBatchSize}, delay=${this.currentDelayMs}ms`
-      );
+    } else {
+      // Some errors but not rate limit/provider - mild slowdown
+      this.batchSize = Math.max(1, Math.floor(this.batchSize * 0.9));
+      this.consecutiveSuccesses = 0;
     }
   }
 
-  /**
-   * Get current stats
-   */
+  private isRateLimitError(msg: string): boolean {
+    return /rate.?limit|429|too.?many.?requests|quota.?exceeded|throttl|capacity/i.test(msg);
+  }
+
+  private isProviderError(msg: string): boolean {
+    return /502|503|504|bad.?gateway|service.?unavailable|gateway.?timeout|timed?.?out/i.test(msg);
+  }
+
   getStats() {
     return {
       ...this.stats,
-      currentBatchSize: this.currentBatchSize,
-      currentDelayMs: this.currentDelayMs,
-      avgSuccessRate: this.recentSuccessRates.length > 0
-        ? this.recentSuccessRates.reduce((a, b) => a + b, 0) / this.recentSuccessRates.length
-        : 1,
+      currentBatchSize: this.batchSize,
+      currentDelayMs: this.delayMs,
     };
   }
 
-  /**
-   * Reset stats (for new run)
-   */
   reset(): void {
-    this.currentBatchSize = this.config.initialBatchSize;
-    this.currentDelayMs = this.config.initialDelayMs;
-    this.recentSuccessRates = [];
+    this.batchSize = 10;
+    this.delayMs = 0;
+    this.consecutiveSuccesses = 0;
+    this.consecutiveErrors = 0;
     this.stats = {
       totalProcessed: 0,
       totalSuccess: 0,
       totalCached: 0,
       totalErrors: 0,
       rateLimitHits: 0,
+      providerErrors: 0,
       batchesProcessed: 0,
     };
   }
@@ -422,5 +331,4 @@ export class AdaptiveBatchProcessor {
   }
 }
 
-// Export singleton for shared use
 export const batchProcessor = new AdaptiveBatchProcessor();
