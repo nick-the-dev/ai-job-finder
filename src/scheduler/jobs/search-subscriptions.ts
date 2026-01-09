@@ -7,6 +7,7 @@ import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
 import { sendMatchSummary, type SubscriptionContext } from '../../telegram/services/notification.js';
 import { logger, createSubscriptionLogger, type SubscriptionLogger } from '../../utils/logger.js';
 import { queueService, PRIORITY, type Priority } from '../../queue/index.js';
+import { AdaptiveBatchProcessor, type MatchingResult } from '../../queue/batch-processor.js';
 import { RunTracker, formatTriggerLabel, updateSkillStats, createMarketSnapshot, type ErrorContext, type TriggerType, type ProgressUpdate } from '../../observability/index.js';
 import type { NormalizedJob, JobMatchResult, RawJob } from '../../core/types.js';
 import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
@@ -14,6 +15,7 @@ import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
 // Services (reuse singleton pattern)
 const normalizer = new NormalizerService();
 const matcher = new MatcherAgent();
+const batchProcessor = new AdaptiveBatchProcessor();
 
 type DatePostedType = 'today' | '3days' | 'week' | 'month' | 'all';
 
@@ -619,9 +621,10 @@ export async function runSingleSubscriptionSearch(
   subLogger.debug('Filter', `After all filters: ${normalizedJobs.length} jobs ready for matching`);
 
   // Stage 3: Matching (dynamic % based on job count - usually the largest phase)
+  // Uses adaptive batch processor with Bull queue for parallel LLM calls
   errorContext.stage = 'matching';
   const matchingStartTime = Date.now();
-  logger.info('Scheduler', `[${triggerLabel}] >>> STAGE: matching - Processing ${normalizedJobs.length} jobs`);
+  logger.info('Scheduler', `[${triggerLabel}] >>> STAGE: matching - Processing ${normalizedJobs.length} jobs with batch processor`);
 
   const newMatches: MatchItem[] = [];
   const stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 };
@@ -632,53 +635,61 @@ export async function runSingleSubscriptionSearch(
     detail: `Starting matching for ${normalizedJobs.length} jobs`,
   });
 
-  subLogger.debug('Matching', `Starting matching stage for ${normalizedJobs.length} jobs`);
+  subLogger.debug('Matching', `Starting batch matching for ${normalizedJobs.length} jobs`);
   let matchedCount = 0;
   let matchingErrors = 0;
   const totalJobsToMatch = normalizedJobs.length;
 
-  for (let jobIndex = 0; jobIndex < normalizedJobs.length; jobIndex++) {
-    const job = normalizedJobs[jobIndex];
-    // Update context for each job being matched
+  // Reset batch processor for this run
+  batchProcessor.reset();
+
+  // Process all jobs using adaptive batch processor
+  // This handles: batch cache lookup, parallel LLM via Bull queue, rate limit detection
+  const batchResults = await batchProcessor.processAll(
+    normalizedJobs,
+    sub.resumeText,
+    sub.resumeHash,
+    PRIORITY.MANUAL_SCAN,
+    async (processed, total, batchResultsChunk) => {
+      // Progress callback - update tracker
+      const percent = progress.matching(processed, total);
+      await RunTracker.updateProgress(runId, {
+        stage: 'matching',
+        percent,
+        detail: `Matched ${processed}/${total} jobs`,
+      });
+    }
+  );
+
+  // Get batch processor stats
+  const batchStats = batchProcessor.getStats();
+  subLogger.debug('Matching', `Batch processor stats`, batchStats);
+
+  // Process results: save uncached to DB, apply filters, build newMatches
+  for (const result of batchResults) {
+    const job = result.job;
     errorContext.jobTitle = job.title;
     errorContext.company = job.company;
 
     try {
-      subLogger.debug('Matching', `Processing job: "${job.title}" at "${job.company}"`, {
-        location: job.location,
-        isRemote: job.isRemote,
-        contentHash: job.contentHash.slice(0, 8),
-      });
+      if (result.error) {
+        matchingErrors++;
+        logger.error('Scheduler', `[${triggerLabel}] Failed to match job: ${job.title}`, result.error);
+        subLogger.debug('Matching', `ERROR for "${job.title}": ${result.error}`);
+        continue;
+      }
 
-      const existingJob = await db.job.findUnique({
-        where: { contentHash: job.contentHash },
-        include: { matches: { where: { resumeHash: sub.resumeHash }, take: 1 } },
-      });
+      if (!result.match) {
+        matchingErrors++;
+        continue;
+      }
 
-      let matchResult: JobMatchResult;
-      let jobMatchId: string;
+      const matchResult = result.match;
+      let jobMatchId = result.jobMatchId;
 
-      if (existingJob?.matches?.[0]) {
-        const cached = existingJob.matches[0];
-        matchResult = {
-          score: cached.score,
-          reasoning: cached.reasoning,
-          matchedSkills: cached.matchedSkills,
-          missingSkills: cached.missingSkills,
-          pros: cached.pros,
-          cons: cached.cons,
-        };
-        jobMatchId = cached.id;
-        subLogger.debug('Matching', `Cache HIT for "${job.title}": score=${matchResult.score}`);
-      } else {
-        // Log BEFORE calling LLM so we know which job is being processed if it hangs
-        logger.info('Scheduler', `[${triggerLabel}] Matching job ${jobIndex + 1}/${totalJobsToMatch}: "${job.title}" @ ${job.company} (desc: ${job.description?.length || 0} chars)`);
-        subLogger.debug('Matching', `Cache MISS for "${job.title}" - calling LLM matcher`);
-        matchResult = await matcher.execute({ job, resumeText: sub.resumeText });
-        subLogger.debug('Matching', `LLM match result for "${job.title}": score=${matchResult.score}`, {
-          matchedSkills: matchResult.matchedSkills?.slice(0, 5),
-          missingSkills: matchResult.missingSkills?.slice(0, 5),
-        });
+      // For uncached results, save job and match to DB
+      if (!result.cached) {
+        subLogger.debug('Matching', `Saving uncached match for "${job.title}": score=${matchResult.score}`);
 
         const savedJob = await db.job.upsert({
           where: { contentHash: job.contentHash },
@@ -724,31 +735,15 @@ export async function runSingleSubscriptionSearch(
 
       matchedCount++;
 
-      // Update progress every 5 jobs or on last job (BEFORE filters so progress always updates)
-      if ((jobIndex + 1) % 5 === 0 || jobIndex === totalJobsToMatch - 1) {
-        const percent = progress.matching(jobIndex + 1, totalJobsToMatch);
-        // Full checkpoint for resumption - includes all data needed to continue after restart
-        const checkpoint: MatchingCheckpoint = {
-          stage: 'matching',
-          normalizedJobs,  // Store full job list for resumption
-          currentIndex: jobIndex,
-          matchedJobIds: newMatches.map(m => m.matchId),
-          processedHashes: normalizedJobs.slice(0, jobIndex + 1).map(j => j.contentHash),
-          stats: { ...stats },
-          failedJobHashes: [],  // TODO: track failed jobs
-        };
-        await RunTracker.updateProgress(runId, {
-          stage: 'matching',
-          percent,
-          detail: `Matched ${jobIndex + 1}/${totalJobsToMatch} jobs (${newMatches.length} new matches)`,
-          checkpoint: checkpoint as Record<string, unknown>,
-        });
-      }
-
-      // Track stats and apply filters
+      // Apply filters
       if (matchResult.score < sub.minScore) {
         stats.skippedBelowScore++;
         subLogger.debug('Matching', `SKIP "${job.title}": score ${matchResult.score} below minScore ${sub.minScore}`);
+        continue;
+      }
+      if (!jobMatchId) {
+        matchingErrors++;
+        logger.error('Scheduler', `[${triggerLabel}] No jobMatchId for "${job.title}"`);
         continue;
       }
       if (thisSentIds.has(jobMatchId)) {
@@ -769,14 +764,16 @@ export async function runSingleSubscriptionSearch(
       subLogger.debug('Matching', `MATCH "${job.title}": score=${matchResult.score}, added to results`);
     } catch (error) {
       matchingErrors++;
-      logger.error('Scheduler', `[${triggerLabel}] Failed to process job: ${job.title}`, error);
-      subLogger.debug('Matching', `ERROR processing "${job.title}"`, error);
-      // Continue to next job (intentional - partial results OK)
+      logger.error('Scheduler', `[${triggerLabel}] Failed to process result for job: ${job.title}`, error);
+      subLogger.debug('Matching', `ERROR processing result for "${job.title}"`, error);
     }
   }
 
   const matchingDuration = ((Date.now() - matchingStartTime) / 1000).toFixed(1);
-  logger.info('Scheduler', `[${triggerLabel}] <<< STAGE: matching - Completed in ${matchingDuration}s: ${newMatches.length} new matches, ${matchingErrors} errors`);
+  logger.info('Scheduler',
+    `[${triggerLabel}] <<< STAGE: matching - Completed in ${matchingDuration}s: ${newMatches.length} new matches, ` +
+    `${batchStats.totalCached} cached, ${matchingErrors} errors (${batchStats.rateLimitHits} rate limits)`
+  );
   subLogger.debug('Matching', `Matching complete: processed ${matchedCount} jobs, found ${newMatches.length} new matches, ${matchingErrors} errors`);
 
   // Clear job-specific context after matching loop
@@ -1151,61 +1148,58 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       let matchedCount = 0;
       let matchingErrors = 0;
       const totalJobsToMatch = normalizedJobs.length;
+      const matchingStartTime = Date.now();
 
-      for (let jobIndex = 0; jobIndex < normalizedJobs.length; jobIndex++) {
-        const job = normalizedJobs[jobIndex];
+      // Reset batch processor for this run and use adaptive batching via Bull queue
+      batchProcessor.reset();
+      logger.info('Scheduler', `  Starting batch matching for ${totalJobsToMatch} jobs via Bull queue`);
+
+      const batchResults = await batchProcessor.processAll(
+        normalizedJobs,
+        sub.resumeText,
+        sub.resumeHash,
+        PRIORITY.SCHEDULED,
+        async (processed, total, batchResultsChunk) => {
+          // Progress callback - update tracker
+          const percent = progress.matching(processed, total);
+          await RunTracker.updateProgress(runId, {
+            stage: 'matching',
+            percent,
+            detail: `Matched ${processed}/${total} jobs`,
+          });
+        }
+      );
+
+      // Get batch processor stats
+      const batchStats = batchProcessor.getStats();
+      subLogger.debug('Matching', `Batch processor stats`, batchStats);
+
+      // Process results: save uncached to DB, apply filters, build newMatches
+      for (const result of batchResults) {
+        const job = result.job;
         errorContext.jobTitle = job.title;
         errorContext.company = job.company;
 
         try {
-          subLogger.debug('Matching', `Processing job: "${job.title}" at "${job.company}"`, {
-            location: job.location,
-            isRemote: job.isRemote,
-            contentHash: job.contentHash.slice(0, 8),
-          });
+          if (result.error) {
+            matchingErrors++;
+            logger.error('Scheduler', `  Failed to match job: ${job.title}`, result.error);
+            subLogger.debug('Matching', `ERROR for "${job.title}": ${result.error}`);
+            continue;
+          }
 
-          // Check for existing match in DB
-          const existingJob = await db.job.findUnique({
-            where: { contentHash: job.contentHash },
-            include: {
-              matches: {
-                where: { resumeHash: sub.resumeHash },
-                take: 1,
-              },
-            },
-          });
+          if (!result.match) {
+            matchingErrors++;
+            continue;
+          }
 
-          let matchResult: JobMatchResult;
-          let jobMatchId: string;
+          const matchResult = result.match;
+          let jobMatchId = result.jobMatchId;
 
-          if (existingJob?.matches?.[0]) {
-            // Use cached match
-            const cached = existingJob.matches[0];
-            matchResult = {
-              score: cached.score,
-              reasoning: cached.reasoning,
-              matchedSkills: cached.matchedSkills,
-              missingSkills: cached.missingSkills,
-              pros: cached.pros,
-              cons: cached.cons,
-            };
-            jobMatchId = cached.id;
-            subLogger.debug('Matching', `Cache HIT for "${job.title}": score=${matchResult.score}`);
-          } else {
-            // Need to create new match via LLM
-            // Log BEFORE calling LLM so we know which job is being processed if it hangs
-            logger.info('Scheduler', `  Matching job ${jobIndex + 1}/${totalJobsToMatch}: "${job.title}" @ ${job.company} (desc: ${job.description?.length || 0} chars)`);
-            subLogger.debug('Matching', `Cache MISS for "${job.title}" - calling LLM matcher`);
-            matchResult = await matcher.execute({
-              job,
-              resumeText: sub.resumeText,
-            });
-            subLogger.debug('Matching', `LLM match result for "${job.title}": score=${matchResult.score}`, {
-              matchedSkills: matchResult.matchedSkills?.slice(0, 5),
-              missingSkills: matchResult.missingSkills?.slice(0, 5),
-            });
+          // For uncached results, save job and match to DB
+          if (!result.cached) {
+            subLogger.debug('Matching', `Saving uncached match for "${job.title}": score=${matchResult.score}`);
 
-            // Save job and match to DB
             const savedJob = await db.job.upsert({
               where: { contentHash: job.contentHash },
               create: {
@@ -1226,7 +1220,6 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
               update: { lastSeenAt: new Date() },
             });
 
-            // Find or create match record
             let savedMatch = await db.jobMatch.findFirst({
               where: { jobId: savedJob.id, resumeHash: sub.resumeHash },
             });
@@ -1251,31 +1244,15 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
 
           matchedCount++;
 
-          // Update progress every 5 jobs or on last job (BEFORE filters so progress always updates)
-          if ((jobIndex + 1) % 5 === 0 || jobIndex === totalJobsToMatch - 1) {
-            const percent = progress.matching(jobIndex + 1, totalJobsToMatch);
-            // Full checkpoint for resumption - includes all data needed to continue after restart
-            const checkpoint: MatchingCheckpoint = {
-              stage: 'matching',
-              normalizedJobs,  // Store full job list for resumption
-              currentIndex: jobIndex,
-              matchedJobIds: newMatches.map(m => m.matchId),
-              processedHashes: normalizedJobs.slice(0, jobIndex + 1).map(j => j.contentHash),
-              stats: { ...stats },
-              failedJobHashes: [],  // TODO: track failed jobs
-            };
-            await RunTracker.updateProgress(runId, {
-              stage: 'matching',
-              percent,
-              detail: `Matched ${jobIndex + 1}/${totalJobsToMatch} jobs (${newMatches.length} new matches)`,
-              checkpoint,
-            });
-          }
-
-          // Track stats and apply filters
+          // Apply filters
           if (matchResult.score < sub.minScore) {
             stats.skippedBelowScore++;
             subLogger.debug('Matching', `SKIP "${job.title}": score ${matchResult.score} below minScore ${sub.minScore}`);
+            continue;
+          }
+          if (!jobMatchId) {
+            matchingErrors++;
+            logger.error('Scheduler', `  No jobMatchId for "${job.title}"`);
             continue;
           }
           if (thisSentIds.has(jobMatchId)) {
@@ -1296,12 +1273,16 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
           subLogger.debug('Matching', `MATCH "${job.title}": score=${matchResult.score}, added to results`);
         } catch (error) {
           matchingErrors++;
-          logger.error('Scheduler', `  Failed to process job: ${job.title}`, error);
-          subLogger.debug('Matching', `ERROR processing "${job.title}"`, error);
-          // Continue to next job (intentional - partial results OK)
+          logger.error('Scheduler', `  Failed to process result for job: ${job.title}`, error);
+          subLogger.debug('Matching', `ERROR processing result for "${job.title}"`, error);
         }
       }
 
+      const matchingDuration = ((Date.now() - matchingStartTime) / 1000).toFixed(1);
+      logger.info('Scheduler',
+        `  Matching completed in ${matchingDuration}s: ${newMatches.length} new matches, ` +
+        `${batchStats.totalCached} cached, ${matchingErrors} errors (${batchStats.rateLimitHits} rate limits)`
+      );
       subLogger.debug('Matching', `Matching complete: processed ${matchedCount} jobs, found ${newMatches.length} new matches, ${matchingErrors} errors`);
 
       // Clear job-specific context after matching loop
