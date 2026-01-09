@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { Prisma } from '@prisma/client';
 import { getDb } from '../../db/client.js';
 import { NormalizerService } from '../../services/normalizer.js';
 import { MatcherAgent } from '../../agents/matcher.js';
@@ -43,6 +44,37 @@ interface CollectionResult {
   queriesFailed: number;
   errors: CollectionError[];
 }
+
+/**
+ * Checkpoint data for resuming interrupted runs.
+ * Stored in subscription_runs.checkpoint column.
+ */
+interface MatchingCheckpoint extends Record<string, unknown> {
+  stage: 'matching';
+  normalizedJobs: NormalizedJob[];  // Full job list (stored once, on first save)
+  currentIndex: number;              // Current position in the loop
+  matchedJobIds: string[];           // IDs of jobs added to newMatches
+  processedHashes: string[];         // Content hashes of all processed jobs (for skip on resume)
+  stats: {
+    skippedBelowScore: number;
+    skippedAlreadySent: number;
+    skippedCrossSubDuplicates: number;
+    previouslyMatchedOther: number;
+  };
+  failedJobHashes: string[];         // Jobs that failed matching (skip on resume)
+}
+
+interface CollectionCheckpoint {
+  stage: 'collection';
+  queriesCompleted: number;
+  queriesTotal: number;
+  collectedJobs: RawJob[];           // Partial collection results
+}
+
+export type RunCheckpoint = MatchingCheckpoint | CollectionCheckpoint | { stage: string };
+
+// Export checkpoint types for use in cron.ts
+export type { MatchingCheckpoint, CollectionCheckpoint };
 
 /**
  * Dynamic progress calculator that adjusts phase allocations based on actual job counts.
@@ -695,11 +727,21 @@ export async function runSingleSubscriptionSearch(
       // Update progress every 5 jobs or on last job (BEFORE filters so progress always updates)
       if ((jobIndex + 1) % 5 === 0 || jobIndex === totalJobsToMatch - 1) {
         const percent = progress.matching(jobIndex + 1, totalJobsToMatch);
+        // Full checkpoint for resumption - includes all data needed to continue after restart
+        const checkpoint: MatchingCheckpoint = {
+          stage: 'matching',
+          normalizedJobs,  // Store full job list for resumption
+          currentIndex: jobIndex,
+          matchedJobIds: newMatches.map(m => m.matchId),
+          processedHashes: normalizedJobs.slice(0, jobIndex + 1).map(j => j.contentHash),
+          stats: { ...stats },
+          failedJobHashes: [],  // TODO: track failed jobs
+        };
         await RunTracker.updateProgress(runId, {
           stage: 'matching',
           percent,
           detail: `Matched ${jobIndex + 1}/${totalJobsToMatch} jobs (${newMatches.length} new matches)`,
-          checkpoint: { stage: 'matching', currentIndex: jobIndex, matchedJobIds: newMatches.map(m => m.matchId) },
+          checkpoint: checkpoint as Record<string, unknown>,
         });
       }
 
@@ -1212,11 +1254,21 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
           // Update progress every 5 jobs or on last job (BEFORE filters so progress always updates)
           if ((jobIndex + 1) % 5 === 0 || jobIndex === totalJobsToMatch - 1) {
             const percent = progress.matching(jobIndex + 1, totalJobsToMatch);
+            // Full checkpoint for resumption - includes all data needed to continue after restart
+            const checkpoint: MatchingCheckpoint = {
+              stage: 'matching',
+              normalizedJobs,  // Store full job list for resumption
+              currentIndex: jobIndex,
+              matchedJobIds: newMatches.map(m => m.matchId),
+              processedHashes: normalizedJobs.slice(0, jobIndex + 1).map(j => j.contentHash),
+              stats: { ...stats },
+              failedJobHashes: [],  // TODO: track failed jobs
+            };
             await RunTracker.updateProgress(runId, {
               stage: 'matching',
               percent,
               detail: `Matched ${jobIndex + 1}/${totalJobsToMatch} jobs (${newMatches.length} new matches)`,
-              checkpoint: { stage: 'matching', currentIndex: jobIndex, matchedJobIds: newMatches.map(m => m.matchId) },
+              checkpoint,
             });
           }
 
@@ -1378,4 +1430,221 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
     matchesFound: totalMatchesFound,
     notificationsSent: totalNotifications,
   };
+}
+
+/**
+ * Resume an interrupted run from its checkpoint.
+ * Called when we detect a run that was interrupted by server restart.
+ */
+export async function resumeInterruptedRun(
+  runId: string,
+  subscriptionId: string,
+  checkpoint: MatchingCheckpoint
+): Promise<{ success: boolean; newMatches: number; error?: string }> {
+  const db = getDb();
+
+  logger.info('Scheduler', `[Resumed] Resuming run ${runId} from checkpoint (index: ${checkpoint.currentIndex}/${checkpoint.normalizedJobs.length})`);
+
+  try {
+    // Get subscription data
+    const sub = await db.searchSubscription.findUnique({
+      where: { id: subscriptionId },
+      include: { user: true },
+    });
+
+    if (!sub || !sub.isActive) {
+      logger.warn('Scheduler', `[Resumed] Subscription ${subscriptionId} not found or inactive`);
+      await RunTracker.fail(runId, new Error('Subscription not found or inactive'));
+      return { success: false, newMatches: 0, error: 'Subscription not found or inactive' };
+    }
+
+    const subLogger = createSubscriptionLogger(sub.id, sub.debugMode);
+
+    subLogger.info('Resume', `Resuming from checkpoint at index ${checkpoint.currentIndex}`, {
+      totalJobs: checkpoint.normalizedJobs.length,
+      processedSoFar: checkpoint.currentIndex + 1,
+      matchesSoFar: checkpoint.matchedJobIds.length,
+    });
+
+    // Restore state from checkpoint
+    const normalizedJobs = checkpoint.normalizedJobs;
+    const startIndex = checkpoint.currentIndex + 1;  // Start from next job
+    const stats = { ...checkpoint.stats };
+    const processedHashes = new Set(checkpoint.processedHashes);
+
+    // Get IDs of notifications already sent to avoid duplicates
+    const thisSentIds = new Set(
+      (await db.sentNotification.findMany({
+        where: { subscriptionId: sub.id },
+        select: { jobMatchId: true },
+      })).map(n => n.jobMatchId)
+    );
+
+    // Calculate progress for remaining work
+    const totalJobsToMatch = normalizedJobs.length;
+    const progress = new ProgressCalculator(1, totalJobsToMatch);
+    progress.recalculate(1, totalJobsToMatch);
+
+    const newMatches: MatchItem[] = [];
+    let matchedCount = checkpoint.currentIndex + 1;
+    let matchingErrors = 0;
+
+    // Continue matching loop from checkpoint
+    for (let jobIndex = startIndex; jobIndex < normalizedJobs.length; jobIndex++) {
+      const job = normalizedJobs[jobIndex];
+
+      try {
+        subLogger.debug('Matching', `[Resumed] Processing job ${jobIndex + 1}/${totalJobsToMatch}: "${job.title}" at "${job.company}"`);
+
+        // Check if already processed (shouldn't happen but safety check)
+        if (processedHashes.has(job.contentHash)) {
+          subLogger.debug('Matching', `SKIP "${job.title}": already processed in previous attempt`);
+          continue;
+        }
+
+        // Check for existing match in DB
+        const existingJob = await db.job.findUnique({
+          where: { contentHash: job.contentHash },
+          include: { matches: { where: { resumeHash: sub.resumeHash }, take: 1 } },
+        });
+
+        let matchResult: JobMatchResult;
+        let jobMatchId: string;
+
+        if (existingJob?.matches?.[0]) {
+          const cached = existingJob.matches[0];
+          matchResult = {
+            score: cached.score,
+            reasoning: cached.reasoning,
+            matchedSkills: cached.matchedSkills,
+            missingSkills: cached.missingSkills,
+            pros: cached.pros,
+            cons: cached.cons,
+          };
+          jobMatchId = cached.id;
+          subLogger.debug('Matching', `Cache HIT for "${job.title}": score=${matchResult.score}`);
+        } else {
+          // LLM call
+          logger.info('Scheduler', `[Resumed] Matching job ${jobIndex + 1}/${totalJobsToMatch}: "${job.title}" @ ${job.company}`);
+          matchResult = await matcher.execute({ job, resumeText: sub.resumeText });
+          subLogger.debug('Matching', `LLM match result for "${job.title}": score=${matchResult.score}`);
+
+          // Save to DB
+          const savedJob = await db.job.upsert({
+            where: { contentHash: job.contentHash },
+            create: {
+              contentHash: job.contentHash,
+              title: job.title,
+              company: job.company,
+              description: job.description,
+              location: job.location,
+              isRemote: job.isRemote || false,
+              salaryMin: job.salaryMin,
+              salaryMax: job.salaryMax,
+              salaryCurrency: job.salaryCurrency,
+              source: job.source,
+              sourceId: job.sourceId,
+              applicationUrl: job.applicationUrl,
+              postedDate: job.postedDate,
+            },
+            update: { lastSeenAt: new Date() },
+          });
+
+          let savedMatch = await db.jobMatch.findFirst({
+            where: { jobId: savedJob.id, resumeHash: sub.resumeHash },
+          });
+
+          if (!savedMatch) {
+            savedMatch = await db.jobMatch.create({
+              data: {
+                jobId: savedJob.id,
+                resumeHash: sub.resumeHash,
+                score: Math.round(matchResult.score),
+                reasoning: matchResult.reasoning,
+                matchedSkills: matchResult.matchedSkills ?? [],
+                missingSkills: matchResult.missingSkills ?? [],
+                pros: matchResult.pros ?? [],
+                cons: matchResult.cons ?? [],
+              },
+            });
+          }
+
+          jobMatchId = savedMatch.id;
+        }
+
+        matchedCount++;
+
+        // Update progress every 5 jobs
+        if ((jobIndex + 1) % 5 === 0 || jobIndex === totalJobsToMatch - 1) {
+          const percent = progress.matching(jobIndex + 1, totalJobsToMatch);
+          const updatedCheckpoint: MatchingCheckpoint = {
+            stage: 'matching',
+            normalizedJobs,
+            currentIndex: jobIndex,
+            matchedJobIds: [...checkpoint.matchedJobIds, ...newMatches.map(m => m.matchId)],
+            processedHashes: [...processedHashes, job.contentHash],
+            stats: { ...stats },
+            failedJobHashes: checkpoint.failedJobHashes,
+          };
+          await RunTracker.updateProgress(runId, {
+            stage: 'matching',
+            percent,
+            detail: `Matched ${jobIndex + 1}/${totalJobsToMatch} jobs (${newMatches.length + checkpoint.matchedJobIds.length} new matches)`,
+            checkpoint: updatedCheckpoint as Record<string, unknown>,
+          });
+        }
+
+        // Apply filters
+        if (matchResult.score < sub.minScore) {
+          stats.skippedBelowScore++;
+          continue;
+        }
+        if (thisSentIds.has(jobMatchId)) {
+          stats.skippedAlreadySent++;
+          continue;
+        }
+
+        newMatches.push({ job, match: matchResult, matchId: jobMatchId, isPreviouslyMatched: false });
+        subLogger.debug('Matching', `MATCH "${job.title}": score=${matchResult.score}`);
+
+      } catch (error) {
+        matchingErrors++;
+        logger.error('Scheduler', `[Resumed] Failed to process job: ${job.title}`, error);
+      }
+    }
+
+    logger.info('Scheduler', `[Resumed] Matching complete: ${newMatches.length} new matches, ${matchingErrors} errors`);
+
+    // Send notifications
+    if (newMatches.length > 0) {
+      const subContext: SubscriptionContext = {
+        jobTitles: sub.jobTitles,
+        location: sub.location,
+        isRemote: sub.isRemote,
+      };
+      await sendMatchSummary(sub.user.chatId, newMatches, stats, subContext);
+    }
+
+    // Complete the run
+    await RunTracker.complete(runId, {
+      jobsCollected: normalizedJobs.length,
+      jobsAfterDedup: normalizedJobs.length,
+      jobsMatched: newMatches.length + checkpoint.matchedJobIds.length,
+      notificationsSent: newMatches.length,
+    });
+
+    // Clear checkpoint on success (keep only summary)
+    await db.subscriptionRun.update({
+      where: { id: runId },
+      data: { checkpoint: Prisma.DbNull },  // Clear large checkpoint data
+    });
+
+    logger.info('Scheduler', `[Resumed] Run ${runId} completed successfully`);
+    return { success: true, newMatches: newMatches.length };
+
+  } catch (error) {
+    logger.error('Scheduler', `[Resumed] Failed to resume run ${runId}`, error);
+    await RunTracker.fail(runId, error);
+    return { success: false, newMatches: 0, error: String(error) };
+  }
 }
