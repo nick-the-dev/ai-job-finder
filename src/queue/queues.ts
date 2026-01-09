@@ -23,6 +23,7 @@ export interface CollectionJobData {
   source: 'jobspy' | 'serpapi';
   skipCache: boolean;
   datePosted?: 'today' | '3days' | 'week' | 'month';
+  country?: string; // Explicit country for Indeed filtering (e.g., 'Canada', 'USA')
   requestId: string;
   priority: Priority;
 }

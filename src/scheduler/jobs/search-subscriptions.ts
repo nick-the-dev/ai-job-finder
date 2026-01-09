@@ -176,6 +176,28 @@ class ProgressCalculator {
 }
 
 /**
+ * Ensure location string includes country name for LinkedIn compatibility.
+ * LinkedIn doesn't support country_indeed, so we need the country in the location string.
+ * Examples:
+ *   ensureCountryInLocation("Toronto, ON", "Canada") => "Toronto, ON, Canada"
+ *   ensureCountryInLocation("Canada", "Canada") => "Canada" (already included)
+ *   ensureCountryInLocation("Vancouver", "Canada") => "Vancouver, Canada"
+ */
+function ensureCountryInLocation(location: string, country: string): string {
+  if (!country || !location) return location;
+  const locationLower = location.toLowerCase();
+  const countryLower = country.toLowerCase();
+  
+  // Check if country is already in the location string
+  if (locationLower.includes(countryLower)) {
+    return location;
+  }
+  
+  // Append country to location
+  return `${location}, ${country}`;
+}
+
+/**
  * Collect jobs for a subscription, supporting multi-location search.
  * Uses normalizedLocations if available, falls back to legacy location/isRemote.
  * Returns detailed result with error tracking for reliability.
@@ -247,28 +269,31 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
           if (variants.length === 0) variants.push(loc.country);
 
           for (const variant of variants) {
+            // Ensure country is in location string for LinkedIn (which doesn't support country_indeed)
+            const locationWithCountry = ensureCountryInLocation(variant, loc.country);
             queriesTotal++;
             try {
-              logger.info('Scheduler', `  Collecting remote jobs for: "${title}" in "${variant}"${jobTypeLabel}`);
+              logger.info('Scheduler', `  Collecting remote jobs for: "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
               const jobs = await queueService.enqueueCollection({
                 query: title,
-                location: variant,
+                location: locationWithCountry,
                 isRemote: true, // Remote jobs within this country
                 jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
                 limit,
                 source: 'jobspy',
                 skipCache,
                 datePosted: datePosted === 'all' ? undefined : datePosted,
+                country: loc.country, // Explicit country for Indeed filtering (prevents CA/California ambiguity)
               }, priority);
-              logger.info('Scheduler', `  Found ${jobs.length} remote jobs for "${title}" in "${variant}"${jobTypeLabel}`);
+              logger.info('Scheduler', `  Found ${jobs.length} remote jobs for "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
               allRawJobs.push(...jobs);
               queriesCompleted++;
               await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`);
             } catch (error) {
               queriesFailed++;
               const errorMsg = error instanceof Error ? error.message : String(error);
-              errors.push({ query: title, location: variant, jobType, error: errorMsg });
-              logger.error('Scheduler', `  Failed to collect remote jobs for "${title}" in "${variant}"${jobTypeLabel}`, error);
+              errors.push({ query: title, location: locationWithCountry, jobType, error: errorMsg });
+              logger.error('Scheduler', `  Failed to collect remote jobs for "${title}" in "${locationWithCountry}"${jobTypeLabel}`, error);
             }
           }
         }
@@ -279,28 +304,31 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
           if (variants.length === 0) variants.push(loc.display);
 
           for (const variant of variants) {
+            // Ensure country is in location string for LinkedIn (which doesn't support country_indeed)
+            const locationWithCountry = ensureCountryInLocation(variant, loc.country);
             queriesTotal++;
             try {
-              logger.info('Scheduler', `  Collecting jobs for: "${title}" in "${variant}"${jobTypeLabel}`);
+              logger.info('Scheduler', `  Collecting jobs for: "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
               const jobs = await queueService.enqueueCollection({
                 query: title,
-                location: variant,
+                location: locationWithCountry,
                 isRemote: false, // Physical locations only
                 jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
                 limit,
                 source: 'jobspy',
                 skipCache,
                 datePosted: datePosted === 'all' ? undefined : datePosted,
+                country: loc.country, // Explicit country for Indeed filtering (prevents CA/California ambiguity)
               }, priority);
-              logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}" in "${variant}"${jobTypeLabel}`);
+              logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
               allRawJobs.push(...jobs);
               queriesCompleted++;
               await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`);
             } catch (error) {
               queriesFailed++;
               const errorMsg = error instanceof Error ? error.message : String(error);
-              errors.push({ query: title, location: variant, jobType, error: errorMsg });
-              logger.error('Scheduler', `  Failed to collect jobs for "${title}" in "${variant}"${jobTypeLabel}`, error);
+              errors.push({ query: title, location: locationWithCountry, jobType, error: errorMsg });
+              logger.error('Scheduler', `  Failed to collect jobs for "${title}" in "${locationWithCountry}"${jobTypeLabel}`, error);
             }
           }
         }
@@ -348,6 +376,61 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
 }
 
 /**
+ * Check if a job location is in a wrong country based on the target country.
+ * This is a safety net to filter out jobs that slip through due to ambiguous location codes.
+ * Examples: Filter out California jobs when user wants Canada (both abbreviated "CA")
+ */
+function isWrongCountry(jobLocation: string | undefined, targetCountry: string): boolean {
+  if (!jobLocation || !targetCountry) return false;
+  
+  const jobLocationLower = jobLocation.toLowerCase();
+  const targetCountryLower = targetCountry.toLowerCase();
+  
+  // US indicators - looking for clear signs this is a US location
+  // Using patterns that match end of string or followed by comma/space
+  const usIndicators = [
+    ', us', ' us', ', usa', ' usa', 'united states',
+    'california', 'new york', 'texas', 'florida', 'illinois',
+    'pennsylvania', 'ohio', 'georgia', 'north carolina', 'michigan',
+    'new jersey', 'virginia', 'arizona', 'massachusetts', 'washington',
+    'colorado', 'tennessee', 'indiana', 'missouri', 'maryland',
+  ];
+  
+  // Canadian indicators
+  const canadaIndicators = [
+    'canada', ', on,', ', on ', ', bc,', ', bc ', ', ab,', ', ab ', ', qc,', ', qc ',
+    ', mb,', ', mb ', ', sk,', ', ns,', ', nb,', ', nl,', ', pe,',
+    'ontario', 'british columbia', 'alberta', 'quebec', 'manitoba', 'saskatchewan',
+    'nova scotia', 'new brunswick', 'newfoundland', 'toronto', 'vancouver', 'montreal',
+    'calgary', 'ottawa', 'edmonton', 'winnipeg',
+  ];
+  
+  if (targetCountryLower === 'canada') {
+    // If targeting Canada, reject jobs that look like US locations
+    // But only if they don't also have Canadian indicators
+    const hasUsIndicator = usIndicators.some(ind => jobLocationLower.includes(ind));
+    const hasCanadaIndicator = canadaIndicators.some(ind => jobLocationLower.includes(ind));
+    
+    // If it has US indicator and no Canada indicator, it's wrong country
+    if (hasUsIndicator && !hasCanadaIndicator) {
+      return true;
+    }
+  } else if (targetCountryLower === 'usa' || targetCountryLower === 'united states') {
+    // If targeting USA, reject jobs that look like Canadian locations
+    // But only if they don't also have US indicators
+    const hasUsIndicator = usIndicators.some(ind => jobLocationLower.includes(ind));
+    const hasCanadaIndicator = canadaIndicators.some(ind => jobLocationLower.includes(ind));
+    
+    // If it has Canada indicator and no US indicator, it's wrong country
+    if (hasCanadaIndicator && !hasUsIndicator) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
  * Filter jobs by location using normalized locations or legacy location.
  */
 function filterJobsByLocation(
@@ -363,12 +446,26 @@ function filterJobsByLocation(
       return jobs;
     }
 
-    return jobs.filter(job =>
-      LocationNormalizerAgent.matchesJob(normalizedLocations, {
+    // Get target countries from normalized locations for safety net filtering
+    const targetCountries = [...new Set(normalizedLocations.map(l => l.country).filter(Boolean))];
+
+    return jobs.filter(job => {
+      // Always allow remote jobs with no location
+      if (job.isRemote && !job.location) return true;
+      
+      // Safety net: Filter out jobs from wrong countries (e.g., California when targeting Canada)
+      for (const country of targetCountries) {
+        if (isWrongCountry(job.location, country)) {
+          logger.debug('Scheduler', `Post-filter: Excluding job "${job.title}" at "${job.location}" - wrong country (target: ${country})`);
+          return false;
+        }
+      }
+      
+      return LocationNormalizerAgent.matchesJob(normalizedLocations, {
         location: job.location,
         isRemote: job.isRemote,
-      })
-    );
+      });
+    });
   }
 
   // Legacy location filter (only for old subscriptions without normalizedLocations)

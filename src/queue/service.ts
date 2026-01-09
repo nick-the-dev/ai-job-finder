@@ -384,6 +384,7 @@ export class QueueService {
         source: params.source,
         skipCache: params.skipCache,
         datePosted: params.datePosted,
+        country: params.country, // Pass explicit country for Indeed filtering
       })
     );
   }

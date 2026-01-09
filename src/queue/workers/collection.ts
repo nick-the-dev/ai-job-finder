@@ -11,11 +11,11 @@ const collector = new CollectorService();
  * Process a collection job from the queue
  */
 export async function processCollectionJob(job: Job<CollectionJobData>): Promise<RawJob[]> {
-  const { query, location, isRemote, jobType, limit, source, skipCache, datePosted, requestId } = job.data;
+  const { query, location, isRemote, jobType, limit, source, skipCache, datePosted, country, requestId } = job.data;
   const workerStartTime = Date.now();
 
   const jobTypeLabel = jobType ? ` [${jobType}]` : '';
-  logger.info('Worker:Collection', `[${requestId}] >>> WORKER START (jobId=${job.id}): "${query}"${jobTypeLabel} @ ${location || 'any'} (${source}, limit: ${limit})`);
+  logger.info('Worker:Collection', `[${requestId}] >>> WORKER START (jobId=${job.id}): "${query}"${jobTypeLabel} @ ${location || 'any'} (${source}, limit: ${limit}, country: ${country || 'auto'})`);
 
   try {
     logger.info('Worker:Collection', `[${requestId}] Calling collector.execute()...`);
@@ -30,6 +30,7 @@ export async function processCollectionJob(job: Job<CollectionJobData>): Promise
       source,
       skipCache,
       datePosted,
+      country, // Pass explicit country for Indeed filtering
     });
 
     const collectDuration = Date.now() - collectStartTime;

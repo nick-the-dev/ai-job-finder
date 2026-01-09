@@ -18,6 +18,7 @@ interface CollectorInput {
   skipCache?: boolean; // Force fresh fetch
   cacheHours?: number; // How long to cache results (default 6 hours)
   datePosted?: 'today' | '3days' | 'week' | 'month'; // Filter by posting date
+  country?: string;    // Explicit country for Indeed filtering (e.g., 'Canada', 'USA') - prevents CA/California ambiguity
 }
 
 const JOBS_PER_PAGE = 10;
@@ -291,6 +292,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       limit = 100,
       skipCache = false,
       cacheHours = DEFAULT_CACHE_HOURS,
+      country,  // Explicit country for Indeed filtering (e.g., 'Canada', 'USA')
     } = input;
 
     const datePosted = input.datePosted ?? 'month';
@@ -384,7 +386,8 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           limit,
           hoursOld,
           jobType,
-          isRemote
+          isRemote,
+          country  // Explicit country for Indeed filtering
         );
         await this.updateCache(queryHash, query, location, isRemote, 'jobspy', jobs.length, cacheHours);
         return jobs;
@@ -399,6 +402,10 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       // Only add location if specified (undefined = global search for LinkedIn)
       if (location) {
         requestBody.location = location;
+      }
+      // Only add country_indeed if explicitly set (prevents CA/California ambiguity)
+      if (country) {
+        requestBody.country_indeed = country;
       }
       // Only add is_remote if explicitly set (undefined = all jobs)
       if (isRemote !== undefined) {
@@ -646,7 +653,8 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     limit: number,
     hoursOld: number | undefined,
     jobType: string | undefined,
-    isRemote: boolean | undefined
+    isRemote: boolean | undefined,
+    country: string | undefined  // Explicit country for Indeed filtering
   ): Promise<RawJob[]> {
     const jobspyUrl = process.env.JOBSPY_URL;
     if (!jobspyUrl) return [];
@@ -662,6 +670,9 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     };
     if (location) {
       dateRequest.location = location;
+    }
+    if (country) {
+      dateRequest.country_indeed = country;
     }
     if (hoursOld !== undefined) {
       dateRequest.hours_old = hoursOld;
@@ -682,6 +693,9 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     };
     if (location) {
       typeRequest.location = location;
+    }
+    if (country) {
+      typeRequest.country_indeed = country;
     }
     if (jobType) {
       typeRequest.job_type = jobType;
