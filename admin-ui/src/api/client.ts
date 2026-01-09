@@ -4,6 +4,8 @@ import type {
   SubscriptionsResponse,
   RunsResponse,
   ErrorsResponse,
+  DiagnosticsData,
+  FailStuckResponse,
   Period,
 } from './types';
 
@@ -90,5 +92,16 @@ export async function toggleDebugMode(
   return fetchApi<ToggleDebugModeResponse>(`/subscriptions/${subscriptionId}/debug`, {
     method: 'POST',
     body: JSON.stringify({ enabled }),
+  });
+}
+
+export async function getDiagnostics(): Promise<DiagnosticsData> {
+  return fetchApi<DiagnosticsData>('/diagnostics');
+}
+
+export async function failStuckRuns(minAgeMinutes = 120): Promise<FailStuckResponse> {
+  return fetchApi<FailStuckResponse>('/diagnostics/fail-stuck', {
+    method: 'POST',
+    body: JSON.stringify({ minAgeMinutes }),
   });
 }

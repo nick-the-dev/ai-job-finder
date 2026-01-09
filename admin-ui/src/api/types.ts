@@ -110,6 +110,13 @@ export interface Run {
   jobsMatched: number;
   notificationsSent: number;
   errorMessage: string | null;
+  // Progress fields for running subscriptions
+  currentStage: string | null;
+  progressPercent: number | null;
+  progressDetail: string | null;
+  // Error context for failed runs
+  failedStage: string | null;
+  errorContext: Record<string, unknown> | null;
   subscription: {
     id: string;
     jobTitles: string[];
@@ -146,4 +153,63 @@ export interface ErrorEntry {
 
 export interface ErrorsResponse {
   errors: ErrorEntry[];
+}
+
+// Diagnostics types
+export interface DiagnosticsRun {
+  runId: string;
+  subscriptionId: string;
+  username: string;
+  jobTitles: string;
+  startedAt: string;
+  durationMinutes: number;
+  stage: string;
+  progress: number;
+  progressDetail: string | null;
+  hasCheckpoint: boolean;
+  lockStatus: 'LOCKED' | 'UNLOCKED';
+  nextRunAt: string | null;
+  warnings: string[];
+}
+
+export interface QueueStats {
+  collection: { waiting: number; active: number; completed: number; failed: number };
+  matching: { waiting: number; active: number; completed: number; failed: number };
+}
+
+export interface RecentFailure {
+  runId: string;
+  username: string;
+  jobTitles: string;
+  startedAt: string;
+  durationSeconds: number | null;
+  failedStage: string | null;
+  errorMessage: string | null;
+}
+
+export interface DiagnosticsData {
+  timestamp: string;
+  summary: {
+    runningCount: number;
+    runsWithWarnings: number;
+    redisConnected: boolean;
+    activeLocks: number;
+    requestCacheSize: number;
+  };
+  runningRuns: DiagnosticsRun[];
+  queueStats: QueueStats | null;
+  locks: Array<{ key: string; subscription: string; value: unknown }>;
+  recentFailures: RecentFailure[];
+  requestCache: { size: number; entries: unknown[] };
+}
+
+export interface FailStuckResponse {
+  message: string;
+  count: number;
+  failedRuns?: Array<{
+    runId: string;
+    subscriptionId: string;
+    stage: string | null;
+    duration: string;
+  }>;
 }

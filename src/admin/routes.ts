@@ -627,6 +627,13 @@ router.get('/api/runs', async (req: Request, res: Response) => {
           jobsMatched: true,
           notificationsSent: true,
           errorMessage: true,
+          // Progress fields for running subscriptions
+          currentStage: true,
+          progressPercent: true,
+          progressDetail: true,
+          // Error context for failed runs
+          failedStage: true,
+          errorContext: true,
           subscription: {
             select: {
               id: true,
