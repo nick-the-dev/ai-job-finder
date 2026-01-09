@@ -692,6 +692,17 @@ export async function runSingleSubscriptionSearch(
 
       matchedCount++;
 
+      // Update progress every 5 jobs or on last job (BEFORE filters so progress always updates)
+      if ((jobIndex + 1) % 5 === 0 || jobIndex === totalJobsToMatch - 1) {
+        const percent = progress.matching(jobIndex + 1, totalJobsToMatch);
+        await RunTracker.updateProgress(runId, {
+          stage: 'matching',
+          percent,
+          detail: `Matched ${jobIndex + 1}/${totalJobsToMatch} jobs (${newMatches.length} new matches)`,
+          checkpoint: { stage: 'matching', currentIndex: jobIndex, matchedJobIds: newMatches.map(m => m.matchId) },
+        });
+      }
+
       // Track stats and apply filters
       if (matchResult.score < sub.minScore) {
         stats.skippedBelowScore++;
@@ -714,17 +725,6 @@ export async function runSingleSubscriptionSearch(
       newMatches.push({ job, match: matchResult, matchId: jobMatchId, isPreviouslyMatched });
       errorContext.partialResults!.jobsMatched = newMatches.length;
       subLogger.debug('Matching', `MATCH "${job.title}": score=${matchResult.score}, added to results`);
-
-      // Update progress every 5 jobs or on last job
-      if ((jobIndex + 1) % 5 === 0 || jobIndex === totalJobsToMatch - 1) {
-        const percent = progress.matching(jobIndex + 1, totalJobsToMatch);
-        await RunTracker.updateProgress(runId, {
-          stage: 'matching',
-          percent,
-          detail: `Matched ${jobIndex + 1}/${totalJobsToMatch} jobs (${newMatches.length} new matches)`,
-          checkpoint: { stage: 'matching', currentIndex: jobIndex, matchedJobIds: newMatches.map(m => m.matchId) },
-        });
-      }
     } catch (error) {
       matchingErrors++;
       logger.error('Scheduler', `[${triggerLabel}] Failed to process job: ${job.title}`, error);
@@ -1209,6 +1209,17 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
 
           matchedCount++;
 
+          // Update progress every 5 jobs or on last job (BEFORE filters so progress always updates)
+          if ((jobIndex + 1) % 5 === 0 || jobIndex === totalJobsToMatch - 1) {
+            const percent = progress.matching(jobIndex + 1, totalJobsToMatch);
+            await RunTracker.updateProgress(runId, {
+              stage: 'matching',
+              percent,
+              detail: `Matched ${jobIndex + 1}/${totalJobsToMatch} jobs (${newMatches.length} new matches)`,
+              checkpoint: { stage: 'matching', currentIndex: jobIndex, matchedJobIds: newMatches.map(m => m.matchId) },
+            });
+          }
+
           // Track stats and apply filters
           if (matchResult.score < sub.minScore) {
             stats.skippedBelowScore++;
@@ -1231,17 +1242,6 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
           newMatches.push({ job, match: matchResult, matchId: jobMatchId, isPreviouslyMatched });
           errorContext.partialResults!.jobsMatched = newMatches.length;
           subLogger.debug('Matching', `MATCH "${job.title}": score=${matchResult.score}, added to results`);
-
-          // Update progress every 5 jobs or on last job
-          if ((jobIndex + 1) % 5 === 0 || jobIndex === totalJobsToMatch - 1) {
-            const percent = progress.matching(jobIndex + 1, totalJobsToMatch);
-            await RunTracker.updateProgress(runId, {
-              stage: 'matching',
-              percent,
-              detail: `Matched ${jobIndex + 1}/${totalJobsToMatch} jobs (${newMatches.length} new matches)`,
-              checkpoint: { stage: 'matching', currentIndex: jobIndex, matchedJobIds: newMatches.map(m => m.matchId) },
-            });
-          }
         } catch (error) {
           matchingErrors++;
           logger.error('Scheduler', `  Failed to process job: ${job.title}`, error);
