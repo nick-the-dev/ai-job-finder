@@ -8,6 +8,12 @@ AI-powered job aggregation and matching system that collects jobs from multiple 
 
 - **NEVER** include AI-generated footers in git commits. Do not add "Generated with Claude Code", "Co-Authored-By: Claude", or similar attribution lines to commit messages.
 
+- **ALWAYS test schema migrations against production data BEFORE deploying.** Adding required columns without defaults will fail on tables with existing rows. Before any schema change:
+  1. Check if the table has existing data: `SELECT COUNT(*) FROM table_name;`
+  2. New columns MUST be either nullable (`String?`) or have a default value (`@default(now())`)
+  3. `@updatedAt` fields are required by Prisma and CANNOT have defaults - don't add them to tables with existing data
+  4. Test the migration locally with a copy of production data if possible
+
 ## Quick Start
 
 **Requirements:** Node.js 20+ (required for Prisma)
