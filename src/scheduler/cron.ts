@@ -20,13 +20,13 @@ const CLEANUP_SCHEDULE = '*/5 * * * *';
 const MAX_PER_MINUTE = 5;
 
 // Runs stuck for longer than this are considered failed (ms)
-const STUCK_RUN_THRESHOLD = 2 * 60 * 60 * 1000; // 2 hours (reduced from 24h for faster detection)
+// NOTE: This is only for crash recovery - runs that are ACTUALLY stuck due to server crash
+// We do NOT auto-fail runs just because they take long - that would mask implementation bugs
+const STUCK_RUN_THRESHOLD = 24 * 60 * 60 * 1000; // 24 hours - only for crash recovery
 
-// Default lock TTL in seconds (30 minutes - should be longer than max expected run time)
-const LOCK_TTL_SECONDS = 1800; // Increased from 10 min to handle long runs
-
-// Maximum run duration before forced termination (ms)
-const MAX_RUN_DURATION_MS = 30 * 60 * 1000; // 30 minutes max per run
+// Default lock TTL in seconds - must be MUCH longer than max expected run time
+// Runs can take up to 1 hour, so we use 2 hours to be safe
+const LOCK_TTL_SECONDS = 7200; // 2 hours
 
 // Redis key prefix for subscription locks
 const LOCK_KEY_PREFIX = 'lock:subscription:';
@@ -261,23 +261,12 @@ async function checkDueSubscriptions(): Promise<void> {
       logger.info('Scheduler', `[${subIdShort}] >>> RUN START for ${userName} (${sub.jobTitles.join(', ')})`);
 
       const startTime = Date.now();
-      let runCompleted = false;
-      let runError: Error | null = null;
 
       try {
-        // Wrap with timeout to prevent infinite hangs
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => {
-            reject(new Error(`Run timed out after ${MAX_RUN_DURATION_MS / 1000 / 60} minutes`));
-          }, MAX_RUN_DURATION_MS);
-        });
+        // No timeout wrapper - if a run takes long, we need visibility into WHY
+        // rather than masking it with auto-failure. The enhanced logging will show progress.
+        const result = await runSingleSubscriptionSearch(sub.id, 'scheduled');
 
-        const result = await Promise.race([
-          runSingleSubscriptionSearch(sub.id, 'scheduled'),
-          timeoutPromise,
-        ]);
-
-        runCompleted = true;
         const duration = ((Date.now() - startTime) / 1000).toFixed(1);
 
         // Success: schedule next run at normal interval
@@ -295,11 +284,10 @@ async function checkDueSubscriptions(): Promise<void> {
           `[${subIdShort}] <<< RUN COMPLETE for ${userName} in ${duration}s | ${result.matchesFound} matches | ${result.notificationsSent} notifications | Next run: ${nextRunAt.toISOString()}`
         );
       } catch (error) {
-        runError = error instanceof Error ? error : new Error(String(error));
         const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-        const isTimeout = runError.message.includes('timed out');
+        const errorMsg = error instanceof Error ? error.message : String(error);
 
-        logger.error('Scheduler', `[${subIdShort}] <<< RUN FAILED for ${userName} after ${duration}s (timeout: ${isTimeout})`, error);
+        logger.error('Scheduler', `[${subIdShort}] <<< RUN FAILED for ${userName} after ${duration}s: ${errorMsg}`, error);
 
         // Failure: schedule retry in 5 minutes (shorter than normal interval)
         const retryDelay = 5 * 60 * 1000; // 5 minutes

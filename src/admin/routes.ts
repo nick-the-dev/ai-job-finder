@@ -762,6 +762,7 @@ router.get('/api/diagnostics', async (req: Request, res: Response) => {
         id: true,
         subscriptionId: true,
         startedAt: true,
+        updatedAt: true,  // Shows last progress update time
         currentStage: true,
         progressPercent: true,
         progressDetail: true,
@@ -779,7 +780,9 @@ router.get('/api/diagnostics', async (req: Request, res: Response) => {
     // Check lock status for each running run
     const runsWithDiagnostics = await Promise.all(
       runningRuns.map(async (run) => {
-        const durationMs = Date.now() - run.startedAt.getTime();
+        const now = Date.now();
+        const durationMs = now - run.startedAt.getTime();
+        const timeSinceUpdateMs = now - run.updatedAt.getTime();
         const isLocked = await isSubscriptionRunning(run.subscriptionId);
 
         return {
@@ -788,18 +791,19 @@ router.get('/api/diagnostics', async (req: Request, res: Response) => {
           username: run.subscription.user?.username || 'unknown',
           jobTitles: run.subscription.jobTitles.slice(0, 2).join(', '),
           startedAt: run.startedAt.toISOString(),
+          lastUpdated: run.updatedAt.toISOString(),
           durationMinutes: Math.round(durationMs / 60000),
+          minutesSinceLastUpdate: Math.round(timeSinceUpdateMs / 60000),
           stage: run.currentStage || 'unknown',
           progress: run.progressPercent || 0,
           progressDetail: run.progressDetail,
           hasCheckpoint: run.checkpoint !== null,
           lockStatus: isLocked ? 'LOCKED' : 'UNLOCKED',
           nextRunAt: run.subscription.nextRunAt?.toISOString(),
-          issues: [
-            ...(durationMs > 30 * 60 * 1000 ? ['Run duration > 30 min'] : []),
-            ...(durationMs > 10 * 60 * 1000 && !run.checkpoint ? ['No checkpoint after 10 min'] : []),
-            ...(!isLocked ? ['Lock missing - potential race condition'] : []),
-            ...(run.currentStage === 'collection' && durationMs > 15 * 60 * 1000 ? ['Stuck in collection'] : []),
+          // Only flag actual problems, NOT slow runs (runs can legitimately take 1+ hour)
+          warnings: [
+            // Lock missing is a real problem - indicates race condition or crash
+            ...(!isLocked ? ['Lock missing - possible race condition or server crash'] : []),
           ],
         };
       })
@@ -879,7 +883,7 @@ router.get('/api/diagnostics', async (req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
       summary: {
         runningCount: runningRuns.length,
-        problematicRuns: runsWithDiagnostics.filter(r => r.issues.length > 0).length,
+        runsWithWarnings: runsWithDiagnostics.filter(r => r.warnings.length > 0).length,
         redisConnected: isRedisConnected(),
         activeLocks: lockInfo.length,
         requestCacheSize: cacheStats.size,
@@ -905,10 +909,14 @@ router.get('/api/diagnostics', async (req: Request, res: Response) => {
 });
 
 // POST /admin/api/diagnostics/fail-stuck - Manually fail stuck runs
+// NOTE: This is for MANUAL intervention only. Use this when you've investigated
+// and determined a run is actually stuck (e.g., lock missing, no progress for hours).
+// Runs can legitimately take 1+ hour, so time alone is NOT a reason to fail.
 router.post('/api/diagnostics/fail-stuck', async (req: Request, res: Response) => {
   try {
     const db = getDb();
-    const { minAgeMinutes = 30 } = req.body;
+    // Default to 2 hours - runs can take 1 hour legitimately
+    const { minAgeMinutes = 120 } = req.body;
 
     const cutoff = new Date(Date.now() - minAgeMinutes * 60 * 1000);
 
