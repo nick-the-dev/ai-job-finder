@@ -10,6 +10,8 @@ import {
   getSubscriptions,
   getRuns,
   getErrors,
+  getDiagnostics,
+  failStuckRuns,
   setAdminKey,
   hasAdminKey,
   toggleDebugMode,
@@ -20,6 +22,7 @@ import type {
   Subscription,
   Run,
   ErrorEntry,
+  DiagnosticsData,
   Period,
 } from '@/api/types';
 
@@ -445,6 +448,136 @@ function SubscriptionsTable({ subscriptions, onDebugToggle }: { subscriptions: S
   );
 }
 
+function ProgressBar({ percent, stage, detail }: { percent: number; stage: string | null; detail: string | null }) {
+  return (
+    <div className="min-w-[120px]">
+      <div className="relative h-5 bg-secondary rounded overflow-hidden">
+        <div
+          className="absolute h-full bg-gradient-to-r from-primary to-green-500 transition-all duration-300"
+          style={{ width: `${percent}%` }}
+        />
+        <span className="absolute inset-0 flex items-center justify-center text-xs font-medium text-white drop-shadow-sm">
+          {percent}% - {stage || 'starting'}
+        </span>
+      </div>
+      {detail && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <p className="text-xs text-muted-foreground mt-1 truncate max-w-[200px] cursor-default">
+              {detail}
+            </p>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p className="max-w-md whitespace-pre-wrap">{detail}</p>
+          </TooltipContent>
+        </Tooltip>
+      )}
+    </div>
+  );
+}
+
+function ErrorDetails({ run }: { run: Run }) {
+  const context = run.errorContext as Record<string, unknown> | null;
+
+  // Extract values with proper type casting
+  const query = context?.query as string | undefined;
+  const location = context?.location as string | undefined;
+  const jobTitle = context?.jobTitle as string | undefined;
+  const company = context?.company as string | undefined;
+  const partialResults = context?.partialResults as Record<string, number> | undefined;
+
+  return (
+    <div className="bg-muted/30 p-4 rounded-lg mt-2 text-sm">
+      <div className="text-destructive font-medium mb-2">
+        Error: {run.errorMessage || 'Unknown error'}
+      </div>
+      <div className="text-muted-foreground space-y-1">
+        <div>
+          <strong>Stage:</strong> {run.failedStage || 'unknown'}
+          {query && <> | <strong>Query:</strong> {query}</>}
+          {location && <> | <strong>Location:</strong> {location}</>}
+        </div>
+        {partialResults && (
+          <div>
+            <strong>Progress before failure:</strong>{' '}
+            {partialResults.jobsCollected ?? 0} collected,{' '}
+            {partialResults.jobsNormalized ?? 0} normalized,{' '}
+            {partialResults.jobsMatched ?? 0} matched
+          </div>
+        )}
+        {jobTitle && (
+          <div>
+            <strong>Failed on job:</strong> {jobTitle} at {company || '-'}
+          </div>
+        )}
+      </div>
+      {context && (
+        <details className="mt-2">
+          <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+            Full context (JSON)
+          </summary>
+          <pre className="mt-2 p-2 bg-background rounded text-xs overflow-x-auto max-h-40">
+            {JSON.stringify(context, null, 2)}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function RunRow({ run }: { run: Run }) {
+  const [expanded, setExpanded] = useState(false);
+  const isRunning = run.status === 'running';
+  const isFailed = run.status === 'failed';
+  const startTime = new Date(run.startedAt).getTime();
+  const currentDuration = isRunning ? Math.round((Date.now() - startTime) / 1000) : null;
+
+  return (
+    <>
+      <TableRow
+        className={`${isRunning ? 'bg-primary/5' : isFailed ? 'bg-destructive/5 cursor-pointer' : ''}`}
+        onClick={isFailed ? () => setExpanded(!expanded) : undefined}
+      >
+        <TableCell className="font-medium">{run.subscription.user.username || 'No name'}</TableCell>
+        <TableCell>
+          <TruncatedCell value={run.subscription.jobTitles.join(', ')} maxWidth={200} />
+        </TableCell>
+        <TableCell>
+          {isRunning ? (
+            <ProgressBar
+              percent={run.progressPercent ?? 0}
+              stage={run.currentStage}
+              detail={run.progressDetail}
+            />
+          ) : (
+            <span className="flex items-center gap-2">
+              <StatusBadge status={run.status} />
+              {run.failedStage && (
+                <span className="text-xs text-muted-foreground">@ {run.failedStage}</span>
+              )}
+              {isFailed && <span className="text-xs text-muted-foreground">{expanded ? '▼' : '▶'}</span>}
+            </span>
+          )}
+        </TableCell>
+        <TableCell>{run.jobsCollected}</TableCell>
+        <TableCell>{run.jobsMatched}</TableCell>
+        <TableCell>{run.notificationsSent}</TableCell>
+        <TableCell className="text-muted-foreground">
+          {isRunning ? `${currentDuration}s` : run.durationMs ? `${(run.durationMs / 1000).toFixed(1)}s` : '-'}
+        </TableCell>
+        <TableCell className="text-muted-foreground">{formatTimeAgo(run.startedAt)}</TableCell>
+      </TableRow>
+      {isFailed && expanded && (
+        <TableRow>
+          <TableCell colSpan={8} className="p-0">
+            <ErrorDetails run={run} />
+          </TableCell>
+        </TableRow>
+      )}
+    </>
+  );
+}
+
 function RunsTable({ runs }: { runs: Run[] }) {
   return (
     <Table>
@@ -455,29 +588,18 @@ function RunsTable({ runs }: { runs: Run[] }) {
           <TableHead>Status</TableHead>
           <TableHead>Collected</TableHead>
           <TableHead>Matches</TableHead>
+          <TableHead>Sent</TableHead>
           <TableHead>Duration</TableHead>
           <TableHead>Time</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {runs.map((run) => (
-          <TableRow key={run.id}>
-            <TableCell className="font-medium">{run.subscription.user.username || 'No name'}</TableCell>
-            <TableCell>
-              <TruncatedCell value={run.subscription.jobTitles.join(', ')} maxWidth={200} />
-            </TableCell>
-            <TableCell><StatusBadge status={run.status} /></TableCell>
-            <TableCell>{run.jobsCollected}</TableCell>
-            <TableCell>{run.jobsMatched}</TableCell>
-            <TableCell className="text-muted-foreground">
-              {run.durationMs ? `${(run.durationMs / 1000).toFixed(1)}s` : '-'}
-            </TableCell>
-            <TableCell className="text-muted-foreground">{formatTimeAgo(run.startedAt)}</TableCell>
-          </TableRow>
+          <RunRow key={run.id} run={run} />
         ))}
         {runs.length === 0 && (
           <TableRow>
-            <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
+            <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
               No runs yet
             </TableCell>
           </TableRow>
@@ -525,6 +647,234 @@ function ErrorsTable({ errors }: { errors: ErrorEntry[] }) {
   );
 }
 
+function DiagnosticsPanel({ data, onRefresh, onFailStuck }: {
+  data: DiagnosticsData | null;
+  onRefresh: () => void;
+  onFailStuck: (minAgeMinutes: number) => Promise<void>;
+}) {
+  const [failingStuck, setFailingStuck] = useState(false);
+  const [failStuckResult, setFailStuckResult] = useState<string | null>(null);
+
+  const handleFailStuck = async () => {
+    if (!window.confirm('This will mark runs older than 2 hours as failed. Continue?')) return;
+    setFailingStuck(true);
+    setFailStuckResult(null);
+    try {
+      await onFailStuck(120);
+      setFailStuckResult('Successfully failed stuck runs');
+      onRefresh();
+    } catch (err) {
+      setFailStuckResult(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setFailingStuck(false);
+    }
+  };
+
+  if (!data) {
+    return (
+      <div className="text-center py-8 text-muted-foreground">
+        <p>Loading diagnostics...</p>
+        <button
+          onClick={onRefresh}
+          className="mt-4 px-4 py-2 bg-secondary text-secondary-foreground rounded hover:bg-secondary/80"
+        >
+          Refresh
+        </button>
+      </div>
+    );
+  }
+
+  const { summary, runningRuns, queueStats, recentFailures } = data;
+
+  return (
+    <div className="space-y-6">
+      {/* Summary Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        <div className="bg-secondary/30 rounded-lg p-4">
+          <p className="text-sm text-muted-foreground">Running</p>
+          <p className={`text-2xl font-bold ${summary.runningCount > 0 ? 'text-primary' : ''}`}>
+            {summary.runningCount}
+          </p>
+        </div>
+        <div className="bg-secondary/30 rounded-lg p-4">
+          <p className="text-sm text-muted-foreground">With Warnings</p>
+          <p className={`text-2xl font-bold ${summary.runsWithWarnings > 0 ? 'text-warning' : ''}`}>
+            {summary.runsWithWarnings}
+          </p>
+        </div>
+        <div className="bg-secondary/30 rounded-lg p-4">
+          <p className="text-sm text-muted-foreground">Redis</p>
+          <p className={`text-2xl font-bold ${summary.redisConnected ? 'text-success' : 'text-destructive'}`}>
+            {summary.redisConnected ? 'Connected' : 'Down'}
+          </p>
+        </div>
+        <div className="bg-secondary/30 rounded-lg p-4">
+          <p className="text-sm text-muted-foreground">Active Locks</p>
+          <p className="text-2xl font-bold">{summary.activeLocks}</p>
+        </div>
+        <div className="bg-secondary/30 rounded-lg p-4">
+          <p className="text-sm text-muted-foreground">Request Cache</p>
+          <p className="text-2xl font-bold">{summary.requestCacheSize}</p>
+        </div>
+      </div>
+
+      {/* Actions */}
+      <div className="flex items-center gap-4">
+        <button
+          onClick={onRefresh}
+          className="px-4 py-2 bg-secondary text-secondary-foreground rounded hover:bg-secondary/80"
+        >
+          Refresh Diagnostics
+        </button>
+        <button
+          onClick={handleFailStuck}
+          disabled={failingStuck}
+          className="px-4 py-2 bg-destructive/20 text-destructive border border-destructive/50 rounded hover:bg-destructive/30 disabled:opacity-50"
+        >
+          {failingStuck ? 'Failing...' : 'Fail Stuck Runs (>2h)'}
+        </button>
+        {failStuckResult && (
+          <span className={`text-sm ${failStuckResult.includes('Error') ? 'text-destructive' : 'text-success'}`}>
+            {failStuckResult}
+          </span>
+        )}
+      </div>
+
+      {/* Running Runs */}
+      {runningRuns.length > 0 && (
+        <div>
+          <h3 className="text-lg font-medium mb-3">Running Subscriptions ({runningRuns.length})</h3>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>User</TableHead>
+                <TableHead>Subscription</TableHead>
+                <TableHead>Stage</TableHead>
+                <TableHead>Progress</TableHead>
+                <TableHead>Duration</TableHead>
+                <TableHead>Lock</TableHead>
+                <TableHead>Warnings</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {runningRuns.map((run) => (
+                <TableRow key={run.runId} className={run.warnings.length > 0 ? 'bg-warning/10' : ''}>
+                  <TableCell className="font-medium">{run.username}</TableCell>
+                  <TableCell>
+                    <TruncatedCell value={run.jobTitles} maxWidth={150} />
+                  </TableCell>
+                  <TableCell>{run.stage}</TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-2">
+                      <div className="w-16 h-2 bg-secondary rounded overflow-hidden">
+                        <div
+                          className="h-full bg-primary"
+                          style={{ width: `${run.progress}%` }}
+                        />
+                      </div>
+                      <span className="text-sm">{run.progress}%</span>
+                    </div>
+                  </TableCell>
+                  <TableCell>{run.durationMinutes}m</TableCell>
+                  <TableCell>
+                    <Badge variant={run.lockStatus === 'LOCKED' ? 'success' : 'destructive'}>
+                      {run.lockStatus}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    {run.warnings.length > 0 ? (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="text-warning cursor-help">{run.warnings.length} warning(s)</span>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <ul className="list-disc pl-4">
+                            {run.warnings.map((w, i) => (
+                              <li key={i}>{w}</li>
+                            ))}
+                          </ul>
+                        </TooltipContent>
+                      </Tooltip>
+                    ) : (
+                      <span className="text-muted-foreground">-</span>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+
+      {/* Queue Stats */}
+      {queueStats && (
+        <div>
+          <h3 className="text-lg font-medium mb-3">Queue Status</h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-secondary/20 rounded-lg p-4">
+              <h4 className="font-medium mb-2">Collection Queue</h4>
+              <div className="grid grid-cols-4 gap-2 text-sm">
+                <div><span className="text-muted-foreground">Waiting:</span> {queueStats.collection.waiting}</div>
+                <div><span className="text-muted-foreground">Active:</span> {queueStats.collection.active}</div>
+                <div><span className="text-muted-foreground">Completed:</span> {queueStats.collection.completed}</div>
+                <div><span className="text-muted-foreground">Failed:</span> {queueStats.collection.failed}</div>
+              </div>
+            </div>
+            <div className="bg-secondary/20 rounded-lg p-4">
+              <h4 className="font-medium mb-2">Matching Queue</h4>
+              <div className="grid grid-cols-4 gap-2 text-sm">
+                <div><span className="text-muted-foreground">Waiting:</span> {queueStats.matching.waiting}</div>
+                <div><span className="text-muted-foreground">Active:</span> {queueStats.matching.active}</div>
+                <div><span className="text-muted-foreground">Completed:</span> {queueStats.matching.completed}</div>
+                <div><span className="text-muted-foreground">Failed:</span> {queueStats.matching.failed}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Recent Failures */}
+      {recentFailures.length > 0 && (
+        <div>
+          <h3 className="text-lg font-medium mb-3">Recent Failures (24h)</h3>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>User</TableHead>
+                <TableHead>Subscription</TableHead>
+                <TableHead>Stage</TableHead>
+                <TableHead>Error</TableHead>
+                <TableHead>Duration</TableHead>
+                <TableHead>Time</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {recentFailures.map((failure) => (
+                <TableRow key={failure.runId}>
+                  <TableCell className="font-medium">{failure.username}</TableCell>
+                  <TableCell>
+                    <TruncatedCell value={failure.jobTitles} maxWidth={150} />
+                  </TableCell>
+                  <TableCell>{failure.failedStage || '-'}</TableCell>
+                  <TableCell>
+                    <TruncatedCell value={failure.errorMessage || 'Unknown'} maxWidth={200} className="text-destructive" />
+                  </TableCell>
+                  <TableCell>{failure.durationSeconds ? `${failure.durationSeconds}s` : '-'}</TableCell>
+                  <TableCell className="text-muted-foreground">{formatTimeAgo(failure.startedAt)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+
+      <p className="text-xs text-muted-foreground">
+        Last updated: {data.timestamp ? new Date(data.timestamp).toLocaleString() : '-'}
+      </p>
+    </div>
+  );
+}
+
 function Dashboard() {
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [users, setUsers] = useState<User[]>([]);
@@ -534,6 +884,7 @@ function Dashboard() {
   const [runsTotalPages, setRunsTotalPages] = useState(1);
   const [runsTotal, setRunsTotal] = useState(0);
   const [errors, setErrors] = useState<ErrorEntry[]>([]);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [period, setPeriod] = useState<Period>('24h');
@@ -554,6 +905,19 @@ function Dashboard() {
   const handlePeriodChange = (newPeriod: Period) => {
     setPeriod(newPeriod);
     loadOverview(newPeriod);
+  };
+
+  const loadDiagnostics = async () => {
+    try {
+      const data = await getDiagnostics();
+      setDiagnostics(data);
+    } catch (err) {
+      console.error('Failed to load diagnostics:', err);
+    }
+  };
+
+  const handleFailStuck = async (minAgeMinutes: number) => {
+    await failStuckRuns(minAgeMinutes);
   };
 
   useEffect(() => {
@@ -664,6 +1028,9 @@ function Dashboard() {
                 Errors ({errors.length})
                 {errors.length > 0 && <span className="ml-1 w-2 h-2 rounded-full bg-destructive inline-block" />}
               </TabsTrigger>
+              <TabsTrigger value="diagnostics" onClick={loadDiagnostics}>
+                Diagnostics
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="users" className="mt-4">
@@ -725,6 +1092,18 @@ function Dashboard() {
               <Card>
                 <CardContent className="pt-6">
                   <ErrorsTable errors={errors} />
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="diagnostics" className="mt-4">
+              <Card>
+                <CardContent className="pt-6">
+                  <DiagnosticsPanel
+                    data={diagnostics}
+                    onRefresh={loadDiagnostics}
+                    onFailStuck={handleFailStuck}
+                  />
                 </CardContent>
               </Card>
             </TabsContent>
