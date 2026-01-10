@@ -17,7 +17,7 @@ This infrastructure enables:
 
 ```bash
 # JobSpy proxies
-export JOBSPY_PROXIES="http://user1:pass1@proxy1.com:8080,http://user2:pass2@proxy2.com:8080"
+export JOBSPY_PROXIES="http://EXAMPLE_USER:EXAMPLE_PASS@proxy1.example.com:8080,http://EXAMPLE_USER:EXAMPLE_PASS@proxy2.example.com:8080"
 
 # OpenRouter API keys
 export OPENROUTER_API_KEYS="sk-or-key1,sk-or-key2,sk-or-key3"
@@ -51,7 +51,7 @@ Manages proxy rotation for job scraping.
 
 **Configuration**:
 ```bash
-export JOBSPY_PROXIES="http://user:pass@proxy1.com:8080,http://user:pass@proxy2.com:8080"
+export JOBSPY_PROXIES="http://EXAMPLE_USER:EXAMPLE_PASS@proxy1.example.com:8080,http://EXAMPLE_USER:EXAMPLE_PASS@proxy2.example.com:8080"
 ```
 
 **Debugging**:
