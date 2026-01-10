@@ -56,56 +56,68 @@ export class OpenRouterKeyPool {
    * Returns null if all keys are exhausted.
    */
   async getAvailableKey(): Promise<string | null> {
-    const now = Date.now();
-    const oneMinuteAgo = now - 60000; // 1 minute sliding window
+    const maxWaitTime = 120000; // Maximum wait time: 2 minutes
+    const startTime = Date.now();
 
-    // Clean up old timestamps and unblock keys that were 429-blocked
-    for (const keyStats of this.keys) {
-      // Remove timestamps older than 1 minute
-      keyStats.requestTimestamps = keyStats.requestTimestamps.filter(ts => ts > oneMinuteAgo);
+    while (true) {
+      const now = Date.now();
+      const oneMinuteAgo = now - 60000; // 1 minute sliding window
 
-      // Check if 429 block has expired (wait 60 seconds after 429)
-      if (keyStats.is429Blocked && keyStats.blockedUntil && now > keyStats.blockedUntil) {
-        keyStats.is429Blocked = false;
-        keyStats.blockedUntil = undefined;
-        logger.info('KeyPool', `Key ${this.maskKey(keyStats.key)} unblocked after 429 cooldown`);
-      }
-    }
-
-    // Try to find an available key (round-robin + availability check)
-    const startIndex = this.currentIndex;
-    let attempts = 0;
-
-    while (attempts < this.keys.length) {
-      const keyStats = this.keys[this.currentIndex];
-      this.currentIndex = (this.currentIndex + 1) % this.keys.length;
-      attempts++;
-
-      // Skip if blocked by 429
-      if (keyStats.is429Blocked) {
-        continue;
+      // Check if we've exceeded maximum wait time
+      if (now - startTime > maxWaitTime) {
+        logger.error('KeyPool', 'Maximum wait time exceeded, all keys exhausted');
+        return null;
       }
 
-      // Check if key is under rate limit
-      if (keyStats.requestTimestamps.length < this.rateLimit) {
-        // Record this request
-        keyStats.requestTimestamps.push(now);
-        return keyStats.key;
+      // Clean up old timestamps and unblock keys that were 429-blocked
+      for (const keyStats of this.keys) {
+        // Remove timestamps older than 1 minute
+        keyStats.requestTimestamps = keyStats.requestTimestamps.filter(ts => ts > oneMinuteAgo);
+
+        // Check if 429 block has expired (wait 60 seconds after 429)
+        if (keyStats.is429Blocked && keyStats.blockedUntil && now > keyStats.blockedUntil) {
+          keyStats.is429Blocked = false;
+          keyStats.blockedUntil = undefined;
+          logger.info('KeyPool', `Key ${this.maskKey(keyStats.key)} unblocked after 429 cooldown`);
+        }
+      }
+
+      // Try to find an available key (round-robin + availability check)
+      const startIndex = this.currentIndex;
+      let attempts = 0;
+
+      while (attempts < this.keys.length) {
+        const keyStats = this.keys[this.currentIndex];
+        this.currentIndex = (this.currentIndex + 1) % this.keys.length;
+        attempts++;
+
+        // Skip if blocked by 429
+        if (keyStats.is429Blocked) {
+          continue;
+        }
+
+        // Check if key is under rate limit
+        if (keyStats.requestTimestamps.length < this.rateLimit) {
+          // Record this request
+          keyStats.requestTimestamps.push(now);
+          return keyStats.key;
+        }
+      }
+
+      // All keys exhausted
+      logger.warn('KeyPool', `All ${this.keys.length} keys are at rate limit or blocked. Waiting...`);
+
+      // Calculate when the next key will be available
+      const nextAvailableTime = this.getNextAvailableTime();
+      if (nextAvailableTime > 0) {
+        logger.info('KeyPool', `Next key available in ${Math.ceil(nextAvailableTime / 1000)}s`);
+        await this.sleep(nextAvailableTime);
+        // Continue to next iteration of while loop
+      } else {
+        // No keys available and none will become available
+        return null;
       }
     }
-
-    // All keys exhausted
-    logger.warn('KeyPool', `All ${this.keys.length} keys are at rate limit or blocked. Waiting...`);
-
-    // Calculate when the next key will be available
-    const nextAvailableTime = this.getNextAvailableTime();
-    if (nextAvailableTime > 0) {
-      logger.info('KeyPool', `Next key available in ${Math.ceil(nextAvailableTime / 1000)}s`);
-      await this.sleep(nextAvailableTime);
-      return this.getAvailableKey(); // Try again after waiting
-    }
-
-    return null;
   }
 
   /**

@@ -252,7 +252,7 @@ export class ParallelCollector {
   }
 
   /**
-   * Deduplicate jobs based on sourceId and job_url
+   * Deduplicate jobs based on sourceId, job_url, and title+company combination
    */
   private deduplicateJobs(jobs: RawJob[]): RawJob[] {
     const seen = new Set<string>();
@@ -260,7 +260,10 @@ export class ParallelCollector {
 
     for (const job of jobs) {
       // Create a unique key from sourceId or application URL
-      const key = job.sourceId || job.applicationUrl || `${job.title}-${job.company}`;
+      // Fallback to a hash of title+company+location to avoid false collisions
+      const key = job.sourceId || 
+                  job.applicationUrl || 
+                  `${job.title.toLowerCase()}-${job.company.toLowerCase()}-${job.location || 'unknown'}`;
 
       if (!seen.has(key)) {
         seen.add(key);
@@ -292,8 +295,8 @@ export class ParallelCollector {
       description,
       location: job.location || undefined,
       isRemote: job.is_remote || false,
-      salaryMin: job.min_amount ? parseInt(job.min_amount) : undefined,
-      salaryMax: job.max_amount ? parseInt(job.max_amount) : undefined,
+      salaryMin: job.min_amount ? parseInt(job.min_amount, 10) : undefined,
+      salaryMax: job.max_amount ? parseInt(job.max_amount, 10) : undefined,
       salaryCurrency: job.currency || undefined,
       applicationUrl: job.job_url || undefined,
       postedDate,
