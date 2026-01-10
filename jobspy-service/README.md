@@ -24,7 +24,7 @@ To avoid rate limiting and increase throughput, configure a proxy pool:
 
 ```bash
 # Set comma-separated proxy URLs (format: http://user:pass@host:port)
-export JOBSPY_PROXIES="http://user1:pass1@proxy1.com:8080,http://user2:pass2@proxy2.com:8080"
+export JOBSPY_PROXIES="http://EXAMPLE_USER:EXAMPLE_PASS@proxy1.example.com:8080,http://EXAMPLE_USER:EXAMPLE_PASS@proxy2.example.com:8080"
 uvicorn main:app --port 8000
 ```
 
