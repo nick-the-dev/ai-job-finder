@@ -308,7 +308,7 @@ All LLM responses are validated with Zod schemas to prevent hallucinations.
 
 ```bash
 # Required
-DATABASE_URL=postgresql://user:pass@localhost:5433/jobfinder
+DATABASE_URL=postgresql://EXAMPLE_USER:EXAMPLE_PASS@localhost:5433/jobfinder
 OPENROUTER_API_KEY=sk-or-...
 OPENROUTER_MODEL=xiaomi/mimo-v2-flash:free
 
