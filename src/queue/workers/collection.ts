@@ -1,4 +1,5 @@
 import { Job } from 'bull';
+import * as Sentry from '@sentry/node';
 import { config } from '../../config.js';
 import { logger } from '../../utils/logger.js';
 import { CollectorService } from '../../services/collector.js';
@@ -40,6 +41,13 @@ export async function processCollectionJob(job: Job<CollectionJobData>): Promise
   } catch (error) {
     const totalDuration = Date.now() - workerStartTime;
     logger.error('Worker:Collection', `[${requestId}] <<< WORKER FAILED (jobId=${job.id}) after ${totalDuration}ms`, error);
+    // Report worker errors to Sentry
+    if (error instanceof Error) {
+      Sentry.captureException(error, {
+        tags: { component: 'worker', worker: 'collection', query, location: location || 'any' },
+        extra: { requestId, jobId: job.id, source, duration: totalDuration },
+      });
+    }
     throw error;
   }
 }

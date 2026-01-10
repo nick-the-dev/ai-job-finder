@@ -103,11 +103,13 @@ export async function callLLM<T>(
   } = options;
 
   // Create Langfuse trace and generation if enabled
+  // Set input at trace level for visibility in Langfuse UI
   const trace = langfuse?.trace({
     name: traceName || 'llm-call',
     userId: traceUserId,
     sessionId: traceSessionId,
     metadata: traceMetadata,
+    input: messages, // Show messages in trace view
   });
   const generation = trace?.generation({
     name: traceName || 'openrouter-generation',
@@ -201,6 +203,9 @@ Respond ONLY with a valid JSON object. No other text.`,
           totalTokens: usage.total_tokens,
         } : undefined,
       });
+
+      // Update trace with output for visibility in Langfuse UI
+      trace?.update({ output: result.data });
 
       return result.data;
     } catch (error) {

@@ -1,4 +1,5 @@
 import cron from 'node-cron';
+import * as Sentry from '@sentry/node';
 import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
 import { getDb } from '../db/client.js';
@@ -189,6 +190,11 @@ async function cleanupStuckRuns(): Promise<void> {
     }
   } catch (error) {
     logger.error('Scheduler', 'Failed to cleanup stuck runs', error);
+    if (error instanceof Error) {
+      Sentry.captureException(error, {
+        tags: { component: 'scheduler', operation: 'cleanupStuckRuns' },
+      });
+    }
   }
 }
 
@@ -305,6 +311,12 @@ async function checkDueSubscriptions(): Promise<void> {
     }
   } catch (error) {
     logger.error('Scheduler', 'Due check failed', error);
+    // Report scheduler errors to Sentry
+    if (error instanceof Error) {
+      Sentry.captureException(error, {
+        tags: { component: 'scheduler', operation: 'checkDueSubscriptions' },
+      });
+    }
   } finally {
     isProcessing = false;
   }
@@ -458,6 +470,11 @@ export async function handleInterruptedRuns(): Promise<void> {
     logger.info('Scheduler', `Handled ${interruptedRuns.length + stuckRuns.length} interrupted/stuck run(s)`);
   } catch (error) {
     logger.error('Scheduler', 'Failed to handle interrupted runs', error);
+    if (error instanceof Error) {
+      Sentry.captureException(error, {
+        tags: { component: 'scheduler', operation: 'handleInterruptedRuns' },
+      });
+    }
   }
 }
 
