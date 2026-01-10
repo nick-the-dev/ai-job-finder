@@ -1,5 +1,6 @@
 import { Bot, Context, webhookCallback } from 'grammy';
 import type { Express, Request, Response, NextFunction } from 'express';
+import * as Sentry from '@sentry/node';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { getDb } from '../db/client.js';
@@ -83,8 +84,27 @@ export function getBot(): Bot<BotContext> {
     setupDocumentHandler(bot);
     setupConversation(bot);
 
-    // Error handler
+    // Error handler with Sentry integration
     bot.catch((err) => {
+      const error = err.error instanceof Error ? err.error : new Error(String(err.error));
+      const ctx = err.ctx;
+
+      // Capture to Sentry with user context
+      Sentry.captureException(error, {
+        tags: {
+          handler: 'telegramBot',
+          command: ctx.message?.text?.split(' ')[0] || 'unknown',
+        },
+        user: ctx.from ? {
+          id: ctx.from.id.toString(),
+          username: ctx.from.username,
+        } : undefined,
+        extra: {
+          chatId: ctx.chat?.id,
+          updateType: ctx.update ? Object.keys(ctx.update)[0] : 'unknown',
+        },
+      });
+
       logger.error('Telegram', 'Bot error', err.error);
     });
   }

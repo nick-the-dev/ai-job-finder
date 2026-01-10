@@ -342,9 +342,17 @@ LANGFUSE_PUBLIC_KEY=pk-lf-...  # From Langfuse dashboard after first login
 LANGFUSE_SECRET_KEY=sk-lf-...  # From Langfuse dashboard after first login
 LANGFUSE_BASE_URL=https://langfuse.49-12-207-132.sslip.io  # Self-hosted instance
 
-# Sentry (Error Tracking - Optional)
+# Sentry (Full Observability - Optional)
 SENTRY_DSN=https://xxx@sentry.io/xxx  # From Sentry project
 SENTRY_ENVIRONMENT=development  # development | production
+SENTRY_TRACES_SAMPLE_RATE=0.1  # Base trace sampling (0.0-1.0, default: 0.1)
+SENTRY_PROFILES_SAMPLE_RATE=0.1  # CPU profiling sampling (0.0-1.0, default: 0.1)
+# Note: Subscription runs are always sampled at 100%, health checks at 1%
+
+# Source Maps Upload (for readable stack traces in Sentry)
+SENTRY_AUTH_TOKEN=...  # From https://sentry.io/settings/auth-tokens/
+SENTRY_ORG=your-org    # Sentry organization slug
+SENTRY_PROJECT=your-project  # Sentry project slug
 ```
 
 ## Data Sources
@@ -552,13 +560,68 @@ mcp__langfuse__fetch_trace(trace_id="<id>", include_observations=true)
 **Known Issue (langfuse-mcp v0.3.1):**
 `get_session_details` fails with `DateTime64` error on self-hosted Langfuse. Fix: patch `~/.cache/uv/archive-v0/*/langfuse_mcp/__main__.py` line 1518, change `datetime.fromtimestamp(0, tz=timezone.utc)` to `None`. Restart Claude Code after patching.
 
-### Sentry (Error Tracking)
+### Sentry (Full Observability)
 
-Captures all unhandled exceptions and subscription run failures:
-- Grouped by error type
-- Stack traces with source maps
-- Context tags (subscriptionId, stage, triggerType)
-- Alerting via email/Slack
+Comprehensive error tracking, performance monitoring, and business metrics:
+
+**Error Tracking:**
+- All unhandled exceptions (uncaughtException, unhandledRejection)
+- Subscription run failures with full context (stage, query, location)
+- API errors from JobSpy, SerpAPI, OpenRouter
+- Telegram bot errors with user context
+- PII scrubbing for resume text in error reports
+
+**Performance Monitoring:**
+- Custom spans for queue workers (collection, matching)
+- LLM call spans with token usage and latency
+- External API spans for JobSpy and SerpAPI
+- Dynamic sampling: 100% for subscription runs, 1% for health checks
+
+**Business Metrics (Sentry Insights):**
+| Metric | Type | Description |
+|--------|------|-------------|
+| `jobs.collected` | Counter | Jobs collected by source (jobspy/serpapi) |
+| `jobs.matched` | Counter | Jobs matched per subscription |
+| `notifications.sent` | Counter | Telegram notifications sent |
+| `subscription.run.completed` | Counter | Runs by success/failure and trigger type |
+| `subscription.run.duration` | Distribution | Run duration in milliseconds |
+| `llm.latency` | Distribution | LLM call latency by operation |
+| `llm.tokens` | Counter | Token usage by operation |
+| `match.cache` | Counter | Cache hit/miss ratio |
+| `match.score` | Distribution | Job match score distribution |
+| `api.errors` | Counter | API errors by service and type |
+
+**User Context:**
+- Subscription runs tagged with userId, username, subscriptionId
+- Telegram bot errors include user info
+- Breadcrumb trail for debugging (run stages, API calls, LLM calls)
+
+**Helper Functions (`src/utils/sentry.ts`):**
+```typescript
+// Set user context for a subscription run
+setSubscriptionContext(subscription);
+
+// Add breadcrumbs for operation trail
+addRunStageBreadcrumb('collection', 'Collected 50 jobs');
+addQueueBreadcrumb('matching', 'process', { jobTitle, company });
+addLLMBreadcrumb('job-matching', { latencyMs, tokens });
+addApiCallBreadcrumb('JobSpy', 'search', { query, location });
+
+// Clear user context after run
+clearSentryUser();
+```
+
+**Source Maps:**
+Source maps are generated during build. To upload to Sentry for readable stack traces:
+```bash
+# Set required env vars
+export SENTRY_AUTH_TOKEN=your-token
+export SENTRY_ORG=your-org
+export SENTRY_PROJECT=your-project
+
+# Upload after build
+./scripts/sentry-release.sh
+```
 
 Errors from `RunTracker.fail()` are automatically sent to Sentry with full context.
 

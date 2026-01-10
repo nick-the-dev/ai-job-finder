@@ -2,6 +2,12 @@ import { Prisma } from '@prisma/client';
 import * as Sentry from '@sentry/node';
 import { getDb } from '../db/client.js';
 import { logger } from '../utils/logger.js';
+import {
+  trackSubscriptionRunCompleted,
+  trackSubscriptionRunDuration,
+  trackJobsMatched,
+  trackNotificationSent,
+} from './metrics.js';
 
 export type TriggerType = 'scheduled' | 'manual' | 'initial' | 'resumed';
 export type RunStatus = 'running' | 'completed' | 'failed';
@@ -160,6 +166,19 @@ export class RunTracker {
       },
     });
 
+    // Track metrics in Sentry
+    const triggerType = run.triggerType as 'scheduled' | 'manual' | 'api';
+    trackSubscriptionRunCompleted(true, triggerType);
+    trackSubscriptionRunDuration(durationMs, triggerType);
+    if (stats.jobsMatched && stats.jobsMatched > 0) {
+      trackJobsMatched(stats.jobsMatched, run.subscriptionId);
+    }
+    if (stats.notificationsSent && stats.notificationsSent > 0) {
+      for (let i = 0; i < stats.notificationsSent; i++) {
+        trackNotificationSent('telegram');
+      }
+    }
+
     logger.debug('RunTracker', `Completed run ${runId} in ${durationMs}ms`);
   }
 
@@ -218,6 +237,11 @@ export class RunTracker {
         },
       });
     }
+
+    // Track failed run metrics
+    const triggerType = run.triggerType as 'scheduled' | 'manual' | 'api';
+    trackSubscriptionRunCompleted(false, triggerType);
+    trackSubscriptionRunDuration(durationMs, triggerType);
   }
 
   /**

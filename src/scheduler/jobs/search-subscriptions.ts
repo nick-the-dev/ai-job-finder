@@ -9,6 +9,7 @@ import { logger, createSubscriptionLogger, type SubscriptionLogger } from '../..
 import { queueService, PRIORITY, type Priority } from '../../queue/index.js';
 import { AdaptiveBatchProcessor, type MatchingResult } from '../../queue/batch-processor.js';
 import { RunTracker, formatTriggerLabel, updateSkillStats, createMarketSnapshot, type ErrorContext, type TriggerType, type ProgressUpdate } from '../../observability/index.js';
+import { setSubscriptionContext, addRunStageBreadcrumb, clearSentryUser } from '../../utils/sentry.js';
 import type { NormalizedJob, JobMatchResult, RawJob } from '../../core/types.js';
 import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
 
@@ -596,6 +597,13 @@ export async function runSingleSubscriptionSearch(
     throw new Error('Subscription not found or inactive');
   }
 
+  // Set Sentry context for error attribution
+  setSubscriptionContext(subscriptionId, sub.userId, sub.user.username, triggerType);
+  addRunStageBreadcrumb('collection', 'Starting subscription run', {
+    jobTitles: sub.jobTitles,
+    minScore: sub.minScore,
+  });
+
   // Create subscription-scoped logger if debug mode is enabled
   const subLogger = createSubscriptionLogger(subscriptionId, sub.debugMode);
 
@@ -722,6 +730,7 @@ export async function runSingleSubscriptionSearch(
 
   // Stage 2: Normalization (dynamic % based on job count)
   errorContext.stage = 'normalization';
+  addRunStageBreadcrumb('normalization', `Deduplicating ${allRawJobs.length} jobs`);
   const normalizationStartTime = Date.now();
   logger.info('Scheduler', `[${triggerLabel}] >>> STAGE: normalization - Deduplicating ${allRawJobs.length} jobs`);
 
@@ -779,6 +788,7 @@ export async function runSingleSubscriptionSearch(
   // Stage 3: Matching (dynamic % based on job count - usually the largest phase)
   // Uses adaptive batch processor with Bull queue for parallel LLM calls
   errorContext.stage = 'matching';
+  addRunStageBreadcrumb('matching', `Processing ${normalizedJobs.length} jobs`);
   const matchingStartTime = Date.now();
   logger.info('Scheduler', `[${triggerLabel}] >>> STAGE: matching - Processing ${normalizedJobs.length} jobs with batch processor`);
 
@@ -954,6 +964,7 @@ export async function runSingleSubscriptionSearch(
   if (newMatches.length > 0) {
     // Stage 4: Notification (final phase)
     errorContext.stage = 'notification';
+    addRunStageBreadcrumb('notification', `Sending ${newMatches.length} notifications`);
     const notificationStartTime = Date.now();
     logger.info('Scheduler', `[${triggerLabel}] >>> STAGE: notification - Sending ${newMatches.length} notifications`);
 
@@ -1053,6 +1064,10 @@ export async function runSingleSubscriptionSearch(
   if (sub.debugMode) {
     subLogger.info('Debug', '=== DEBUG MODE - Run complete. Disable debug mode in admin dashboard when done. ===');
   }
+
+  // Mark run completed in Sentry breadcrumbs
+  addRunStageBreadcrumb('completed', `${newMatches.length} matches, ${notificationsSent} notifications`);
+  clearSentryUser();
 
   return { matchesFound: newMatches.length, notificationsSent, stats, jobsProcessed: normalizedJobs.length };
 

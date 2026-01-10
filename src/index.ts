@@ -1,6 +1,7 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import * as Sentry from '@sentry/node';
+import { createRequire } from 'module';
 import { config } from './config.js';
 import { logger } from './utils/logger.js';
 import { router, errorHandler } from './api/routes.js';
@@ -20,18 +21,84 @@ import { adminRouter } from './admin/index.js';
 import { startCleanupScheduler, stopCleanupScheduler } from './observability/index.js';
 import { shutdownLangfuse } from './llm/client.js';
 
+// Load package.json for version info
+const require = createRequire(import.meta.url);
+const pkg = require('../package.json');
+
 // Initialize Sentry for error tracking (must be done before Express app)
 if (config.SENTRY_DSN) {
+  const release = `ai-job-finder@${pkg.version}`;
   Sentry.init({
     dsn: config.SENTRY_DSN,
     environment: config.SENTRY_ENVIRONMENT,
-    tracesSampleRate: 0.1, // 10% of requests for performance tracing
-    profilesSampleRate: 0.1, // 10% of transactions for profiling
+    release,
+    serverName: process.env.HOSTNAME || `ai-job-finder-${process.pid}`,
+
+    // Integrations for enhanced monitoring
+    integrations: [
+      Sentry.prismaIntegration(),
+    ],
+
+    // Dynamic sampling: critical paths at 100%, health checks at 1%
+    tracesSampler: ({ name, parentSampled }) => {
+      if (parentSampled) return true;
+      if (name?.includes('/health')) return 0.01;
+      if (name?.includes('/admin')) return 0.5;
+      if (name?.includes('subscription-run') || name?.includes('job-matching')) return 1.0;
+      return config.SENTRY_TRACES_SAMPLE_RATE;
+    },
+    profilesSampleRate: config.SENTRY_PROFILES_SAMPLE_RATE,
+
+    // Filter and enrich events before sending
+    beforeSend(event, hint) {
+      // Scrub PII from resume text
+      if (event.extra) {
+        if ('resumeText' in event.extra) {
+          event.extra.resumeText = '[REDACTED]';
+        }
+        if ('resume' in event.extra) {
+          event.extra.resume = '[REDACTED]';
+        }
+      }
+      // Don't send expected rate limit errors
+      const message = event.message || (hint.originalException as Error)?.message || '';
+      if (message.includes('rate limit') || message.includes('Too many requests')) {
+        return null;
+      }
+      return event;
+    },
+
+    // Filter noisy breadcrumbs
+    beforeBreadcrumb(breadcrumb) {
+      if (breadcrumb.category === 'console' && breadcrumb.level === 'debug') {
+        return null;
+      }
+      return breadcrumb;
+    },
   });
-  logger.info('Sentry', 'Error tracking enabled');
+  logger.info('Sentry', `Enabled (release: ${release})`);
 } else {
   logger.info('Sentry', 'Disabled (no SENTRY_DSN configured)');
 }
+
+// Global error handlers for uncaught exceptions
+process.on('uncaughtException', (error) => {
+  logger.error('Process', 'Uncaught exception', error);
+  Sentry.captureException(error, {
+    tags: { handler: 'uncaughtException' },
+  });
+  // Flush and exit
+  Sentry.close(2000).finally(() => {
+    process.exit(1);
+  });
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('Process', 'Unhandled rejection', reason);
+  Sentry.captureException(reason, {
+    tags: { handler: 'unhandledRejection' },
+  });
+});
 
 const app = express();
 
@@ -75,6 +142,8 @@ app.use('/jobs', apiLimiter);
 app.use('/matches', apiLimiter);
 app.use('/download', apiLimiter);
 
+// Note: Sentry v8+ auto-instruments Express, no manual request handler needed
+
 // Request logging
 app.use((req, res, next) => {
   logger.info('HTTP', `${req.method} ${req.path}`);
@@ -106,6 +175,13 @@ async function shutdown(signal: string) {
   await disconnectRedis();
   await disconnectDb();
   await shutdownLangfuse(); // Flush and close Langfuse
+
+  // Flush Sentry before exit
+  if (config.SENTRY_DSN) {
+    await Sentry.close(2000);
+    logger.info('Sentry', 'Flushed pending events');
+  }
+
   process.exit(0);
 }
 

@@ -42,6 +42,7 @@
   },
   "devDependencies": {
     "@secretlint/secretlint-rule-preset-recommend": "^11.2.5",
+    "@sentry/cli": "^3.0.3",
     "@stryker-mutator/core": "^9.4.0",
     "@stryker-mutator/typescript-checker": "^9.4.0",
     "@stryker-mutator/vitest-runner": "^9.4.0",

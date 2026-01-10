@@ -1,8 +1,11 @@
 import axios from 'axios';
 import { z } from 'zod';
+import * as Sentry from '@sentry/node';
 import { Langfuse } from 'langfuse';
 import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
+import { addLLMBreadcrumb } from '../utils/sentry.js';
+import { trackLLMLatency, trackLLMTokens, trackApiError } from '../observability/metrics.js';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
@@ -102,147 +105,188 @@ export async function callLLM<T>(
     traceMetadata,
   } = options;
 
-  // Create Langfuse trace and generation if enabled
-  // Set input at trace level for visibility in Langfuse UI
-  const trace = langfuse?.trace({
-    name: traceName || 'llm-call',
-    userId: traceUserId,
-    sessionId: traceSessionId,
-    metadata: traceMetadata,
-    input: messages, // Show messages in trace view
-  });
-  const generation = trace?.generation({
-    name: traceName || 'openrouter-generation',
-    model: config.OPENROUTER_MODEL,
-    input: messages,
-    modelParameters: { temperature, maxTokens },
-  });
+  addLLMBreadcrumb(`Starting: ${traceName || 'llm-call'}`, { model: config.OPENROUTER_MODEL });
 
-  // Add instruction to respond with JSON
-  const lastMessage = messages[messages.length - 1];
-  const enhancedMessages = [
-    ...messages.slice(0, -1),
+  // Wrap entire LLM call in a Sentry span for performance monitoring
+  return Sentry.startSpan(
     {
-      ...lastMessage,
-      content: `${lastMessage.content}
-
-Respond ONLY with a valid JSON object. No other text.`,
+      op: 'ai.chat_completions',
+      name: traceName || 'openrouter.chat',
+      attributes: {
+        'ai.model': config.OPENROUTER_MODEL,
+        'ai.temperature': temperature,
+        'ai.max_tokens': maxTokens,
+        'ai.prompt.messages': messages.length,
+      },
     },
-  ];
+    async (span) => {
+      const startTime = Date.now();
 
-  let lastError: Error | null = null;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      if (attempt > 0) {
-        logger.info('LLM', `Retry attempt ${attempt}/${maxRetries}...`);
-      }
-
-      const response = await axios.post(
-        OPENROUTER_URL,
-        {
-          model: config.OPENROUTER_MODEL,
-          messages: enhancedMessages,
-          temperature,
-          max_tokens: maxTokens,
-          response_format: { type: 'json_object' },
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${config.OPENROUTER_API_KEY}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://github.com/ai-job-finder',
-            'X-Title': 'AI Job Finder',
-          },
-          timeout, // Prevent hanging on slow/stuck API calls
-        }
-      );
-
-      const content = response.data.choices?.[0]?.message?.content;
-      if (!content) {
-        // Empty/malformed response - could be transient, so retry
-        if (attempt < maxRetries) {
-          const delay = getBackoffDelay(attempt);
-          logger.warn('LLM', `Empty/malformed response, waiting ${Math.round(delay / 1000)}s before retry...`, {
-            hasChoices: !!response.data.choices,
-            choicesLength: response.data.choices?.length,
-            responseKeys: Object.keys(response.data || {}),
-          });
-          await sleep(delay);
-          lastError = new Error('Empty response from LLM');
-          continue;
-        }
-        throw new Error('Empty response from LLM after all retries');
-      }
-
-      // Parse JSON (strip comments first - LLMs sometimes add them)
-      let parsed: unknown;
-      try {
-        const cleanedContent = stripJsonComments(content);
-        parsed = JSON.parse(cleanedContent);
-      } catch (e) {
-        logger.error('LLM', 'Failed to parse JSON response', content);
-        throw new Error('Invalid JSON from LLM');
-      }
-
-      // Validate with Zod
-      const result = schema.safeParse(parsed);
-      if (!result.success) {
-        logger.error('LLM', 'Schema validation failed', result.error.format());
-        generation?.end({ output: parsed, level: 'ERROR', statusMessage: 'Schema validation failed' });
-        throw new Error(`Schema validation failed: ${result.error.message}`);
-      }
-
-      // Track successful generation in Langfuse
-      const usage = response.data.usage;
-      generation?.end({
-        output: result.data,
-        usage: usage ? {
-          promptTokens: usage.prompt_tokens,
-          completionTokens: usage.completion_tokens,
-          totalTokens: usage.total_tokens,
-        } : undefined,
+      // Create Langfuse trace and generation if enabled
+      // Set input at trace level for visibility in Langfuse UI
+      const trace = langfuse?.trace({
+        name: traceName || 'llm-call',
+        userId: traceUserId,
+        sessionId: traceSessionId,
+        metadata: traceMetadata,
+        input: messages, // Show messages in trace view
+      });
+      const generation = trace?.generation({
+        name: traceName || 'openrouter-generation',
+        model: config.OPENROUTER_MODEL,
+        input: messages,
+        modelParameters: { temperature, maxTokens },
       });
 
-      // Update trace with output for visibility in Langfuse UI
-      trace?.update({ output: result.data });
+      // Add instruction to respond with JSON
+      const lastMessage = messages[messages.length - 1];
+      const enhancedMessages = [
+        ...messages.slice(0, -1),
+        {
+          ...lastMessage,
+          content: `${lastMessage.content}
 
-      return result.data;
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        const status = error.response?.status;
-        const retryAfter = error.response?.headers?.['retry-after'];
-        const isTimeout = error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT';
+Respond ONLY with a valid JSON object. No other text.`,
+        },
+      ];
 
-        // Retry on timeout, rate limit (429), or server errors (5xx)
-        if (isTimeout || status === 429 || (status && status >= 500)) {
-          if (attempt < maxRetries) {
-            const delay = getBackoffDelay(attempt, retryAfter ? parseInt(retryAfter) : undefined);
-            const reason = isTimeout ? 'timeout' : `status ${status}`;
-            logger.warn('LLM', `Request failed (${reason}), waiting ${Math.round(delay / 1000)}s before retry...`);
-            await sleep(delay);
-            lastError = new Error(`LLM API error: ${reason}`);
-            continue;
+      let lastError: Error | null = null;
+
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          if (attempt > 0) {
+            logger.info('LLM', `Retry attempt ${attempt}/${maxRetries}...`);
           }
+
+          const response = await axios.post(
+            OPENROUTER_URL,
+            {
+              model: config.OPENROUTER_MODEL,
+              messages: enhancedMessages,
+              temperature,
+              max_tokens: maxTokens,
+              response_format: { type: 'json_object' },
+            },
+            {
+              headers: {
+                'Authorization': `Bearer ${config.OPENROUTER_API_KEY}`,
+                'Content-Type': 'application/json',
+                'HTTP-Referer': 'https://github.com/ai-job-finder',
+                'X-Title': 'AI Job Finder',
+              },
+              timeout,
+            }
+          );
+
+          const content = response.data.choices?.[0]?.message?.content;
+          if (!content) {
+            if (attempt < maxRetries) {
+              const delay = getBackoffDelay(attempt);
+              logger.warn('LLM', `Empty/malformed response, waiting ${Math.round(delay / 1000)}s before retry...`, {
+                hasChoices: !!response.data.choices,
+                choicesLength: response.data.choices?.length,
+                responseKeys: Object.keys(response.data || {}),
+              });
+              await sleep(delay);
+              lastError = new Error('Empty response from LLM');
+              continue;
+            }
+            throw new Error('Empty response from LLM after all retries');
+          }
+
+          // Parse JSON (strip comments first - LLMs sometimes add them)
+          let parsed: unknown;
+          try {
+            const cleanedContent = stripJsonComments(content);
+            parsed = JSON.parse(cleanedContent);
+          } catch (e) {
+            logger.error('LLM', 'Failed to parse JSON response', content);
+            throw new Error('Invalid JSON from LLM');
+          }
+
+          // Validate with Zod
+          const result = schema.safeParse(parsed);
+          if (!result.success) {
+            logger.error('LLM', 'Schema validation failed', result.error.format());
+            generation?.end({ output: parsed, level: 'ERROR', statusMessage: 'Schema validation failed' });
+            throw new Error(`Schema validation failed: ${result.error.message}`);
+          }
+
+          // Track successful generation in Langfuse
+          const usage = response.data.usage;
+          generation?.end({
+            output: result.data,
+            usage: usage ? {
+              promptTokens: usage.prompt_tokens,
+              completionTokens: usage.completion_tokens,
+              totalTokens: usage.total_tokens,
+            } : undefined,
+          });
+
+          // Update trace with output for visibility in Langfuse UI
+          trace?.update({ output: result.data });
+
+          // Add token metrics to Sentry span
+          const latencyMs = Date.now() - startTime;
+          span.setAttribute('ai.latency_ms', latencyMs);
+          if (usage) {
+            span.setAttribute('ai.tokens.prompt', usage.prompt_tokens);
+            span.setAttribute('ai.tokens.completion', usage.completion_tokens);
+            span.setAttribute('ai.tokens.total', usage.total_tokens);
+          }
+
+          // Track metrics for Sentry Insights
+          const operation = traceName || 'llm-call';
+          trackLLMLatency(operation, latencyMs);
+          if (usage?.total_tokens) {
+            trackLLMTokens(operation, usage.total_tokens);
+          }
+
+          addLLMBreadcrumb(`Completed: ${traceName || 'llm-call'}`, {
+            latencyMs,
+            tokens: usage?.total_tokens,
+          });
+
+          return result.data;
+        } catch (error) {
+          if (axios.isAxiosError(error)) {
+            const status = error.response?.status;
+            const retryAfter = error.response?.headers?.['retry-after'];
+            const isTimeout = error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT';
+
+            // Retry on timeout, rate limit (429), or server errors (5xx)
+            if (isTimeout || status === 429 || (status && status >= 500)) {
+              if (attempt < maxRetries) {
+                const delay = getBackoffDelay(attempt, retryAfter ? parseInt(retryAfter) : undefined);
+                const reason = isTimeout ? 'timeout' : `status ${status}`;
+                logger.warn('LLM', `Request failed (${reason}), waiting ${Math.round(delay / 1000)}s before retry...`);
+                await sleep(delay);
+                lastError = new Error(`LLM API error: ${reason}`);
+                continue;
+              }
+            }
+
+            logger.error('LLM', 'API error', {
+              status,
+              code: error.code,
+              data: error.response?.data,
+            });
+            const errorType = isTimeout ? 'timeout' : `status_${status}`;
+            trackApiError('openrouter', errorType);
+            const errorMsg = `LLM API error: ${isTimeout ? 'timeout' : status}`;
+            generation?.end({ level: 'ERROR', statusMessage: errorMsg });
+            throw new Error(errorMsg);
+          }
+          generation?.end({ level: 'ERROR', statusMessage: String(error) });
+          throw error;
         }
-
-        logger.error('LLM', 'API error', {
-          status,
-          code: error.code,
-          data: error.response?.data,
-        });
-        const errorMsg = `LLM API error: ${isTimeout ? 'timeout' : status}`;
-        generation?.end({ level: 'ERROR', statusMessage: errorMsg });
-        throw new Error(errorMsg);
       }
-      generation?.end({ level: 'ERROR', statusMessage: String(error) });
-      throw error;
-    }
-  }
 
-  // All retries exhausted
-  generation?.end({ level: 'ERROR', statusMessage: 'All retries exhausted' });
-  throw lastError || new Error('LLM request failed after all retries');
+      // All retries exhausted
+      generation?.end({ level: 'ERROR', statusMessage: 'All retries exhausted' });
+      throw lastError || new Error('LLM request failed after all retries');
+    }
+  );
 }
 
 /**

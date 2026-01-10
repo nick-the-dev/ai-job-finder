@@ -1,8 +1,11 @@
 import axios from 'axios';
 import crypto from 'crypto';
+import * as Sentry from '@sentry/node';
 import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
 import { getDb } from '../db/client.js';
+import { addApiCallBreadcrumb } from '../utils/sentry.js';
+import { trackJobsCollected, trackApiError } from '../observability/metrics.js';
 import type { RawJob } from '../core/types.js';
 import type { IService } from '../core/interfaces.js';
 import type { Job } from '@prisma/client';
@@ -208,73 +211,96 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     let nextPageToken: string | undefined;
     let hasMore = true;
 
-    try {
-      while (hasMore && page < maxPages && allJobs.length < limit) {
+    addApiCallBreadcrumb('SerpAPI', 'search', { query, location, isRemote, limit });
 
-        const params: Record<string, string> = {
-          engine: 'google_jobs',
-          q: query,
-          api_key: this.apiKey,
-          hl: 'en', // Force English results to avoid localized text (Arabic, etc.)
-        };
+    // Wrap SerpAPI calls in a Sentry span
+    return Sentry.startSpan(
+      {
+        op: 'http.client',
+        name: 'serpapi.search',
+        attributes: {
+          'http.url': 'https://serpapi.com/search',
+          'http.method': 'GET',
+          'job.query': query,
+          'job.location': location || 'any',
+        },
+      },
+      async (span) => {
+        try {
+          while (hasMore && page < maxPages && allJobs.length < limit) {
+            const params: Record<string, string> = {
+              engine: 'google_jobs',
+              q: query,
+              api_key: this.apiKey,
+              hl: 'en',
+            };
 
-        // Don't pass "Remote" as location - it's not a valid SerpAPI location
-        // "Remote" is handled via ltype parameter instead (fix v3 - 2024-12-29)
-        const locationLower = location?.toLowerCase();
-        if (location && locationLower !== 'remote') {
-          params.location = location;
-        }
-        if (isRemote) params.ltype = '1';
-        if (nextPageToken) params.next_page_token = nextPageToken;
+            const locationLower = location?.toLowerCase();
+            if (location && locationLower !== 'remote') {
+              params.location = location;
+            }
+            if (isRemote) params.ltype = '1';
+            if (nextPageToken) params.next_page_token = nextPageToken;
 
-        // Date filter: today, 3days, week, month
-        if (datePosted) {
-          params.chips = `date_posted:${datePosted}`;
-        }
+            if (datePosted) {
+              params.chips = `date_posted:${datePosted}`;
+            }
 
-        const response = await axios.get('https://serpapi.com/search', { params });
+            const response = await axios.get('https://serpapi.com/search', { params });
 
-        const jobs = response.data.jobs_results || [];
+            const jobs = response.data.jobs_results || [];
 
-        if (jobs.length === 0) {
-          hasMore = false;
-        } else {
-          for (const job of jobs) {
-            if (allJobs.length >= limit) break;
-            allJobs.push(this.transformSerpJob(job));
+            if (jobs.length === 0) {
+              hasMore = false;
+            } else {
+              for (const job of jobs) {
+                if (allJobs.length >= limit) break;
+                allJobs.push(this.transformSerpJob(job));
+              }
+
+              nextPageToken = response.data.serpapi_pagination?.next_page_token;
+              hasMore = !!nextPageToken;
+              page++;
+
+              if (hasMore && allJobs.length < limit) {
+                await this.delay(500);
+              }
+            }
           }
 
-          nextPageToken = response.data.serpapi_pagination?.next_page_token;
-          hasMore = !!nextPageToken;
-          page++;
+          // Update cache
+          await this.updateCache(queryHash, query, location, isRemote, 'serpapi', allJobs.length, cacheHours);
 
-          if (hasMore && allJobs.length < limit) {
-            await this.delay(500);
+          span.setAttribute('jobs.count', allJobs.length);
+          span.setAttribute('http.status_code', 200);
+          logger.info('Collector', `[SerpAPI] ✗ API CALLED: ${allJobs.length} jobs for "${query}" in "${location || 'any'}" (hash: ${queryHash}) - cached for ${cacheHours}h`);
+
+          // Track jobs collected metric
+          if (allJobs.length > 0) {
+            trackJobsCollected(allJobs.length, 'serpapi');
           }
-        }
-      }
 
-      // Update cache
-      await this.updateCache(queryHash, query, location, isRemote, 'serpapi', allJobs.length, cacheHours);
-
-      logger.info('Collector', `[SerpAPI] ✗ API CALLED: ${allJobs.length} jobs for "${query}" in "${location || 'any'}" (hash: ${queryHash}) - cached for ${cacheHours}h`);
-
-      return allJobs;
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        logger.error('Collector', '[SerpAPI] API error', {
-          status: error.response?.status,
-          message: error.response?.data?.error,
-        });
-        if (allJobs.length > 0) {
-          logger.warn('Collector', `[SerpAPI] Returning ${allJobs.length} jobs collected before error`);
           return allJobs;
+        } catch (error) {
+          if (axios.isAxiosError(error)) {
+            span.setAttribute('http.status_code', error.response?.status || 0);
+            trackApiError('serpapi', `status_${error.response?.status || 'unknown'}`);
+            logger.error('Collector', '[SerpAPI] API error', {
+              status: error.response?.status,
+              message: error.response?.data?.error,
+            });
+            if (allJobs.length > 0) {
+              logger.warn('Collector', `[SerpAPI] Returning ${allJobs.length} jobs collected before error`);
+              trackJobsCollected(allJobs.length, 'serpapi');
+              return allJobs;
+            }
+          } else {
+            logger.error('Collector', '[SerpAPI] Collection failed', error);
+          }
+          throw error;
         }
-      } else {
-        logger.error('Collector', '[SerpAPI] Collection failed', error);
       }
-      throw error;
-    }
+    );
   }
 
   /**
@@ -358,95 +384,117 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       return [];
     }
 
-    const searchStartTime = Date.now();
     logger.info('Collector', `[JobSpy] >>> FETCH START: "${query}" @ ${location || 'global'} (target: ${limit} jobs)`);
 
+    addApiCallBreadcrumb('JobSpy', 'search', { query, location, isRemote, jobType, limit });
+
     // Convert datePosted to hours_old for JobSpy
-    // Default: 720 hours (30 days / 1 month)
     const hoursOldMap: Record<string, number | undefined> = {
       'today': 24,
       '3days': 72,
       'week': 168,
       'month': 720,
-      'all': undefined, // No limit - fetch all available
+      'all': undefined,
     };
-    // Default to 720 (month) if not specified
     const hoursOld = input.datePosted ? hoursOldMap[input.datePosted] : 720;
 
-    try {
-      // Indeed limitation: only one of (hours_old) OR (job_type & is_remote) can be used
-      // Solution: If both are needed, do multiple searches and intersect results
-      const needsMultipleSearches = (hoursOld !== undefined) && (jobType || isRemote !== undefined);
+    // Wrap JobSpy calls in a Sentry span
+    return Sentry.startSpan(
+      {
+        op: 'http.client',
+        name: 'jobspy.scrape',
+        attributes: {
+          'http.url': `${jobspyUrl}/scrape`,
+          'http.method': 'POST',
+          'job.query': query,
+          'job.location': location || 'global',
+        },
+      },
+      async (span) => {
+        try {
+          // Indeed limitation: only one of (hours_old) OR (job_type & is_remote) can be used
+          const needsMultipleSearches = (hoursOld !== undefined) && (jobType || isRemote !== undefined);
 
-      if (needsMultipleSearches) {
-        logger.info('Collector', `[JobSpy] Using multiple searches due to Indeed limitation`);
-        const jobs = await this.fetchJobSpyWithIntersection(
-          query,
-          location, // undefined = global search (LinkedIn global, Indeed uses country_indeed default)
-          limit,
-          hoursOld,
-          jobType,
-          isRemote,
-          country  // Explicit country for Indeed filtering
-        );
-        await this.updateCache(queryHash, query, location, isRemote, 'jobspy', jobs.length, cacheHours);
-        return jobs;
+          if (needsMultipleSearches) {
+            logger.info('Collector', `[JobSpy] Using multiple searches due to Indeed limitation`);
+            const jobs = await this.fetchJobSpyWithIntersection(
+              query,
+              location,
+              limit,
+              hoursOld,
+              jobType,
+              isRemote,
+              country
+            );
+            await this.updateCache(queryHash, query, location, isRemote, 'jobspy', jobs.length, cacheHours);
+            span.setAttribute('jobs.count', jobs.length);
+            if (jobs.length > 0) {
+              trackJobsCollected(jobs.length, 'jobspy');
+            }
+            return jobs;
+          }
+
+          // Single search - no conflicting filters
+          const requestBody: Record<string, any> = {
+            search_term: query,
+            site_name: ['indeed', 'linkedin'],
+            results_wanted: limit,
+          };
+          if (location) {
+            requestBody.location = location;
+          }
+          if (country) {
+            requestBody.country_indeed = country;
+          }
+          if (isRemote !== undefined) {
+            requestBody.is_remote = isRemote;
+          }
+          if (jobType) {
+            requestBody.job_type = jobType;
+          }
+          if (hoursOld !== undefined) {
+            requestBody.hours_old = hoursOld;
+          }
+
+          logger.info('Collector', `[JobSpy] Sending API request to ${jobspyUrl}/scrape...`);
+          const apiStartTime = Date.now();
+          const response = await axios.post(`${jobspyUrl}/scrape`, requestBody, { timeout: 120000 });
+          const apiDuration = Date.now() - apiStartTime;
+
+          const jobs = response.data.jobs || [];
+          logger.info('Collector', `[JobSpy] API returned ${jobs.length} jobs in ${apiDuration}ms`);
+
+          const transformedJobs = jobs.map((job: any) => this.transformJobSpyJob(job));
+
+          // Update cache
+          await this.updateCache(queryHash, query, location, isRemote, 'jobspy', transformedJobs.length, cacheHours);
+
+          span.setAttribute('jobs.count', transformedJobs.length);
+          span.setAttribute('http.status_code', 200);
+          span.setAttribute('http.duration_ms', apiDuration);
+          logger.info('Collector', `[JobSpy] ✗ API CALLED: ${transformedJobs.length} jobs for "${query}" in "${location || 'any'}" (hash: ${queryHash}) - cached for ${cacheHours}h`);
+
+          // Track jobs collected metric
+          if (transformedJobs.length > 0) {
+            trackJobsCollected(transformedJobs.length, 'jobspy');
+          }
+
+          return transformedJobs;
+        } catch (error) {
+          if (axios.isAxiosError(error)) {
+            span.setAttribute('http.status_code', error.response?.status || 0);
+            trackApiError('jobspy', `status_${error.response?.status || 'unknown'}`);
+            logger.error('Collector', '[JobSpy] API error', {
+              status: error.response?.status,
+              message: error.message,
+            });
+          } else {
+            logger.error('Collector', '[JobSpy] Collection failed', error);
+          }
+          return [];
+        }
       }
-
-      // Single search - no conflicting filters
-      const requestBody: Record<string, any> = {
-        search_term: query,
-        site_name: ['indeed', 'linkedin'],  // glassdoor disabled - location parsing broken
-        results_wanted: limit,
-      };
-      // Only add location if specified (undefined = global search for LinkedIn)
-      if (location) {
-        requestBody.location = location;
-      }
-      // Only add country_indeed if explicitly set (prevents CA/California ambiguity)
-      if (country) {
-        requestBody.country_indeed = country;
-      }
-      // Only add is_remote if explicitly set (undefined = all jobs)
-      if (isRemote !== undefined) {
-        requestBody.is_remote = isRemote;
-      }
-      // Only add job_type if explicitly set (undefined = all types)
-      if (jobType) {
-        requestBody.job_type = jobType;
-      }
-      // Only add hours_old if specified (undefined = no limit / all time)
-      if (hoursOld !== undefined) {
-        requestBody.hours_old = hoursOld;
-      }
-
-      logger.info('Collector', `[JobSpy] Sending API request to ${jobspyUrl}/scrape...`);
-      const apiStartTime = Date.now();
-      const response = await axios.post(`${jobspyUrl}/scrape`, requestBody, { timeout: 120000 }); // 2 min timeout for scraping
-      const apiDuration = Date.now() - apiStartTime;
-
-      const jobs = response.data.jobs || [];
-      logger.info('Collector', `[JobSpy] API returned ${jobs.length} jobs in ${apiDuration}ms`);
-
-      const transformedJobs = jobs.map((job: any) => this.transformJobSpyJob(job));
-
-      // Update cache
-      await this.updateCache(queryHash, query, location, isRemote, 'jobspy', transformedJobs.length, cacheHours);
-
-      logger.info('Collector', `[JobSpy] ✗ API CALLED: ${transformedJobs.length} jobs for "${query}" in "${location || 'any'}" (hash: ${queryHash}) - cached for ${cacheHours}h`);
-
-      return transformedJobs;
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        logger.error('Collector', '[JobSpy] API error', {
-          status: error.response?.status,
-          message: error.message,
-        });
-      } else {
-        logger.error('Collector', '[JobSpy] Collection failed', error);
-      }
-      return []; // Return empty array instead of throwing - JobSpy is optional
-    }
+    );
   }
 
   private transformSerpJob(serpJob: any): RawJob {

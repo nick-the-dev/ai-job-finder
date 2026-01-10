@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { join } from 'path';
+import * as Sentry from '@sentry/node';
 import { logger } from '../utils/logger.js';
 import { getDb } from '../db/client.js';
 import { NormalizerService } from '../services/normalizer.js';
@@ -542,6 +543,19 @@ export function errorHandler(err: Error, req: Request, res: Response, next: Next
     });
     return;
   }
+
+  // Capture unhandled API errors to Sentry with request context
+  Sentry.captureException(err, {
+    tags: {
+      handler: 'expressErrorHandler',
+      path: req.path,
+      method: req.method,
+    },
+    extra: {
+      query: req.query,
+      hasBody: !!req.body,
+    },
+  });
 
   logger.error('API', 'Unhandled error', { message: err.message, stack: err.stack });
   res.status(500).json({

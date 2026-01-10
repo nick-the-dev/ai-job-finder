@@ -8,3 +8,21 @@ export {
   getResumeTips,
 } from './analytics.js';
 export { cleanupOldData, startCleanupScheduler, stopCleanupScheduler } from './cleanup.js';
+
+// Sentry business metrics
+export {
+  trackJobsCollected,
+  trackJobsMatched,
+  trackJobsFiltered,
+  trackNotificationSent,
+  trackSubscriptionRunCompleted,
+  trackSubscriptionRunDuration,
+  trackQueueWaitTime,
+  trackLLMLatency,
+  trackLLMTokens,
+  trackActiveSubscriptions,
+  trackTotalUsers,
+  trackMatchCacheHit,
+  trackApiError,
+  trackMatchScore,
+} from './metrics.js';
