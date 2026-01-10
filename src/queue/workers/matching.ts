@@ -68,8 +68,20 @@ export async function processMatchingJob(job: Job<MatchingJobData>): Promise<Mat
     sourceId: jobData.sourceId,
   };
 
-  // Call LLM for matching
-  const matchResult = await matcher.execute({ job: normalizedJob, resumeText });
+  // Call LLM for matching with trace context for observability
+  const { traceContext } = job.data;
+  const matchResult = await matcher.execute({
+    job: normalizedJob,
+    resumeText,
+    traceContext: traceContext ? {
+      subscriptionId: traceContext.subscriptionId,
+      runId: traceContext.runId,
+      userId: traceContext.userId,
+      username: traceContext.username, // Pass username for Langfuse user tracking
+      jobTitle: jobData.title,
+      company: jobData.company,
+    } : undefined,
+  });
 
   logger.debug('Worker:Matching', `[${requestId}] Score: ${matchResult.score} for "${jobData.title}"`);
 

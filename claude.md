@@ -481,15 +481,30 @@ Tracks all LLM calls with:
 - Latency metrics
 - Input/output logging for debugging
 - Error tracking
+- Full trace context linking LLM calls to subscriptions
 
-LLM calls automatically include tracing context:
-```typescript
-await callLLM(messages, schema, jsonSchema, {
-  traceName: 'job-matching',
-  traceUserId: subscriptionId,
-  traceMetadata: { jobTitle, company },
-});
-```
+**Trace Context Flow:**
+All job matching LLM calls include rich context for debugging:
+
+| Field | Description |
+|-------|-------------|
+| `traceName` | Operation name (`job-matching`) |
+| `traceUserId` | subscriptionId - groups all traces by subscription |
+| `traceSessionId` | runId - groups traces within a single run |
+| `traceMetadata` | Job details: subscriptionId, runId, userId, jobTitle, company, contentHash |
+
+The trace context flows through the entire queue system:
+1. `search-subscriptions.ts` → `batchProcessor.processAll()` with trace context
+2. `batch-processor.ts` → `queueService.enqueueMatching()` passes trace context
+3. `service.ts` → Bull queue job data includes trace context
+4. `matching.ts` worker → `matcher.execute()` with trace context
+5. `matcher.ts` → `callLLM()` with full Langfuse trace context
+
+This enables:
+- Filtering traces by subscription/user in Langfuse dashboard
+- Tracking LLM costs per subscription
+- Debugging specific job matching issues by job title/company
+- Understanding which jobs are expensive to match
 
 View traces at: https://cloud.langfuse.com (or your self-hosted instance)
 

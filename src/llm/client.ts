@@ -241,6 +241,13 @@ Respond ONLY with a valid JSON object. No other text.`,
 }
 
 /**
+ * Get Langfuse instance for direct access (scores, spans, etc.)
+ */
+export function getLangfuse(): Langfuse | null {
+  return langfuse;
+}
+
+/**
  * Flush Langfuse events (call on graceful shutdown)
  */
 export async function flushLangfuse(): Promise<void> {

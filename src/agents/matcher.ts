@@ -8,9 +8,22 @@ import type { IAgent, VerifiedOutput } from '../core/interfaces.js';
 // Long descriptions with legal text, benefits, etc. can hang the API
 const MAX_DESCRIPTION_LENGTH = 6000;
 
+/**
+ * Trace context for LLM observability (Langfuse)
+ */
+export interface TraceContext {
+  subscriptionId?: string;
+  runId?: string;
+  userId?: string;
+  username?: string; // Telegram username for human-readable Langfuse user tracking
+  jobTitle?: string;
+  company?: string;
+}
+
 interface MatcherInput {
   job: NormalizedJob;
   resumeText: string;
+  traceContext?: TraceContext;
 }
 
 /**
@@ -95,13 +108,30 @@ ${resumeText}
 Provide your analysis in the required JSON format.`;
 
     try {
+      const traceContext = input.traceContext;
       const result = await callLLM<JobMatchOutput>(
         [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
         JobMatchSchema,
-        JobMatchJsonSchema
+        JobMatchJsonSchema,
+        {
+          // Langfuse trace context for LLM observability
+          traceName: 'job-matching',
+          // Use username for Langfuse "User" field (human-readable)
+          traceUserId: traceContext?.username || traceContext?.userId,
+          traceSessionId: traceContext?.runId,
+          traceMetadata: traceContext ? {
+            subscriptionId: traceContext.subscriptionId,
+            runId: traceContext.runId,
+            userId: traceContext.userId,
+            username: traceContext.username,
+            jobTitle: job.title,
+            company: job.company,
+            jobContentHash: job.contentHash,
+          } : undefined,
+        }
       );
 
       // Log score=0 at debug level (expected for mismatched jobs)

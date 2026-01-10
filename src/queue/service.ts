@@ -273,7 +273,8 @@ export class QueueService {
     job: NormalizedJob,
     resumeText: string,
     resumeHash: string,
-    priority: Priority = PRIORITY.API_REQUEST
+    priority: Priority = PRIORITY.API_REQUEST,
+    traceContext?: { subscriptionId?: string; runId?: string; userId?: string; username?: string }
   ): Promise<{ match: JobMatchResult; cached: boolean; jobMatchId?: string }> {
     const requestId = generateRequestId();
     const { matchingQueue } = getQueues();
@@ -281,7 +282,7 @@ export class QueueService {
     if (!matchingQueue || !isRedisConnected()) {
       if (config.QUEUE_FALLBACK_ENABLED) {
         logger.debug('QueueService', `[${requestId}] Fallback: direct matching`);
-        return this.directMatching(job, resumeText, resumeHash);
+        return this.directMatching(job, resumeText, resumeHash, traceContext);
       }
       throw new Error('Queue unavailable and fallback disabled');
     }
@@ -306,6 +307,7 @@ export class QueueService {
       resumeHash,
       requestId,
       priority,
+      traceContext,
     };
 
     const queueJob = await matchingQueue.add(jobData, {
@@ -393,7 +395,8 @@ export class QueueService {
   private async directMatching(
     job: NormalizedJob,
     resumeText: string,
-    resumeHash: string
+    resumeHash: string,
+    traceContext?: { subscriptionId?: string; runId?: string; userId?: string; username?: string }
   ): Promise<{ match: JobMatchResult; cached: boolean; jobMatchId?: string }> {
     const { MatcherAgent } = await import('../agents/matcher.js');
     const { getDb } = await import('../db/client.js');
@@ -424,7 +427,7 @@ export class QueueService {
       }
 
       // No cache - call LLM
-      const matchResult = await matcher.execute({ job, resumeText });
+      const matchResult = await matcher.execute({ job, resumeText, traceContext });
       return { match: matchResult, cached: false };
     });
   }

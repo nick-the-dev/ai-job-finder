@@ -25,6 +25,16 @@ export type BatchProgressCallback = (
 ) => Promise<void>;
 
 /**
+ * Trace context for LLM observability (Langfuse)
+ */
+export interface BatchTraceContext {
+  subscriptionId?: string;
+  runId?: string;
+  userId?: string;
+  username?: string; // Telegram username for human-readable tracking
+}
+
+/**
  * Simple adaptive batch processor for LLM matching.
  *
  * Adjusts batch size and delay based purely on API response:
@@ -109,7 +119,8 @@ export class AdaptiveBatchProcessor {
     resumeText: string,
     resumeHash: string,
     priority: Priority = PRIORITY.SCHEDULED,
-    onProgress?: BatchProgressCallback
+    onProgress?: BatchProgressCallback,
+    traceContext?: BatchTraceContext
   ): Promise<MatchingResult[]> {
     logger.info('BatchProcessor', `Starting batch processing for ${jobs.length} jobs`);
 
@@ -156,7 +167,7 @@ export class AdaptiveBatchProcessor {
       logger.info('BatchProcessor', `Batch ${this.stats.batchesProcessed + 1}: ${batch.length} jobs (batch=${this.batchSize}, delay=${this.delayMs}ms)`);
 
       const batchStartTime = Date.now();
-      const batchResults = await this.processBatch(batch, resumeText, resumeHash, priority);
+      const batchResults = await this.processBatch(batch, resumeText, resumeHash, priority, traceContext);
       const batchDuration = Date.now() - batchStartTime;
 
       allResults.push(...batchResults);
@@ -191,10 +202,11 @@ export class AdaptiveBatchProcessor {
     batch: NormalizedJob[],
     resumeText: string,
     resumeHash: string,
-    priority: Priority
+    priority: Priority,
+    traceContext?: BatchTraceContext
   ): Promise<MatchingResult[]> {
     const promises = batch.map(job =>
-      this.processWithErrorHandling(job, resumeText, resumeHash, priority)
+      this.processWithErrorHandling(job, resumeText, resumeHash, priority, traceContext)
     );
 
     const results = await Promise.allSettled(promises);
@@ -216,12 +228,13 @@ export class AdaptiveBatchProcessor {
     job: NormalizedJob,
     resumeText: string,
     resumeHash: string,
-    priority: Priority
+    priority: Priority,
+    traceContext?: BatchTraceContext
   ): Promise<MatchingResult> {
     this.stats.totalProcessed++;
 
     try {
-      const result = await queueService.enqueueMatching(job, resumeText, resumeHash, priority);
+      const result = await queueService.enqueueMatching(job, resumeText, resumeHash, priority, traceContext);
       this.stats.totalSuccess++;
       if (result.cached) this.stats.totalCached++;
       return { job, match: result.match, cached: result.cached, jobMatchId: result.jobMatchId };

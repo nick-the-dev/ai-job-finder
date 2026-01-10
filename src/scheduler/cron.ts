@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
 import { getDb } from '../db/client.js';
-import { runSingleSubscriptionSearch, resumeInterruptedRun, type MatchingCheckpoint } from './jobs/search-subscriptions.js';
+import { runSingleSubscriptionSearch, resumeInterruptedRun, resumeCollectionCheckpoint, type MatchingCheckpoint, type CollectionCheckpoint } from './jobs/search-subscriptions.js';
 import { getRedis, isRedisConnected } from '../queue/redis.js';
 import { RunTracker } from '../observability/tracker.js';
 
@@ -345,23 +345,24 @@ export async function handleInterruptedRuns(): Promise<void> {
 
     logger.info('Scheduler', `Found ${interruptedRuns.length} resumable + ${stuckRuns.length} stuck runs from previous instance`);
 
-    // Handle resumable runs (with matching checkpoint)
+    // Handle resumable runs (with matching or collection checkpoint)
     for (const run of interruptedRuns) {
-      const checkpoint = run.checkpoint as MatchingCheckpoint | null;
+      const checkpoint = run.checkpoint as MatchingCheckpoint | CollectionCheckpoint | null;
       const stage = checkpoint?.stage || run.currentStage || 'unknown';
       const percent = run.progressPercent || 0;
       const username = run.subscription.user?.username || 'unknown';
 
-      // Only resume runs that are in matching stage with normalizedJobs
-      if (checkpoint?.stage === 'matching' && checkpoint.normalizedJobs?.length > 0) {
+      // Resume from matching checkpoint (matching stage with normalizedJobs)
+      if (checkpoint?.stage === 'matching' && (checkpoint as MatchingCheckpoint).normalizedJobs?.length > 0) {
+        const matchingCheckpoint = checkpoint as MatchingCheckpoint;
         logger.info(
           'Scheduler',
-          `Resuming run ${run.id} for @${username}: stage=${stage}, progress=${percent}%, position=${checkpoint.currentIndex}/${checkpoint.normalizedJobs.length}`
+          `Resuming run ${run.id} for @${username}: stage=matching, progress=${percent}%, position=${matchingCheckpoint.currentIndex}/${matchingCheckpoint.normalizedJobs.length}`
         );
 
         // Resume the run in the background (don't block startup)
         // eslint-disable-next-line @typescript-eslint/no-floating-promises
-        resumeInterruptedRun(run.id, run.subscriptionId, checkpoint)
+        resumeInterruptedRun(run.id, run.subscriptionId, matchingCheckpoint)
           .then(result => {
             if (result.success) {
               logger.info('Scheduler', `Resumed run ${run.id} completed: ${result.newMatches} new matches`);
@@ -372,8 +373,30 @@ export async function handleInterruptedRuns(): Promise<void> {
           .catch(error => {
             logger.error('Scheduler', `Error resuming run ${run.id}`, error);
           });
+      }
+      // Resume from collection checkpoint (collection stage with collected jobs)
+      else if (checkpoint?.stage === 'collection' && (checkpoint as CollectionCheckpoint).collectedJobs?.length > 0) {
+        const collectionCheckpoint = checkpoint as CollectionCheckpoint;
+        logger.info(
+          'Scheduler',
+          `Resuming run ${run.id} for @${username}: stage=collection, progress=${percent}%, queries=${collectionCheckpoint.queriesCompleted}/${collectionCheckpoint.queriesTotal}, jobs=${collectionCheckpoint.collectedJobs.length}`
+        );
+
+        // Resume the run in the background (don't block startup)
+        // eslint-disable-next-line @typescript-eslint/no-floating-promises
+        resumeCollectionCheckpoint(run.id, run.subscriptionId, collectionCheckpoint)
+          .then(result => {
+            if (result.success) {
+              logger.info('Scheduler', `Resumed run ${run.id} from collection completed: ${result.newMatches} new matches`);
+            } else {
+              logger.error('Scheduler', `Resumed run ${run.id} from collection failed: ${result.error}`);
+            }
+          })
+          .catch(error => {
+            logger.error('Scheduler', `Error resuming run ${run.id} from collection`, error);
+          });
       } else {
-        // No valid matching checkpoint - fail and schedule re-run
+        // No valid checkpoint - fail and schedule re-run
         logger.info(
           'Scheduler',
           `Interrupted run ${run.id} for @${username} cannot be resumed (stage=${stage}), scheduling re-run`

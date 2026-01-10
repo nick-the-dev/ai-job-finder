@@ -30,7 +30,8 @@ interface CollectionParams {
   skipCache: boolean;
   priority: Priority;
   subLogger?: SubscriptionLogger; // Optional subscription-scoped logger for debug mode
-  onProgress?: (current: number, total: number, detail: string) => Promise<void>; // Progress callback
+  onProgress?: (current: number, total: number, detail: string, accumulatedJobs: RawJob[], completedQueryKeys: string[]) => Promise<void>; // Progress callback with accumulated jobs for checkpoint
+  skipQueryKeys?: string[]; // Query keys to skip (for resume from checkpoint)
 }
 
 interface CollectionError {
@@ -66,11 +67,13 @@ interface MatchingCheckpoint extends Record<string, unknown> {
   failedJobHashes: string[];         // Jobs that failed matching (skip on resume)
 }
 
-interface CollectionCheckpoint {
+interface CollectionCheckpoint extends Record<string, unknown> {
   stage: 'collection';
   queriesCompleted: number;
   queriesTotal: number;
-  collectedJobs: RawJob[];           // Partial collection results
+  collectedJobs: RawJob[];           // Partial collection results (stored incrementally)
+  // Query tracking for proper resume
+  completedQueryKeys: string[];      // Keys of completed queries (e.g., "title|location|jobType")
 }
 
 export type RunCheckpoint = MatchingCheckpoint | CollectionCheckpoint | { stage: string };
@@ -198,14 +201,23 @@ function ensureCountryInLocation(location: string, country: string): string {
 }
 
 /**
+ * Generate a unique key for a query (for checkpoint resume)
+ */
+function generateQueryKey(title: string, location: string | undefined, jobType: string | undefined, isRemote: boolean): string {
+  return `${title}|${location || ''}|${jobType || ''}|${isRemote}`;
+}
+
+/**
  * Collect jobs for a subscription, supporting multi-location search.
  * Uses normalizedLocations if available, falls back to legacy location/isRemote.
  * Returns detailed result with error tracking for reliability.
  */
 async function collectJobsForSubscription(params: CollectionParams): Promise<CollectionResult> {
-  const { jobTitles, normalizedLocations, legacyLocation, legacyIsRemote, jobTypes, datePosted, limit, skipCache, priority, subLogger, onProgress } = params;
+  const { jobTitles, normalizedLocations, legacyLocation, legacyIsRemote, jobTypes, datePosted, limit, skipCache, priority, subLogger, onProgress, skipQueryKeys } = params;
   const allRawJobs: RawJob[] = [];
   const errors: CollectionError[] = [];
+  const completedQueryKeys: string[] = [];
+  const skipKeys = new Set(skipQueryKeys || []);
   let queriesTotal = 0;
   let queriesFailed = 0;
   let queriesCompleted = 0;
@@ -238,7 +250,16 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
       for (const title of jobTitles) {
         // Search for worldwide remote jobs (no location filter = global search)
         if (hasWorldwideRemote) {
+          const queryKey = generateQueryKey(title, undefined, jobType, true);
           queriesTotal++;
+
+          // Skip if already completed (resume from checkpoint)
+          if (skipKeys.has(queryKey)) {
+            queriesCompleted++;
+            completedQueryKeys.push(queryKey);
+            continue;
+          }
+
           try {
             logger.info('Scheduler', `  Collecting remote jobs globally for: "${title}"${jobTypeLabel}`);
             const jobs = await queueService.enqueueCollection({
@@ -254,7 +275,8 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
             logger.info('Scheduler', `  Found ${jobs.length} remote jobs globally for "${title}"${jobTypeLabel}`);
             allRawJobs.push(...jobs);
             queriesCompleted++;
-            await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`);
+            completedQueryKeys.push(queryKey);
+            await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`, allRawJobs, completedQueryKeys);
           } catch (error) {
             queriesFailed++;
             const errorMsg = error instanceof Error ? error.message : String(error);
@@ -271,7 +293,16 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
           for (const variant of variants) {
             // Ensure country is in location string for LinkedIn (which doesn't support country_indeed)
             const locationWithCountry = ensureCountryInLocation(variant, loc.country);
+            const queryKey = generateQueryKey(title, locationWithCountry, jobType, true);
             queriesTotal++;
+
+            // Skip if already completed (resume from checkpoint)
+            if (skipKeys.has(queryKey)) {
+              queriesCompleted++;
+              completedQueryKeys.push(queryKey);
+              continue;
+            }
+
             try {
               logger.info('Scheduler', `  Collecting remote jobs for: "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
               const jobs = await queueService.enqueueCollection({
@@ -288,7 +319,8 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
               logger.info('Scheduler', `  Found ${jobs.length} remote jobs for "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
               allRawJobs.push(...jobs);
               queriesCompleted++;
-              await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`);
+              completedQueryKeys.push(queryKey);
+              await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`, allRawJobs, completedQueryKeys);
             } catch (error) {
               queriesFailed++;
               const errorMsg = error instanceof Error ? error.message : String(error);
@@ -306,7 +338,16 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
           for (const variant of variants) {
             // Ensure country is in location string for LinkedIn (which doesn't support country_indeed)
             const locationWithCountry = ensureCountryInLocation(variant, loc.country);
+            const queryKey = generateQueryKey(title, locationWithCountry, jobType, false);
             queriesTotal++;
+
+            // Skip if already completed (resume from checkpoint)
+            if (skipKeys.has(queryKey)) {
+              queriesCompleted++;
+              completedQueryKeys.push(queryKey);
+              continue;
+            }
+
             try {
               logger.info('Scheduler', `  Collecting jobs for: "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
               const jobs = await queueService.enqueueCollection({
@@ -323,7 +364,8 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
               logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
               allRawJobs.push(...jobs);
               queriesCompleted++;
-              await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`);
+              completedQueryKeys.push(queryKey);
+              await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`, allRawJobs, completedQueryKeys);
             } catch (error) {
               queriesFailed++;
               const errorMsg = error instanceof Error ? error.message : String(error);
@@ -340,7 +382,16 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
       const jobTypeLabel = jobType ? ` (${jobType})` : '';
 
       for (const title of jobTitles) {
+        const queryKey = generateQueryKey(title, legacyLocation ?? undefined, jobType, legacyIsRemote);
         queriesTotal++;
+
+        // Skip if already completed (resume from checkpoint)
+        if (skipKeys.has(queryKey)) {
+          queriesCompleted++;
+          completedQueryKeys.push(queryKey);
+          continue;
+        }
+
         try {
           logger.info('Scheduler', `  Collecting jobs for: "${title}"${jobTypeLabel}`);
           const jobs = await queueService.enqueueCollection({
@@ -356,7 +407,8 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
           logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}"${jobTypeLabel}`);
           allRawJobs.push(...jobs);
           queriesCompleted++;
-          await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`);
+          completedQueryKeys.push(queryKey);
+          await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`, allRawJobs, completedQueryKeys);
         } catch (error) {
           queriesFailed++;
           const errorMsg = error instanceof Error ? error.message : String(error);
@@ -631,13 +683,20 @@ export async function runSingleSubscriptionSearch(
     skipCache: true, // Manual scans always fetch fresh results
     priority: PRIORITY.MANUAL_SCAN,
     subLogger,
-    onProgress: async (current, total, detail) => {
+    onProgress: async (current, total, detail, accumulatedJobs, completedQueryKeys) => {
       const percent = progress.collection(current, total);
+      const checkpoint: CollectionCheckpoint = {
+        stage: 'collection',
+        queriesCompleted: current,
+        queriesTotal: total,
+        collectedJobs: accumulatedJobs,
+        completedQueryKeys,
+      };
       await RunTracker.updateProgress(runId, {
         stage: 'collection',
         percent,
         detail,
-        checkpoint: { stage: 'collection', queriesCompleted: current, queriesTotal: total },
+        checkpoint,
       });
     },
   });
@@ -755,7 +814,9 @@ export async function runSingleSubscriptionSearch(
         percent,
         detail: `Matched ${processed}/${total} jobs`,
       });
-    }
+    },
+    // Langfuse trace context for LLM observability
+    { subscriptionId: sub.id, runId, userId: sub.userId, username: sub.user.username ?? undefined }
   );
 
   // Get batch processor stats
@@ -1145,13 +1206,20 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         skipCache: false,
         priority: PRIORITY.SCHEDULED,
         subLogger,
-        onProgress: async (current, total, detail) => {
+        onProgress: async (current, total, detail, accumulatedJobs, completedQueryKeys) => {
           const percent = progress.collection(current, total);
+          const checkpoint: CollectionCheckpoint = {
+            stage: 'collection',
+            queriesCompleted: current,
+            queriesTotal: total,
+            collectedJobs: accumulatedJobs,
+            completedQueryKeys,
+          };
           await RunTracker.updateProgress(runId, {
             stage: 'collection',
             percent,
             detail,
-            checkpoint: { stage: 'collection', queriesCompleted: current, queriesTotal: total },
+            checkpoint,
           });
         },
       });
@@ -1264,7 +1332,9 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
             percent,
             detail: `Matched ${processed}/${total} jobs`,
           });
-        }
+        },
+        // Langfuse trace context for LLM observability
+        { subscriptionId: sub.id, runId, userId: sub.userId, username: sub.user.username ?? undefined }
       );
 
       // Get batch processor stats
@@ -1722,6 +1792,314 @@ export async function resumeInterruptedRun(
 
   } catch (error) {
     logger.error('Scheduler', `[Resumed] Failed to resume run ${runId}`, error);
+    await RunTracker.fail(runId, error);
+    return { success: false, newMatches: 0, error: String(error) };
+  }
+}
+
+/**
+ * Resume an interrupted run from a collection checkpoint.
+ * Called when we detect a run that was interrupted during job collection.
+ */
+export async function resumeCollectionCheckpoint(
+  runId: string,
+  subscriptionId: string,
+  checkpoint: CollectionCheckpoint
+): Promise<{ success: boolean; newMatches: number; error?: string }> {
+  const db = getDb();
+
+  logger.info('Scheduler', `[Resumed] Resuming run ${runId} from collection checkpoint (${checkpoint.queriesCompleted}/${checkpoint.queriesTotal} queries, ${checkpoint.collectedJobs.length} jobs collected)`);
+
+  try {
+    // Get subscription data
+    const sub = await db.searchSubscription.findUnique({
+      where: { id: subscriptionId },
+      include: {
+        user: {
+          include: {
+            subscriptions: {
+              select: { id: true, sentNotifications: { select: { jobMatchId: true } } },
+            },
+          },
+        },
+        sentNotifications: { select: { jobMatchId: true } },
+      },
+    });
+
+    if (!sub || !sub.isActive) {
+      logger.warn('Scheduler', `[Resumed] Subscription ${subscriptionId} not found or inactive`);
+      await RunTracker.fail(runId, new Error('Subscription not found or inactive'));
+      return { success: false, newMatches: 0, error: 'Subscription not found or inactive' };
+    }
+
+    const subLogger = createSubscriptionLogger(sub.id, sub.debugMode);
+
+    subLogger.info('Resume', `Resuming from collection checkpoint`, {
+      queriesCompleted: checkpoint.queriesCompleted,
+      queriesTotal: checkpoint.queriesTotal,
+      jobsCollectedSoFar: checkpoint.collectedJobs.length,
+      completedQueryKeys: checkpoint.completedQueryKeys.length,
+    });
+
+    // Parse normalized locations from JSON field
+    const normalizedLocations = sub.normalizedLocations as NormalizedLocation[] | null;
+    const datePosted = (sub.datePosted || 'month') as DatePostedType;
+    const jobTypes = (sub.jobTypes ?? []) as string[];
+
+    // Create progress calculator
+    const progress = new ProgressCalculator(checkpoint.queriesTotal, checkpoint.collectedJobs.length || 100);
+
+    // Resume collection from where we left off
+    await RunTracker.updateProgress(runId, {
+      stage: 'collection',
+      percent: progress.collection(checkpoint.queriesCompleted, checkpoint.queriesTotal),
+      detail: `Resuming collection (${checkpoint.queriesCompleted}/${checkpoint.queriesTotal} queries complete)`,
+    });
+
+    // Continue collection, skipping completed queries
+    const collectionResult = await collectJobsForSubscription({
+      jobTitles: sub.jobTitles,
+      normalizedLocations,
+      legacyLocation: sub.location,
+      legacyIsRemote: sub.isRemote,
+      jobTypes,
+      datePosted,
+      limit: 1000,
+      skipCache: false,
+      priority: PRIORITY.SCHEDULED,
+      subLogger,
+      skipQueryKeys: checkpoint.completedQueryKeys, // Skip already-completed queries
+      onProgress: async (current, total, detail, accumulatedJobs, completedQueryKeys) => {
+        const percent = progress.collection(current, total);
+        const newCheckpoint: CollectionCheckpoint = {
+          stage: 'collection',
+          queriesCompleted: current,
+          queriesTotal: total,
+          // Combine checkpoint jobs with newly collected jobs
+          collectedJobs: [...checkpoint.collectedJobs, ...accumulatedJobs],
+          completedQueryKeys: [...checkpoint.completedQueryKeys, ...completedQueryKeys.filter(k => !checkpoint.completedQueryKeys.includes(k))],
+        };
+        await RunTracker.updateProgress(runId, {
+          stage: 'collection',
+          percent,
+          detail,
+          checkpoint: newCheckpoint,
+        });
+      },
+    });
+
+    // Combine checkpoint jobs with newly collected jobs
+    const allRawJobs = [...checkpoint.collectedJobs, ...collectionResult.jobs];
+    logger.info('Scheduler', `[Resumed] Collection complete: ${allRawJobs.length} total jobs (${checkpoint.collectedJobs.length} from checkpoint + ${collectionResult.jobs.length} new)`);
+
+    // Continue with normalization
+    progress.recalculate(collectionResult.queriesTotal, allRawJobs.length);
+
+    await RunTracker.updateProgress(runId, {
+      stage: 'normalization',
+      percent: progress.normalizationStart(),
+      detail: `Deduplicating ${allRawJobs.length} jobs`,
+    });
+
+    let normalizedJobs = await normalizer.execute(allRawJobs);
+    logger.info('Scheduler', `[Resumed] After dedup: ${normalizedJobs.length} unique jobs`);
+
+    // Apply exclusion filters
+    const excludedTitles = sub.excludedTitles ?? [];
+    const excludedCompanies = sub.excludedCompanies ?? [];
+
+    if (excludedTitles.length > 0 || excludedCompanies.length > 0) {
+      normalizedJobs = normalizedJobs.filter((job) => {
+        const titleLower = job.title.toLowerCase();
+        for (const excluded of excludedTitles) {
+          if (titleLower.includes(excluded.toLowerCase())) return false;
+        }
+        const companyLower = job.company.toLowerCase();
+        for (const excluded of excludedCompanies) {
+          if (companyLower.includes(excluded.toLowerCase())) return false;
+        }
+        return true;
+      });
+    }
+
+    // Apply location filter
+    normalizedJobs = filterJobsByLocation(normalizedJobs, normalizedLocations, sub.location);
+
+    // Build Sets for deduplication
+    const thisSentIds = new Set(sub.sentNotifications.map(n => n.jobMatchId));
+    const otherSentIds = new Set(
+      sub.user.subscriptions
+        .filter(s => s.id !== sub.id)
+        .flatMap(s => s.sentNotifications.map(n => n.jobMatchId))
+    );
+    const skipDupes = sub.user.skipCrossSubDuplicates;
+
+    // Stage 3: Matching with batch processor
+    await RunTracker.updateProgress(runId, {
+      stage: 'matching',
+      percent: progress.normalizationEnd(),
+      detail: `Starting matching for ${normalizedJobs.length} jobs`,
+    });
+
+    const newMatches: MatchItem[] = [];
+    const stats: MatchStats = { skippedAlreadySent: 0, skippedBelowScore: 0, skippedCrossSubDuplicates: 0, previouslyMatchedOther: 0 };
+    let matchingErrors = 0;
+
+    batchProcessor.reset();
+    const batchResults = await batchProcessor.processAll(
+      normalizedJobs,
+      sub.resumeText,
+      sub.resumeHash,
+      PRIORITY.SCHEDULED,
+      async (processed, total) => {
+        const percent = progress.matching(processed, total);
+        await RunTracker.updateProgress(runId, {
+          stage: 'matching',
+          percent,
+          detail: `Matched ${processed}/${total} jobs`,
+        });
+      },
+      // Langfuse trace context for LLM observability
+      { subscriptionId: sub.id, runId, userId: sub.userId, username: sub.user.username ?? undefined }
+    );
+
+    // Process results
+    for (const result of batchResults) {
+      const job = result.job;
+
+      try {
+        if (result.error || !result.match) {
+          matchingErrors++;
+          continue;
+        }
+
+        const matchResult = result.match;
+        let jobMatchId = result.jobMatchId;
+
+        // Save uncached results
+        if (!result.cached) {
+          const savedJob = await db.job.upsert({
+            where: { contentHash: job.contentHash },
+            create: {
+              contentHash: job.contentHash,
+              title: job.title,
+              company: job.company,
+              description: job.description,
+              location: job.location,
+              isRemote: job.isRemote || false,
+              salaryMin: job.salaryMin,
+              salaryMax: job.salaryMax,
+              salaryCurrency: job.salaryCurrency,
+              source: job.source,
+              sourceId: job.sourceId,
+              applicationUrl: job.applicationUrl,
+              postedDate: job.postedDate,
+            },
+            update: { lastSeenAt: new Date() },
+          });
+
+          let savedMatch = await db.jobMatch.findFirst({
+            where: { jobId: savedJob.id, resumeHash: sub.resumeHash },
+          });
+
+          if (!savedMatch) {
+            savedMatch = await db.jobMatch.create({
+              data: {
+                jobId: savedJob.id,
+                resumeHash: sub.resumeHash,
+                score: Math.round(matchResult.score),
+                reasoning: matchResult.reasoning,
+                matchedSkills: matchResult.matchedSkills ?? [],
+                missingSkills: matchResult.missingSkills ?? [],
+                pros: matchResult.pros ?? [],
+                cons: matchResult.cons ?? [],
+              },
+            });
+          }
+
+          jobMatchId = savedMatch.id;
+        }
+
+        // Apply filters
+        if (matchResult.score < sub.minScore) {
+          stats.skippedBelowScore++;
+          continue;
+        }
+        if (!jobMatchId) {
+          matchingErrors++;
+          continue;
+        }
+        if (thisSentIds.has(jobMatchId)) {
+          stats.skippedAlreadySent++;
+          continue;
+        }
+        const isPreviouslyMatched = otherSentIds.has(jobMatchId);
+        if (isPreviouslyMatched && skipDupes) {
+          stats.skippedCrossSubDuplicates++;
+          continue;
+        }
+        if (isPreviouslyMatched) stats.previouslyMatchedOther++;
+
+        newMatches.push({ job, match: matchResult, matchId: jobMatchId, isPreviouslyMatched });
+      } catch (error) {
+        matchingErrors++;
+        logger.error('Scheduler', `[Resumed] Failed to process result for job: ${job.title}`, error);
+      }
+    }
+
+    logger.info('Scheduler', `[Resumed] Matching complete: ${newMatches.length} new matches, ${matchingErrors} errors`);
+
+    // Send notifications
+    let notificationsSent = 0;
+    if (newMatches.length > 0) {
+      newMatches.sort((a, b) => b.match.score - a.match.score);
+
+      const subContext: SubscriptionContext = {
+        jobTitles: sub.jobTitles,
+        location: normalizedLocations
+          ? LocationNormalizerAgent.formatForDisplaySingleLine(normalizedLocations)
+          : sub.location,
+        isRemote: sub.isRemote,
+      };
+
+      await sendMatchSummary(sub.user.chatId, newMatches, stats, subContext);
+
+      const created = await db.sentNotification.createMany({
+        data: newMatches.map(({ matchId }) => ({
+          subscriptionId: sub.id,
+          jobMatchId: matchId,
+        })),
+        skipDuplicates: true,
+      });
+
+      notificationsSent = created.count;
+    }
+
+    // Update last search timestamp
+    await db.searchSubscription.update({
+      where: { id: sub.id },
+      data: { lastSearchAt: new Date() },
+    });
+
+    // Complete the run
+    await RunTracker.complete(runId, {
+      jobsCollected: allRawJobs.length,
+      jobsAfterDedup: normalizedJobs.length,
+      jobsMatched: newMatches.length,
+      notificationsSent,
+    });
+
+    // Clear checkpoint on success
+    await db.subscriptionRun.update({
+      where: { id: runId },
+      data: { checkpoint: Prisma.DbNull },
+    });
+
+    logger.info('Scheduler', `[Resumed] Run ${runId} completed successfully from collection checkpoint`);
+    return { success: true, newMatches: newMatches.length };
+
+  } catch (error) {
+    logger.error('Scheduler', `[Resumed] Failed to resume run ${runId} from collection`, error);
     await RunTracker.fail(runId, error);
     return { success: false, newMatches: 0, error: String(error) };
   }

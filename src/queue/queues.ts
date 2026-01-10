@@ -48,6 +48,13 @@ export interface MatchingJobData {
   resumeHash: string;
   requestId: string;
   priority: Priority;
+  // Langfuse trace context for LLM observability
+  traceContext?: {
+    subscriptionId?: string;
+    runId?: string;
+    userId?: string;
+    username?: string; // Telegram username for human-readable tracking
+  };
 }
 
 // Queue instances
