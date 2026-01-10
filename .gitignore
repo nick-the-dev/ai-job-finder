@@ -36,3 +36,4 @@ venv/
 # Stryker mutation testing
 .stryker-tmp/
 reports/
+langfuse-compose.yml
