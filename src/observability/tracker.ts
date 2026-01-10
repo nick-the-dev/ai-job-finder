@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import * as Sentry from '@sentry/node';
 import { getDb } from '../db/client.js';
 import { logger } from '../utils/logger.js';
 
@@ -201,6 +202,22 @@ export class RunTracker {
       ? ` [stage: ${context.stage}${context.query ? `, query: "${context.query}"` : ''}${context.location ? `, location: "${context.location}"` : ''}]`
       : '';
     logger.error('RunTracker', `Failed run ${runId} after ${durationMs}ms${contextStr}: ${errorMessage}`);
+
+    // Report to Sentry with full context
+    if (error instanceof Error) {
+      Sentry.captureException(error, {
+        tags: {
+          subscriptionId: run.subscriptionId,
+          stage: context?.stage,
+          triggerType: run.triggerType,
+        },
+        extra: {
+          runId,
+          durationMs,
+          ...context,
+        },
+      });
+    }
   }
 
   /**

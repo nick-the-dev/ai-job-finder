@@ -1,5 +1,6 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
+import * as Sentry from '@sentry/node';
 import { config } from './config.js';
 import { logger } from './utils/logger.js';
 import { router, errorHandler } from './api/routes.js';
@@ -17,6 +18,20 @@ import {
 } from './queue/index.js';
 import { adminRouter } from './admin/index.js';
 import { startCleanupScheduler, stopCleanupScheduler } from './observability/index.js';
+import { shutdownLangfuse } from './llm/client.js';
+
+// Initialize Sentry for error tracking (must be done before Express app)
+if (config.SENTRY_DSN) {
+  Sentry.init({
+    dsn: config.SENTRY_DSN,
+    environment: config.SENTRY_ENVIRONMENT,
+    tracesSampleRate: 0.1, // 10% of requests for performance tracing
+    profilesSampleRate: 0.1, // 10% of transactions for profiling
+  });
+  logger.info('Sentry', 'Error tracking enabled');
+} else {
+  logger.info('Sentry', 'Disabled (no SENTRY_DSN configured)');
+}
 
 const app = express();
 
@@ -72,6 +87,11 @@ app.use('/admin', adminRouter);
 // Routes
 app.use('/', router);
 
+// Sentry error handler (must be before other error middleware)
+if (config.SENTRY_DSN) {
+  Sentry.setupExpressErrorHandler(app);
+}
+
 // Error handler
 app.use(errorHandler);
 
@@ -85,6 +105,7 @@ async function shutdown(signal: string) {
   await closeQueues();
   await disconnectRedis();
   await disconnectDb();
+  await shutdownLangfuse(); // Flush and close Langfuse
   process.exit(0);
 }
 

@@ -1,9 +1,25 @@
 import axios from 'axios';
 import { z } from 'zod';
+import { Langfuse } from 'langfuse';
 import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+
+// Initialize Langfuse if credentials are configured
+let langfuse: Langfuse | null = null;
+if (config.LANGFUSE_PUBLIC_KEY && config.LANGFUSE_SECRET_KEY) {
+  langfuse = new Langfuse({
+    publicKey: config.LANGFUSE_PUBLIC_KEY,
+    secretKey: config.LANGFUSE_SECRET_KEY,
+    baseUrl: config.LANGFUSE_BASE_URL,
+    flushAt: 1, // Flush after every event for testing
+    flushInterval: 1000, // Flush every 1 second
+  });
+  logger.info('Langfuse', `LLM observability enabled (baseUrl: ${config.LANGFUSE_BASE_URL})`);
+} else {
+  logger.info('Langfuse', 'Disabled (no credentials configured)');
+}
 
 // Retry configuration
 const MAX_RETRIES = 5;
@@ -23,6 +39,11 @@ interface LLMOptions {
   maxTokens?: number;
   maxRetries?: number;
   timeout?: number;
+  // Langfuse tracing context
+  traceName?: string;
+  traceUserId?: string;
+  traceSessionId?: string;
+  traceMetadata?: Record<string, unknown>;
 }
 
 /**
@@ -70,7 +91,30 @@ export async function callLLM<T>(
   jsonSchema: object,
   options: LLMOptions = {}
 ): Promise<T> {
-  const { temperature = 0.1, maxTokens = 2000, maxRetries = MAX_RETRIES, timeout = REQUEST_TIMEOUT_MS } = options;
+  const {
+    temperature = 0.1,
+    maxTokens = 2000,
+    maxRetries = MAX_RETRIES,
+    timeout = REQUEST_TIMEOUT_MS,
+    traceName,
+    traceUserId,
+    traceSessionId,
+    traceMetadata,
+  } = options;
+
+  // Create Langfuse trace and generation if enabled
+  const trace = langfuse?.trace({
+    name: traceName || 'llm-call',
+    userId: traceUserId,
+    sessionId: traceSessionId,
+    metadata: traceMetadata,
+  });
+  const generation = trace?.generation({
+    name: traceName || 'openrouter-generation',
+    model: config.OPENROUTER_MODEL,
+    input: messages,
+    modelParameters: { temperature, maxTokens },
+  });
 
   // Add instruction to respond with JSON
   const lastMessage = messages[messages.length - 1];
@@ -143,8 +187,20 @@ Respond ONLY with a valid JSON object. No other text.`,
       const result = schema.safeParse(parsed);
       if (!result.success) {
         logger.error('LLM', 'Schema validation failed', result.error.format());
+        generation?.end({ output: parsed, level: 'ERROR', statusMessage: 'Schema validation failed' });
         throw new Error(`Schema validation failed: ${result.error.message}`);
       }
+
+      // Track successful generation in Langfuse
+      const usage = response.data.usage;
+      generation?.end({
+        output: result.data,
+        usage: usage ? {
+          promptTokens: usage.prompt_tokens,
+          completionTokens: usage.completion_tokens,
+          totalTokens: usage.total_tokens,
+        } : undefined,
+      });
 
       return result.data;
     } catch (error) {
@@ -170,12 +226,36 @@ Respond ONLY with a valid JSON object. No other text.`,
           code: error.code,
           data: error.response?.data,
         });
-        throw new Error(`LLM API error: ${isTimeout ? 'timeout' : status}`);
+        const errorMsg = `LLM API error: ${isTimeout ? 'timeout' : status}`;
+        generation?.end({ level: 'ERROR', statusMessage: errorMsg });
+        throw new Error(errorMsg);
       }
+      generation?.end({ level: 'ERROR', statusMessage: String(error) });
       throw error;
     }
   }
 
   // All retries exhausted
+  generation?.end({ level: 'ERROR', statusMessage: 'All retries exhausted' });
   throw lastError || new Error('LLM request failed after all retries');
+}
+
+/**
+ * Flush Langfuse events (call on graceful shutdown)
+ */
+export async function flushLangfuse(): Promise<void> {
+  if (langfuse) {
+    await langfuse.flushAsync();
+    logger.info('Langfuse', 'Events flushed');
+  }
+}
+
+/**
+ * Shutdown Langfuse (call on server shutdown)
+ */
+export async function shutdownLangfuse(): Promise<void> {
+  if (langfuse) {
+    await langfuse.shutdownAsync();
+    logger.info('Langfuse', 'Shutdown complete');
+  }
 }

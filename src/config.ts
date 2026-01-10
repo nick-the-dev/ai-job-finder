@@ -41,6 +41,15 @@ const envSchema = z.object({
   // Observability & Admin
   OBSERVABILITY_RETENTION_DAYS: z.coerce.number().default(30),
   ADMIN_API_KEY: z.string().min(32).optional(), // Min 32 chars for security
+
+  // Langfuse (LLM observability - optional)
+  LANGFUSE_PUBLIC_KEY: z.string().optional(),
+  LANGFUSE_SECRET_KEY: z.string().optional(),
+  LANGFUSE_BASE_URL: z.string().url().default('https://langfuse.49-12-207-132.sslip.io'), // Self-hosted Langfuse
+
+  // Sentry (error tracking - optional)
+  SENTRY_DSN: z.string().url().optional(),
+  SENTRY_ENVIRONMENT: z.string().default('development'),
 });
 
 function loadConfig() {

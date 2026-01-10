@@ -325,6 +325,15 @@ LOG_LEVEL=info  # debug | info | warn | error (default: info)
 
 # Admin Dashboard
 ADMIN_API_KEY=your-secret-key  # Required for /admin access
+
+# Langfuse (LLM Observability - Self-Hosted)
+LANGFUSE_PUBLIC_KEY=pk-lf-...  # From Langfuse dashboard after first login
+LANGFUSE_SECRET_KEY=sk-lf-...  # From Langfuse dashboard after first login
+LANGFUSE_BASE_URL=https://langfuse.49-12-207-132.sslip.io  # Self-hosted instance
+
+# Sentry (Error Tracking - Optional)
+SENTRY_DSN=https://xxx@sentry.io/xxx  # From Sentry project
+SENTRY_ENVIRONMENT=development  # development | production
 ```
 
 ## Data Sources
@@ -455,6 +464,46 @@ The new per-subscription approach:
 - No waiting for other users' jobs
 
 ## Observability
+
+The system uses a multi-layered observability stack:
+
+| Layer | Tool | Purpose |
+|-------|------|---------|
+| **LLM Observability** | Langfuse | Token costs, prompt debugging, latency tracking |
+| **Error Tracking** | Sentry | Exception capture, alerting, stack traces |
+| **Run Tracking** | Custom (PostgreSQL) | Subscription execution stats, progress |
+| **Admin Dashboard** | Custom (Express) | Live monitoring, diagnostics |
+
+### Langfuse (LLM Observability)
+
+Tracks all LLM calls with:
+- Token usage and cost per call
+- Latency metrics
+- Input/output logging for debugging
+- Error tracking
+
+LLM calls automatically include tracing context:
+```typescript
+await callLLM(messages, schema, jsonSchema, {
+  traceName: 'job-matching',
+  traceUserId: subscriptionId,
+  traceMetadata: { jobTitle, company },
+});
+```
+
+View traces at: https://cloud.langfuse.com (or your self-hosted instance)
+
+### Sentry (Error Tracking)
+
+Captures all unhandled exceptions and subscription run failures:
+- Grouped by error type
+- Stack traces with source maps
+- Context tags (subscriptionId, stage, triggerType)
+- Alerting via email/Slack
+
+Errors from `RunTracker.fail()` are automatically sent to Sentry with full context.
+
+### Run Tracking (Custom)
 
 The system tracks every subscription run for debugging and analytics.
 
