@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { getDb } from '../db/client.js';
 import { addApiCallBreadcrumb } from '../utils/sentry.js';
 import { trackJobsCollected, trackApiError } from '../observability/metrics.js';
+import { ParallelCollector } from './parallel-collector.js';
 import type { RawJob } from '../core/types.js';
 import type { IService } from '../core/interfaces.js';
 import type { Job } from '@prisma/client';
@@ -33,10 +34,19 @@ const DEFAULT_CACHE_HOURS = 6;
  */
 export class CollectorService implements IService<CollectorInput, RawJob[]> {
   private readonly apiKey: string;
+  private readonly parallelCollector: ParallelCollector | null;
 
   constructor() {
     this.apiKey = config.SERPAPI_API_KEY;
-    logger.info('Collector', 'Initialized with SerpAPI + JobSpy');
+
+    // Initialize parallel collector if enabled
+    if (config.JOBSPY_PARALLEL_ENABLED) {
+      this.parallelCollector = new ParallelCollector();
+      logger.info('Collector', 'Initialized with SerpAPI + JobSpy (parallel mode enabled)');
+    } else {
+      this.parallelCollector = null;
+      logger.info('Collector', 'Initialized with SerpAPI + JobSpy (single-threaded mode)');
+    }
   }
 
   async execute(input: CollectorInput): Promise<RawJob[]> {
@@ -386,6 +396,37 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
     logger.info('Collector', `[JobSpy] >>> FETCH START: "${query}" @ ${location || 'global'} (target: ${limit} jobs)`);
 
+    // Use parallel collector if enabled
+    if (this.parallelCollector) {
+      logger.info('Collector', `[JobSpy] Using parallel collector (${config.JOBSPY_PARALLEL_WORKERS} workers)`);
+      try {
+        const jobs = await this.parallelCollector.collect({
+          query,
+          location,
+          isRemote,
+          jobType,
+          limit,
+          datePosted,
+          country,
+        });
+
+        // Update cache
+        await this.updateCache(queryHash, query, location, isRemote, 'jobspy', jobs.length, cacheHours);
+
+        logger.info('Collector', `[JobSpy] ✗ API CALLED (parallel): ${jobs.length} jobs for "${query}" in "${location || 'any'}" (hash: ${queryHash}) - cached for ${cacheHours}h`);
+
+        if (jobs.length > 0) {
+          trackJobsCollected(jobs.length, 'jobspy');
+        }
+
+        return jobs;
+      } catch (error) {
+        logger.error('Collector', '[JobSpy] Parallel collection failed, falling back to single-threaded', error);
+        // Fall through to single-threaded collection
+      }
+    }
+
+    // Single-threaded collection (original implementation)
     addApiCallBreadcrumb('JobSpy', 'search', { query, location, isRemote, jobType, limit });
 
     // Convert datePosted to hours_old for JobSpy

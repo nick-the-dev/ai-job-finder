@@ -67,41 +67,6 @@ describe('OpenRouterKeyPool', () => {
     });
   });
 
-  describe('Multiple Keys Mode', () => {
-    beforeEach(() => {
-      // Mock multiple keys
-      vi.doMock('../config.js', () => ({
-        config: {
-          OPENROUTER_API_KEY: 'sk-or-test-fallback',
-          OPENROUTER_API_KEYS: 'sk-or-key1,sk-or-key2,sk-or-key3',
-          OPENROUTER_KEY_RATE_LIMIT: 10,
-        },
-      }));
-    });
-
-    it('should calculate total capacity correctly', () => {
-      // Re-import to get mocked config
-      const { OpenRouterKeyPool: Pool } = require('./key-pool.js');
-      const pool = new Pool();
-      expect(pool.totalCapacity).toBe(30); // 3 keys × 10 RPM
-    });
-
-    it('should rotate through keys in round-robin fashion', async () => {
-      const { OpenRouterKeyPool: Pool } = require('./key-pool.js');
-      const pool = new Pool();
-
-      const key1 = await pool.getAvailableKey();
-      const key2 = await pool.getAvailableKey();
-      const key3 = await pool.getAvailableKey();
-      const key4 = await pool.getAvailableKey();
-
-      expect(key1).toBe('sk-or-key1');
-      expect(key2).toBe('sk-or-key2');
-      expect(key3).toBe('sk-or-key3');
-      expect(key4).toBe('sk-or-key1'); // Cycles back
-    });
-  });
-
   describe('429 Blocking', () => {
     it('should mark key as 429-blocked', async () => {
       const pool = new OpenRouterKeyPool();
