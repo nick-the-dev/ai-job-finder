@@ -34,6 +34,9 @@ if (config.SENTRY_DSN) {
     release,
     serverName: process.env.HOSTNAME || `ai-job-finder-${process.pid}`,
 
+    // Enable Sentry Logs (requires SDK v9.41.0+)
+    enableLogs: true,
+
     // Integrations for enhanced monitoring
     integrations: [
       Sentry.prismaIntegration(),
@@ -74,6 +77,12 @@ if (config.SENTRY_DSN) {
         return null;
       }
       return breadcrumb;
+    },
+
+    // Debug metrics emission (remove after verification)
+    beforeSendMetric(metric) {
+      logger.debug('Sentry:Metric', `${metric.name}: ${JSON.stringify(metric)}`);
+      return metric;
     },
   });
   logger.info('Sentry', `Enabled (release: ${release})`);

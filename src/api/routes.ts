@@ -93,6 +93,24 @@ router.get('/health/detailed', async (req: Request, res: Response, next: NextFun
 });
 
 /**
+ * GET /test-error - Test Sentry error capture (temporary endpoint for verification)
+ * Remove this endpoint after verifying errors appear in Sentry dashboard
+ */
+router.get('/test-error', (req: Request, res: Response) => {
+  const testError = new Error('Test error for Sentry verification');
+  Sentry.captureException(testError, {
+    tags: { test: 'true' },
+    extra: { reason: 'Manual Sentry verification test' },
+  });
+  logger.error('API', 'Test error triggered', testError);
+  res.status(500).json({
+    error: 'Test error sent to Sentry',
+    message: testError.message,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/**
  * GET /queue/status - Queue monitoring endpoint
  */
 router.get('/queue/status', async (req: Request, res: Response, next: NextFunction) => {

@@ -6,7 +6,7 @@ import { MatcherAgent } from '../../agents/matcher.js';
 import { getDb } from '../../db/client.js';
 import { getQueues, type MatchingJobData } from '../queues.js';
 import type { NormalizedJob, JobMatchResult } from '../../core/types.js';
-import { addQueueBreadcrumb } from '../../utils/sentry.js';
+import { addQueueBreadcrumb, sentryLog } from '../../utils/sentry.js';
 import { trackMatchCacheHit, trackMatchScore } from '../../observability/metrics.js';
 
 const matcher = new MatcherAgent();
@@ -108,6 +108,14 @@ export async function processMatchingJob(job: Job<MatchingJobData>): Promise<Mat
       addQueueBreadcrumb('matching', 'complete', { cached: false, score: matchResult.score });
       trackMatchCacheHit(false);
       trackMatchScore(matchResult.score);
+
+      // Log LLM match to Sentry Logs
+      sentryLog('info', 'LLM job matching completed', {
+        jobTitle: jobData.title,
+        company: jobData.company,
+        score: matchResult.score,
+        cached: false,
+      });
 
       return {
         match: matchResult,

@@ -1,6 +1,37 @@
 import * as Sentry from '@sentry/node';
 
 /**
+ * Log important events to Sentry Logs
+ * Requires enableLogs: true in Sentry.init()
+ */
+export function sentryLog(
+  level: 'info' | 'warn' | 'error',
+  message: string,
+  data?: Record<string, unknown>
+): void {
+  // Sentry.logger expects (message) or (message, attributes)
+  if (level === 'info') {
+    if (data) {
+      Sentry.logger.info(message, data);
+    } else {
+      Sentry.logger.info(message);
+    }
+  } else if (level === 'warn') {
+    if (data) {
+      Sentry.logger.warn(message, data);
+    } else {
+      Sentry.logger.warn(message);
+    }
+  } else if (level === 'error') {
+    if (data) {
+      Sentry.logger.error(message, data);
+    } else {
+      Sentry.logger.error(message);
+    }
+  }
+}
+
+/**
  * Set Sentry user context for error attribution
  */
 export function setSentryUser(userId: string, username?: string | null): void {

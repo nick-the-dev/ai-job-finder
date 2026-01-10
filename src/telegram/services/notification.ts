@@ -4,6 +4,7 @@ import type { MatchStats, MatchItem } from '../../scheduler/jobs/search-subscrip
 import { logger } from '../../utils/logger.js';
 import { saveMatchesToCSV, generateDownloadToken } from '../../utils/csv.js';
 import { config } from '../../config.js';
+import { sentryLog } from '../../utils/sentry.js';
 
 // Subscription context for notifications
 export interface SubscriptionContext {
@@ -202,6 +203,13 @@ export async function sendMatchSummary(
     await bot.api.sendMessage(Number(chatId), message, {
       parse_mode: 'HTML',
       link_preview_options: { is_disabled: true },
+    });
+
+    // Log notification to Sentry Logs
+    sentryLog('info', 'Notification sent', {
+      chatId: Number(chatId),
+      matchCount: matches.length,
+      topScore: sorted[0]?.match.score,
     });
   } catch (error) {
     logger.error('Telegram', `Failed to send summary to ${chatId}`, error);

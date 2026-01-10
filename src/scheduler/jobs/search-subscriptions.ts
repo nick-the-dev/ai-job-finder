@@ -9,7 +9,7 @@ import { logger, createSubscriptionLogger, type SubscriptionLogger } from '../..
 import { queueService, PRIORITY, type Priority } from '../../queue/index.js';
 import { AdaptiveBatchProcessor, type MatchingResult } from '../../queue/batch-processor.js';
 import { RunTracker, formatTriggerLabel, updateSkillStats, createMarketSnapshot, type ErrorContext, type TriggerType, type ProgressUpdate } from '../../observability/index.js';
-import { setSubscriptionContext, addRunStageBreadcrumb, clearSentryUser } from '../../utils/sentry.js';
+import { setSubscriptionContext, addRunStageBreadcrumb, clearSentryUser, sentryLog } from '../../utils/sentry.js';
 import type { NormalizedJob, JobMatchResult, RawJob } from '../../core/types.js';
 import type { NormalizedLocation } from '../../schemas/llm-outputs.js';
 
@@ -604,6 +604,16 @@ export async function runSingleSubscriptionSearch(
     minScore: sub.minScore,
   });
 
+  // Log run start to Sentry Logs
+  sentryLog('info', 'Subscription run started', {
+    subscriptionId,
+    runId,
+    userId: sub.userId,
+    username: sub.user.username,
+    triggerType,
+    jobTitles: sub.jobTitles,
+  });
+
   // Create subscription-scoped logger if debug mode is enabled
   const subLogger = createSubscriptionLogger(subscriptionId, sub.debugMode);
 
@@ -1049,6 +1059,17 @@ export async function runSingleSubscriptionSearch(
     matchingJobsFailed: matchingErrors,
   });
 
+  // Log run completion to Sentry Logs
+  sentryLog('info', 'Subscription run completed', {
+    subscriptionId,
+    runId,
+    userId: sub.userId,
+    triggerType,
+    jobsCollected: allRawJobs.length,
+    jobsMatched: newMatches.length,
+    notificationsSent,
+  });
+
   logger.info('Scheduler', `[${triggerLabel}] Results: ${newMatches.length} new | ${stats.skippedAlreadySent} already sent | ${stats.skippedBelowScore} below threshold | ${stats.skippedCrossSubDuplicates} cross-sub skipped`);
 
   // Final debug summary
@@ -1081,6 +1102,16 @@ export async function runSingleSubscriptionSearch(
     errorContext.datePosted = sub.datePosted;
     errorContext.triggerType = triggerType;
     errorContext.timestamp = new Date().toISOString();
+
+    // Log run failure to Sentry Logs
+    sentryLog('error', 'Subscription run failed', {
+      subscriptionId,
+      runId,
+      userId: sub.userId,
+      triggerType,
+      stage: errorContext.stage,
+      error: error instanceof Error ? error.message : String(error),
+    });
 
     await RunTracker.fail(runId, error, errorContext);
     throw error;
