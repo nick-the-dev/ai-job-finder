@@ -19,7 +19,7 @@ class ProxyPool:
     Proxy pool for managing multiple proxy instances.
 
     Loads proxies from JOBSPY_PROXIES environment variable (comma-separated).
-    Format: http://user:pass@host:port,http://user:pass@host2:port2,...
+    Format: http://USERNAME:PASSWORD@host:port,http://USERNAME:PASSWORD@host2:port2,...
 
     Features:
     - Round-robin rotation via get_next()
@@ -95,7 +95,7 @@ class ProxyPool:
         Replaces username:password with ***:*** in proxy URL.
 
         Args:
-            proxy: Proxy URL (e.g., http://user:pass@host:port)
+            proxy: Proxy URL (e.g., http://USERNAME:PASSWORD@host:port)
 
         Returns:
             str: Masked proxy URL (e.g., http://***:***@host:port)
