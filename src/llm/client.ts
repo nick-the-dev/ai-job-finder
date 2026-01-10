@@ -6,8 +6,12 @@ import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
 import { addLLMBreadcrumb } from '../utils/sentry.js';
 import { trackLLMLatency, trackLLMTokens, trackApiError } from '../observability/metrics.js';
+import { OpenRouterKeyPool } from './key-pool.js';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+
+// Initialize key pool
+const keyPool = new OpenRouterKeyPool();
 
 // Initialize Langfuse if credentials are configured
 let langfuse: Langfuse | null = null;
@@ -151,12 +155,22 @@ Respond ONLY with a valid JSON object. No other text.`,
       ];
 
       let lastError: Error | null = null;
+      let currentApiKey: string | null = null;
 
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
           if (attempt > 0) {
             logger.info('LLM', `Retry attempt ${attempt}/${maxRetries}...`);
           }
+
+          // Get an available API key from the pool
+          currentApiKey = await keyPool.getAvailableKey();
+          if (!currentApiKey) {
+            throw new Error('No API keys available - all keys exhausted');
+          }
+
+          const maskedKey = keyPool.maskKey(currentApiKey);
+          logger.debug('LLM', `Using API key: ${maskedKey}`);
 
           const response = await axios.post(
             OPENROUTER_URL,
@@ -169,7 +183,7 @@ Respond ONLY with a valid JSON object. No other text.`,
             },
             {
               headers: {
-                'Authorization': `Bearer ${config.OPENROUTER_API_KEY}`,
+                'Authorization': `Bearer ${currentApiKey}`,
                 'Content-Type': 'application/json',
                 'HTTP-Referer': 'https://github.com/ai-job-finder',
                 'X-Title': 'AI Job Finder',
@@ -254,6 +268,11 @@ Respond ONLY with a valid JSON object. No other text.`,
             const retryAfter = error.response?.headers?.['retry-after'];
             const isTimeout = error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT';
 
+            // Mark key as 429-blocked if we got rate limited
+            if (status === 429 && currentApiKey) {
+              keyPool.markKey429(currentApiKey);
+            }
+
             // Retry on timeout, rate limit (429), or server errors (5xx)
             if (isTimeout || status === 429 || (status && status >= 500)) {
               if (attempt < maxRetries) {
@@ -294,6 +313,13 @@ Respond ONLY with a valid JSON object. No other text.`,
  */
 export function getLangfuse(): Langfuse | null {
   return langfuse;
+}
+
+/**
+ * Get the key pool instance for monitoring/debugging
+ */
+export function getKeyPool(): OpenRouterKeyPool {
+  return keyPool;
 }
 
 /**
