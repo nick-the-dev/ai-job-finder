@@ -15,6 +15,10 @@ AI-powered job aggregation and matching system that collects jobs from multiple 
   - Modifying configuration files
   - Any server-side operations
 
+- **NEVER rotate credentials automatically.** If secrets are accidentally exposed (e.g., committed to git), flag the issue and let the user rotate credentials manually through the appropriate service UI (Langfuse, etc.). Automated credential rotation is risky and could break production systems.
+
+- **ALWAYS use the latest versions** of packages, Docker images, and dependencies. When adding new dependencies or updating compose files, use `latest` tags or the most recent stable version. Don't pin to old versions unless there's a specific compatibility requirement.
+
 - **ALWAYS test schema migrations against production data BEFORE deploying.** Adding required columns without defaults will fail on tables with existing rows. Before any schema change:
   1. Check if the table has existing data: `SELECT COUNT(*) FROM table_name;`
   2. New columns MUST be either nullable (`String?`) or have a default value (`@default(now())`)
@@ -514,6 +518,39 @@ This enables:
 - Understanding which jobs are expensive to match
 
 View traces at: https://cloud.langfuse.com (or your self-hosted instance)
+
+### Langfuse MCP Tools
+
+Query Langfuse data directly from Claude Code using MCP tools:
+
+| Tool | Description |
+|------|-------------|
+| `fetch_traces(age)` | Get LLM call traces for last N minutes |
+| `fetch_trace(trace_id)` | Get single trace with full details |
+| `fetch_sessions(age)` | List sessions (grouped by runId) |
+| `get_session_details(session_id)` | Get all traces for a session/run |
+| `get_user_sessions(user_id, age)` | Get sessions for a specific user |
+| `find_exceptions(age)` | Get exception counts by file/function |
+| `get_error_count(age)` | Count traces with errors |
+| `list_prompts()` / `get_prompt(name)` | Prompt management |
+
+**Common Queries:**
+```
+# Get traces from last 24 hours
+mcp__langfuse__fetch_traces(age=1440)
+
+# Get all traces for a subscription run
+mcp__langfuse__get_session_details(session_id="<runId>")
+
+# Check errors in last hour
+mcp__langfuse__get_error_count(age=60)
+
+# Get trace with observations (token counts, latency)
+mcp__langfuse__fetch_trace(trace_id="<id>", include_observations=true)
+```
+
+**Known Issue (langfuse-mcp v0.3.1):**
+`get_session_details` fails with `DateTime64` error on self-hosted Langfuse. Fix: patch `~/.cache/uv/archive-v0/*/langfuse_mcp/__main__.py` line 1518, change `datetime.fromtimestamp(0, tz=timezone.utc)` to `None`. Restart Claude Code after patching.
 
 ### Sentry (Error Tracking)
 
