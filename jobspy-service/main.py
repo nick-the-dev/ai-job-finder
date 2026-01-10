@@ -5,6 +5,7 @@ import logging
 import importlib.metadata
 
 from jobspy import scrape_jobs
+from proxy_pool import ProxyPool
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,6 +19,10 @@ except:
     JOBSPY_VERSION = "unknown"
 
 logger.info(f"JobSpy version: {JOBSPY_VERSION}")
+
+# Initialize proxy pool
+proxy_pool = ProxyPool()
+logger.info(f"Proxy pool initialized with {proxy_pool.size} proxies")
 
 
 class ScrapeRequest(BaseModel):
@@ -96,6 +101,15 @@ class JobResult(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "jobspy-scraper", "jobspy_version": JOBSPY_VERSION}
+
+
+@app.get("/debug/proxies")
+def debug_proxies():
+    """Return proxy pool status (count only, not actual credentials)."""
+    return {
+        "proxy_count": proxy_pool.size,
+        "proxies_enabled": proxy_pool.size > 0,
+    }
 
 
 @app.get("/debug/info")
@@ -462,6 +476,16 @@ patch_linkedin_for_worldwide()
 @app.post("/scrape")
 def scrape(request: ScrapeRequest):
     try:
+        # Get proxy for this request (round-robin)
+        proxy = proxy_pool.get_next()
+        proxies_dict = None
+        if proxy:
+            proxies_dict = {"http": proxy, "https": proxy}
+            masked_proxy = proxy_pool.mask_proxy(proxy)
+            logger.info(f"Using proxy: {masked_proxy}")
+        else:
+            logger.info("Using direct connection (no proxies configured)")
+
         remote_filter = f", remote={request.is_remote}" if request.is_remote is not None else ""
         job_type_filter = f", job_type={request.job_type}" if request.job_type else ""
 
@@ -492,6 +516,8 @@ def scrape(request: ScrapeRequest):
                         linkedin_kwargs["is_remote"] = request.is_remote
                     if request.job_type is not None:
                         linkedin_kwargs["job_type"] = request.job_type
+                    if proxies_dict:
+                        linkedin_kwargs["proxies"] = proxies_dict
 
                     linkedin_df = scrape_jobs(**linkedin_kwargs)
                     linkedin_jobs = df_to_jobs(linkedin_df)
@@ -521,6 +547,8 @@ def scrape(request: ScrapeRequest):
                         indeed_kwargs["is_remote"] = request.is_remote
                     if request.job_type is not None:
                         indeed_kwargs["job_type"] = request.job_type
+                    if proxies_dict:
+                        indeed_kwargs["proxies"] = proxies_dict
 
                     logger.info(f"  Indeed: country_indeed=Canada")
                     indeed_df = scrape_jobs(**indeed_kwargs)
@@ -561,6 +589,8 @@ def scrape(request: ScrapeRequest):
             scrape_kwargs["is_remote"] = request.is_remote
         if request.job_type is not None:
             scrape_kwargs["job_type"] = request.job_type
+        if proxies_dict:
+            scrape_kwargs["proxies"] = proxies_dict
 
         jobs_df = scrape_jobs(**scrape_kwargs)
         jobs = df_to_jobs(jobs_df)

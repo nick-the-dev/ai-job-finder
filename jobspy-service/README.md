@@ -18,6 +18,27 @@ pip install -r requirements.txt
 uvicorn main:app --port 8000
 ```
 
+## Proxy Configuration
+
+To avoid rate limiting and increase throughput, configure a proxy pool:
+
+```bash
+# Set comma-separated proxy URLs (format: http://user:pass@host:port)
+export JOBSPY_PROXIES="http://user1:pass1@proxy1.com:8080,http://user2:pass2@proxy2.com:8080"
+uvicorn main:app --port 8000
+```
+
+The service will automatically:
+- Rotate proxies using round-robin for each request
+- Mask credentials in logs for security
+- Fall back to direct connection if no proxies are configured
+
+Check proxy status:
+```bash
+curl http://localhost:8000/debug/proxies
+# Returns: {"proxy_count": 2, "proxies_enabled": true}
+```
+
 ## API
 
 ### POST /scrape

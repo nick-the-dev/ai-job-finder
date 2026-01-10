@@ -21,10 +21,17 @@ const envSchema = z.object({
 
   // OpenRouter
   OPENROUTER_API_KEY: z.string().min(1),
+  OPENROUTER_API_KEYS: z.string().optional(), // Comma-separated API keys for key pool
+  OPENROUTER_KEY_RATE_LIMIT: z.coerce.number().default(10), // Requests per minute per key
   OPENROUTER_MODEL: z.string().default('xiaomi/mimo-v2-flash:free'),
 
   // SerpAPI
   SERPAPI_API_KEY: z.string().min(1),
+
+  // JobSpy
+  JOBSPY_PROXIES: z.string().optional(), // Comma-separated proxy URLs
+  JOBSPY_PARALLEL_ENABLED: z.coerce.boolean().default(false),
+  JOBSPY_PARALLEL_WORKERS: z.coerce.number().default(10),
 
   // Server
   PORT: z.string().default('3000').transform(Number),
