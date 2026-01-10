@@ -9,10 +9,17 @@
 
 import axios from 'axios';
 import https from 'https';
+import { config } from '../src/config.js';
 
-const LANGFUSE_BASE_URL = 'https://langfuse.49-12-207-132.sslip.io';
-const PUBLIC_KEY = 'pk-lf-f12448d3-281d-4f9d-9f2a-95745cae9cf8';
-const SECRET_KEY = 'sk-lf-4a629403-1064-4e42-8659-8cd707bfeb63';
+// Use config from .env
+const LANGFUSE_BASE_URL = config.LANGFUSE_BASE_URL;
+const PUBLIC_KEY = config.LANGFUSE_PUBLIC_KEY;
+const SECRET_KEY = config.LANGFUSE_SECRET_KEY;
+
+if (!LANGFUSE_BASE_URL || !PUBLIC_KEY || !SECRET_KEY) {
+  console.error('Missing Langfuse credentials. Set LANGFUSE_BASE_URL, LANGFUSE_PUBLIC_KEY, and LANGFUSE_SECRET_KEY in .env');
+  process.exit(1);
+}
 
 const auth = {
   username: PUBLIC_KEY,

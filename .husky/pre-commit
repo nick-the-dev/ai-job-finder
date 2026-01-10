@@ -1,0 +1,5 @@
+# Check for secrets in staged files only
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+if [ -n "$STAGED_FILES" ]; then
+  echo "$STAGED_FILES" | xargs npx secretlint
+fi

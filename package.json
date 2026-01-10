@@ -14,10 +14,11 @@
     "test:watch": "vitest",
     "test:mutation": "stryker run",
     "test:mutation:open": "stryker run && open reports/mutation/mutation.html",
+    "secrets:check": "secretlint \"**/*\"",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
-    "prepare": "git config core.hooksPath .githooks || true"
+    "prepare": "husky"
   },
   "dependencies": {
     "@langchain/core": "^0.3.0",
@@ -40,6 +41,7 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@secretlint/secretlint-rule-preset-recommend": "^11.2.5",
     "@stryker-mutator/core": "^9.4.0",
     "@stryker-mutator/typescript-checker": "^9.4.0",
     "@stryker-mutator/vitest-runner": "^9.4.0",
@@ -48,7 +50,9 @@
     "@types/node": "^22.0.0",
     "@types/node-cron": "^3.0.11",
     "@types/pdf-parse": "^1.1.5",
+    "husky": "^9.1.7",
     "prisma": "^6.0.0",
+    "secretlint": "^11.2.5",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^4.0.16"
