@@ -374,8 +374,10 @@ export async function handleInterruptedRuns(): Promise<void> {
             logger.error('Scheduler', `Error resuming run ${run.id}`, error);
           });
       }
-      // Resume from collection checkpoint (collection stage with collected jobs)
-      else if (checkpoint?.stage === 'collection' && (checkpoint as CollectionCheckpoint).collectedJobs?.length > 0) {
+      // Resume from collection checkpoint (collection stage with completed queries)
+      // Note: We check completedQueryKeys, not collectedJobs, because a run can be 43% complete
+      // with 0 jobs found if the first queries returned nothing - we still want to resume!
+      else if (checkpoint?.stage === 'collection' && (checkpoint as CollectionCheckpoint).completedQueryKeys?.length > 0) {
         const collectionCheckpoint = checkpoint as CollectionCheckpoint;
         logger.info(
           'Scheduler',
