@@ -8,6 +8,13 @@ AI-powered job aggregation and matching system that collects jobs from multiple 
 
 - **NEVER** include AI-generated footers in git commits. Do not add "Generated with Claude Code", "Co-Authored-By: Claude", or similar attribution lines to commit messages.
 
+- **NEVER ask the user to do things manually.** Always use SSH (`ssh root@49.12.207.132`) to fix production issues directly. This includes:
+  - Updating Dokploy compose files (edit the database directly via `docker exec dokploy-postgres.1.* psql`)
+  - Restarting containers
+  - Fixing database credentials
+  - Modifying configuration files
+  - Any server-side operations
+
 - **ALWAYS test schema migrations against production data BEFORE deploying.** Adding required columns without defaults will fail on tables with existing rows. Before any schema change:
   1. Check if the table has existing data: `SELECT COUNT(*) FROM table_name;`
   2. New columns MUST be either nullable (`String?`) or have a default value (`@default(now())`)
