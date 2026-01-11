@@ -1846,7 +1846,14 @@ export async function resumeInterruptedRun(
       data: { checkpoint: Prisma.DbNull },  // Clear large checkpoint data
     });
 
-    logger.info('Scheduler', `[Resumed] Run ${runId} completed successfully`);
+    // Schedule next run (was not done because we resumed outside normal cron flow)
+    const nextRunAt = new Date(Date.now() + config.SUBSCRIPTION_INTERVAL_HOURS * 60 * 60 * 1000);
+    await db.searchSubscription.update({
+      where: { id: subscriptionId },
+      data: { lastSearchAt: new Date(), nextRunAt },
+    });
+
+    logger.info('Scheduler', `[Resumed] Run ${runId} completed successfully | Next run: ${nextRunAt.toISOString()}`);
     return { success: true, newMatches: newMatches.length };
 
   } catch (error) {
@@ -2134,10 +2141,11 @@ export async function resumeCollectionCheckpoint(
       notificationsSent = created.count;
     }
 
-    // Update last search timestamp
+    // Schedule next run (was not done because we resumed outside normal cron flow)
+    const nextRunAt = new Date(Date.now() + config.SUBSCRIPTION_INTERVAL_HOURS * 60 * 60 * 1000);
     await db.searchSubscription.update({
       where: { id: sub.id },
-      data: { lastSearchAt: new Date() },
+      data: { lastSearchAt: new Date(), nextRunAt },
     });
 
     // Complete the run
@@ -2154,7 +2162,7 @@ export async function resumeCollectionCheckpoint(
       data: { checkpoint: Prisma.DbNull },
     });
 
-    logger.info('Scheduler', `[Resumed] Run ${runId} completed successfully from collection checkpoint`);
+    logger.info('Scheduler', `[Resumed] Run ${runId} completed successfully from collection checkpoint | Next run: ${nextRunAt.toISOString()}`);
     return { success: true, newMatches: newMatches.length };
 
   } catch (error) {
