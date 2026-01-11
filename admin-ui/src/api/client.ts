@@ -7,6 +7,10 @@ import type {
   DiagnosticsData,
   FailStuckResponse,
   Period,
+  BroadcastsResponse,
+  SendBroadcastRequest,
+  SendBroadcastResponse,
+  BroadcastUsersResponse,
 } from './types';
 
 const API_BASE = '/admin/api';
@@ -137,4 +141,23 @@ export async function stopRun(runId: string): Promise<StopRunResponse> {
   return fetchApi<StopRunResponse>(`/runs/${runId}/stop`, {
     method: 'POST',
   });
+}
+
+// Broadcast notification functions
+export async function getBroadcasts(page = 1, limit = 20): Promise<BroadcastsResponse> {
+  return fetchApi<BroadcastsResponse>(`/notifications/broadcasts?page=${page}&limit=${limit}`);
+}
+
+export async function sendBroadcast(data: SendBroadcastRequest): Promise<SendBroadcastResponse> {
+  return fetchApi<SendBroadcastResponse>('/notifications/broadcast', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getBroadcastUsers(search?: string, limit = 20): Promise<BroadcastUsersResponse> {
+  const params = new URLSearchParams();
+  if (search) params.set('search', search);
+  params.set('limit', limit.toString());
+  return fetchApi<BroadcastUsersResponse>(`/notifications/users?${params.toString()}`);
 }

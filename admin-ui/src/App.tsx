@@ -17,6 +17,9 @@ import {
   toggleDebugMode,
   startSubscriptionRun,
   stopRun,
+  getBroadcasts,
+  sendBroadcast,
+  getBroadcastUsers,
 } from '@/api/client';
 import type {
   OverviewData,
@@ -26,6 +29,9 @@ import type {
   ErrorEntry,
   DiagnosticsData,
   Period,
+  BroadcastNotification,
+  BroadcastUser,
+  SendBroadcastRequest,
 } from '@/api/types';
 
 function formatTimeAgo(dateStr: string | null): string {
@@ -773,6 +779,333 @@ function ErrorsTable({ errors }: { errors: ErrorEntry[] }) {
   );
 }
 
+function NotificationsPanel({
+  broadcasts,
+  onSend,
+  onRefresh,
+}: {
+  broadcasts: BroadcastNotification[];
+  onSend: (data: SendBroadcastRequest) => Promise<{ success: boolean; sentCount?: number; failedCount?: number; error?: string }>;
+  onRefresh: () => void;
+}) {
+  const [title, setTitle] = useState('');
+  const [message, setMessage] = useState('');
+  const [parseMode, setParseMode] = useState<'HTML' | 'MarkdownV2' | 'plain'>('HTML');
+  const [targetType, setTargetType] = useState<'all' | 'active' | 'selected'>('all');
+  const [selectedUsers, setSelectedUsers] = useState<BroadcastUser[]>([]);
+  const [userSearch, setUserSearch] = useState('');
+  const [searchResults, setSearchResults] = useState<BroadcastUser[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const searchUsers = async (search: string) => {
+    if (!search.trim()) {
+      setSearchResults([]);
+      return;
+    }
+    setSearching(true);
+    try {
+      const data = await getBroadcastUsers(search, 10);
+      setSearchResults(data.users);
+    } catch (err) {
+      console.error('Failed to search users:', err);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (userSearch) searchUsers(userSearch);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [userSearch]);
+
+  const handleAddUser = (user: BroadcastUser) => {
+    if (!selectedUsers.find(u => u.id === user.id)) {
+      setSelectedUsers([...selectedUsers, user]);
+    }
+    setUserSearch('');
+    setSearchResults([]);
+  };
+
+  const handleRemoveUser = (userId: string) => {
+    setSelectedUsers(selectedUsers.filter(u => u.id !== userId));
+  };
+
+  const handleSend = async () => {
+    if (!message.trim()) {
+      setResult({ success: false, message: 'Message is required' });
+      return;
+    }
+    if (targetType === 'selected' && selectedUsers.length === 0) {
+      setResult({ success: false, message: 'Select at least one user' });
+      return;
+    }
+
+    setSending(true);
+    setResult(null);
+    try {
+      const response = await onSend({
+        title: title.trim() || undefined,
+        message: message.trim(),
+        parseMode,
+        targetType,
+        targetUserIds: targetType === 'selected' ? selectedUsers.map(u => u.id) : undefined,
+      });
+
+      if (response.success) {
+        setResult({
+          success: true,
+          message: `Sent to ${response.sentCount} user(s)${response.failedCount ? `, ${response.failedCount} failed` : ''}`,
+        });
+        // Reset form
+        setTitle('');
+        setMessage('');
+        setSelectedUsers([]);
+        onRefresh();
+      } else {
+        setResult({ success: false, message: response.error || 'Failed to send' });
+      }
+    } catch (err) {
+      setResult({ success: false, message: err instanceof Error ? err.message : 'Failed to send' });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Compose Section */}
+      <div className="bg-secondary/20 rounded-lg p-4">
+        <h3 className="text-lg font-medium mb-4">Send Broadcast</h3>
+
+        <div className="space-y-4">
+          {/* Title */}
+          <div>
+            <label className="block text-sm font-medium text-muted-foreground mb-1">
+              Title (optional)
+            </label>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Announcement title..."
+              className="w-full px-3 py-2 bg-input border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+
+          {/* Message */}
+          <div>
+            <label className="block text-sm font-medium text-muted-foreground mb-1">
+              Message *
+            </label>
+            <textarea
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder="Your message..."
+              rows={4}
+              className="w-full px-3 py-2 bg-input border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+            />
+          </div>
+
+          {/* Parse Mode */}
+          <div>
+            <label className="block text-sm font-medium text-muted-foreground mb-1">
+              Format
+            </label>
+            <div className="flex gap-2">
+              {(['HTML', 'MarkdownV2', 'plain'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => setParseMode(mode)}
+                  className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                    parseMode === mode
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-secondary text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Target Type */}
+          <div>
+            <label className="block text-sm font-medium text-muted-foreground mb-1">
+              Recipients
+            </label>
+            <div className="flex gap-2 flex-wrap">
+              <button
+                onClick={() => setTargetType('all')}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  targetType === 'all'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-secondary text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                All Users
+              </button>
+              <button
+                onClick={() => setTargetType('active')}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  targetType === 'active'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-secondary text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                Active (with subscriptions)
+              </button>
+              <button
+                onClick={() => setTargetType('selected')}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  targetType === 'selected'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-secondary text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                Select Users
+              </button>
+            </div>
+          </div>
+
+          {/* User Selection */}
+          {targetType === 'selected' && (
+            <div>
+              <label className="block text-sm font-medium text-muted-foreground mb-1">
+                Search & Select Users
+              </label>
+              <div className="relative">
+                <input
+                  type="text"
+                  value={userSearch}
+                  onChange={(e) => setUserSearch(e.target.value)}
+                  placeholder="Search by username..."
+                  className="w-full px-3 py-2 bg-input border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+                {searching && (
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">
+                    ...
+                  </div>
+                )}
+                {searchResults.length > 0 && (
+                  <div className="absolute z-10 w-full mt-1 bg-popover border border-border rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                    {searchResults.map((user) => (
+                      <button
+                        key={user.id}
+                        onClick={() => handleAddUser(user)}
+                        className="w-full px-3 py-2 text-left hover:bg-secondary/50 flex items-center justify-between"
+                      >
+                        <span>{user.username || user.firstName || 'No name'}</span>
+                        <span className="text-xs text-muted-foreground">
+                          {user._count.subscriptions} subs
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Selected Users */}
+              {selectedUsers.length > 0 && (
+                <div className="flex flex-wrap gap-2 mt-2">
+                  {selectedUsers.map((user) => (
+                    <span
+                      key={user.id}
+                      className="inline-flex items-center gap-1 px-2 py-1 bg-primary/20 text-primary rounded text-sm"
+                    >
+                      {user.username || user.firstName || 'No name'}
+                      <button
+                        onClick={() => handleRemoveUser(user.id)}
+                        className="hover:text-destructive ml-1"
+                      >
+                        x
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Result Message */}
+          {result && (
+            <div className={`p-3 rounded-lg ${result.success ? 'bg-success/20 text-success' : 'bg-destructive/20 text-destructive'}`}>
+              {result.message}
+            </div>
+          )}
+
+          {/* Send Button */}
+          <button
+            onClick={handleSend}
+            disabled={sending || !message.trim()}
+            className="px-6 py-2 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {sending ? 'Sending...' : 'Send Broadcast'}
+          </button>
+        </div>
+      </div>
+
+      {/* History Section */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-medium">Broadcast History</h3>
+          <button
+            onClick={onRefresh}
+            className="px-3 py-1 text-sm bg-secondary text-secondary-foreground rounded hover:bg-secondary/80"
+          >
+            Refresh
+          </button>
+        </div>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Title</TableHead>
+              <TableHead>Message</TableHead>
+              <TableHead>Target</TableHead>
+              <TableHead>Sent</TableHead>
+              <TableHead>Failed</TableHead>
+              <TableHead>Time</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {broadcasts.map((broadcast) => (
+              <TableRow key={broadcast.id}>
+                <TableCell className="font-medium">
+                  {broadcast.title || <span className="text-muted-foreground">-</span>}
+                </TableCell>
+                <TableCell>
+                  <TruncatedCell value={broadcast.message} maxWidth={200} />
+                </TableCell>
+                <TableCell>
+                  <Badge variant="secondary">
+                    {broadcast.targetType}
+                    {broadcast.targetType === 'selected' && ` (${broadcast.targetUserIds.length})`}
+                  </Badge>
+                </TableCell>
+                <TableCell className="text-success">{broadcast.sentCount}</TableCell>
+                <TableCell className={broadcast.failedCount > 0 ? 'text-destructive' : 'text-muted-foreground'}>
+                  {broadcast.failedCount}
+                </TableCell>
+                <TableCell className="text-muted-foreground">{formatTimeAgo(broadcast.createdAt)}</TableCell>
+              </TableRow>
+            ))}
+            {broadcasts.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
+                  No broadcasts sent yet
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
 function DiagnosticsPanel({ data, onRefresh, onFailStuck }: {
   data: DiagnosticsData | null;
   onRefresh: () => void;
@@ -1012,6 +1345,7 @@ function Dashboard() {
   const [runsTotal, setRunsTotal] = useState(0);
   const [errors, setErrors] = useState<ErrorEntry[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsData | null>(null);
+  const [broadcasts, setBroadcasts] = useState<BroadcastNotification[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [period, setPeriod] = useState<Period>('24h');
@@ -1040,6 +1374,31 @@ function Dashboard() {
       setDiagnostics(data);
     } catch (err) {
       console.error('Failed to load diagnostics:', err);
+    }
+  };
+
+  const loadBroadcasts = async () => {
+    try {
+      const data = await getBroadcasts(1, 50);
+      setBroadcasts(data.broadcasts);
+    } catch (err) {
+      console.error('Failed to load broadcasts:', err);
+    }
+  };
+
+  const handleSendBroadcast = async (data: SendBroadcastRequest): Promise<{ success: boolean; sentCount?: number; failedCount?: number; error?: string }> => {
+    try {
+      const response = await sendBroadcast(data);
+      return {
+        success: response.success,
+        sentCount: response.broadcast.sentCount,
+        failedCount: response.broadcast.failedCount,
+      };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Failed to send broadcast',
+      };
     }
   };
 
@@ -1187,6 +1546,9 @@ function Dashboard() {
               <TabsTrigger value="diagnostics" onClick={loadDiagnostics}>
                 Diagnostics
               </TabsTrigger>
+              <TabsTrigger value="notifications" onClick={loadBroadcasts}>
+                Notifications
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="users" className="mt-4">
@@ -1259,6 +1621,18 @@ function Dashboard() {
                     data={diagnostics}
                     onRefresh={loadDiagnostics}
                     onFailStuck={handleFailStuck}
+                  />
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="notifications" className="mt-4">
+              <Card>
+                <CardContent className="pt-6">
+                  <NotificationsPanel
+                    broadcasts={broadcasts}
+                    onSend={handleSendBroadcast}
+                    onRefresh={loadBroadcasts}
                   />
                 </CardContent>
               </Card>

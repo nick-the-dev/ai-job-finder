@@ -321,3 +321,31 @@ model MarketSnapshot {
   @@index([date])
   @@map("market_snapshots")
 }
+
+// ============================================================
+// ADMIN BROADCAST NOTIFICATIONS
+// ============================================================
+
+// Track broadcast notifications sent from admin dashboard
+model BroadcastNotification {
+  id              String   @id @default(uuid())
+
+  // Message content
+  title           String?
+  message         String
+  parseMode       String   @default("HTML") @map("parse_mode")  // "HTML" | "MarkdownV2" | "plain"
+
+  // Targeting
+  targetType      String   @default("all") @map("target_type")  // "all" | "active" | "selected"
+  targetUserIds   String[] @default([]) @map("target_user_ids") // If targetType is "selected"
+
+  // Results
+  sentCount       Int      @default(0) @map("sent_count")
+  failedCount     Int      @default(0) @map("failed_count")
+
+  // Timestamps
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("broadcast_notifications")
+}

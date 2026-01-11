@@ -11,6 +11,7 @@ import { runSingleSubscriptionSearch } from '../scheduler/jobs/search-subscripti
 import { isRedisConnected, getRedis } from '../queue/redis.js';
 import { queueService } from '../queue/service.js';
 import { getQueues } from '../queue/queues.js';
+import { sendMessage } from '../telegram/services/notification.js';
 
 const router = Router();
 
@@ -1216,6 +1217,222 @@ router.post('/api/diagnostics/clear-all-locks', async (req: Request, res: Respon
   } catch (error) {
     logger.error('Admin', 'Failed to clear all locks', error);
     res.status(500).json({ error: 'Failed to clear all locks' });
+  }
+});
+
+// ============================================================
+// BROADCAST NOTIFICATIONS
+// ============================================================
+
+// GET /admin/api/notifications/broadcasts - List broadcast history
+router.get('/api/notifications/broadcasts', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const offset = (page - 1) * limit;
+
+    const [broadcasts, total] = await Promise.all([
+      db.broadcastNotification.findMany({
+        skip: offset,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      db.broadcastNotification.count(),
+    ]);
+
+    res.json({
+      broadcasts,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to get broadcasts', error);
+    res.status(500).json({ error: 'Failed to get broadcasts' });
+  }
+});
+
+// POST /admin/api/notifications/broadcast - Send a broadcast notification
+router.post('/api/notifications/broadcast', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const { title, message, parseMode = 'HTML', targetType = 'all', targetUserIds = [] } = req.body;
+
+    // Validate message
+    if (!message || typeof message !== 'string' || message.trim().length === 0) {
+      res.status(400).json({ error: 'Message is required' });
+      return;
+    }
+
+    if (message.length > 4000) {
+      res.status(400).json({ error: 'Message too long (max 4000 characters)' });
+      return;
+    }
+
+    // Validate parse mode
+    const validParseModes = ['HTML', 'MarkdownV2', 'plain'];
+    if (!validParseModes.includes(parseMode)) {
+      res.status(400).json({ error: `Invalid parseMode. Must be one of: ${validParseModes.join(', ')}` });
+      return;
+    }
+
+    // Validate target type
+    const validTargetTypes = ['all', 'active', 'selected'];
+    if (!validTargetTypes.includes(targetType)) {
+      res.status(400).json({ error: `Invalid targetType. Must be one of: ${validTargetTypes.join(', ')}` });
+      return;
+    }
+
+    // Get target users based on targetType
+    let users: Array<{ id: string; chatId: bigint; username: string | null }>;
+
+    if (targetType === 'selected') {
+      if (!Array.isArray(targetUserIds) || targetUserIds.length === 0) {
+        res.status(400).json({ error: 'targetUserIds required when targetType is "selected"' });
+        return;
+      }
+      users = await db.telegramUser.findMany({
+        where: { id: { in: targetUserIds } },
+        select: { id: true, chatId: true, username: true },
+      });
+    } else if (targetType === 'active') {
+      // Users with active subscriptions
+      users = await db.telegramUser.findMany({
+        where: {
+          subscriptions: {
+            some: { isActive: true },
+          },
+        },
+        select: { id: true, chatId: true, username: true },
+      });
+    } else {
+      // All users
+      users = await db.telegramUser.findMany({
+        select: { id: true, chatId: true, username: true },
+      });
+    }
+
+    if (users.length === 0) {
+      res.status(400).json({ error: 'No users found matching the target criteria' });
+      return;
+    }
+
+    // Build the full message with optional title
+    let fullMessage = message.trim();
+    if (title && title.trim()) {
+      if (parseMode === 'HTML') {
+        fullMessage = `<b>${title.trim()}</b>\n\n${fullMessage}`;
+      } else if (parseMode === 'MarkdownV2') {
+        // Escape special characters in title for MarkdownV2
+        const escapedTitle = title.trim().replace(/[_*\[\]()~`>#+=|{}.!-]/g, '\\$&');
+        fullMessage = `*${escapedTitle}*\n\n${fullMessage}`;
+      } else {
+        fullMessage = `${title.trim()}\n\n${fullMessage}`;
+      }
+    }
+
+    // Create the broadcast record first
+    const broadcast = await db.broadcastNotification.create({
+      data: {
+        title: title?.trim() || null,
+        message: message.trim(),
+        parseMode,
+        targetType,
+        targetUserIds: targetType === 'selected' ? targetUserIds : [],
+      },
+    });
+
+    logger.info('Admin', `Starting broadcast to ${users.length} users (${targetType})`);
+
+    // Send messages to all users
+    let sentCount = 0;
+    let failedCount = 0;
+    const failures: Array<{ userId: string; username: string | null; error: string }> = [];
+
+    for (const user of users) {
+      try {
+        await sendMessage(
+          user.chatId,
+          fullMessage,
+          parseMode === 'plain' ? undefined : (parseMode as 'HTML' | 'MarkdownV2')
+        );
+        sentCount++;
+      } catch (error) {
+        failedCount++;
+        failures.push({
+          userId: user.id,
+          username: user.username,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+        logger.warn('Admin', `Failed to send broadcast to ${user.username || user.id}`, error);
+      }
+    }
+
+    // Update the broadcast record with results
+    await db.broadcastNotification.update({
+      where: { id: broadcast.id },
+      data: { sentCount, failedCount },
+    });
+
+    logger.info('Admin', `Broadcast completed: ${sentCount} sent, ${failedCount} failed`);
+
+    res.json({
+      success: true,
+      broadcast: {
+        id: broadcast.id,
+        sentCount,
+        failedCount,
+        totalTargeted: users.length,
+      },
+      failures: failures.length > 0 ? failures.slice(0, 10) : undefined, // Only show first 10 failures
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to send broadcast', error);
+    res.status(500).json({ error: 'Failed to send broadcast' });
+  }
+});
+
+// GET /admin/api/notifications/users - Get users for targeting (with search)
+router.get('/api/notifications/users', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const search = (req.query.search as string)?.trim();
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit as string) || 20));
+
+    const where = search
+      ? {
+          OR: [
+            { username: { contains: search, mode: 'insensitive' as const } },
+            { firstName: { contains: search, mode: 'insensitive' as const } },
+          ],
+        }
+      : {};
+
+    const users = await db.telegramUser.findMany({
+      where,
+      take: limit,
+      orderBy: { lastActiveAt: 'desc' },
+      select: {
+        id: true,
+        username: true,
+        firstName: true,
+        lastActiveAt: true,
+        _count: {
+          select: {
+            subscriptions: true,
+          },
+        },
+      },
+    });
+
+    res.json({ users });
+  } catch (error) {
+    logger.error('Admin', 'Failed to get users for broadcast', error);
+    res.status(500).json({ error: 'Failed to get users' });
   }
 });
 

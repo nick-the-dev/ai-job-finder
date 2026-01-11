@@ -213,3 +213,63 @@ export interface FailStuckResponse {
     duration: string;
   }>;
 }
+
+// Broadcast notification types
+export interface BroadcastNotification {
+  id: string;
+  title: string | null;
+  message: string;
+  parseMode: 'HTML' | 'MarkdownV2' | 'plain';
+  targetType: 'all' | 'active' | 'selected';
+  targetUserIds: string[];
+  sentCount: number;
+  failedCount: number;
+  createdAt: string;
+}
+
+export interface BroadcastsResponse {
+  broadcasts: BroadcastNotification[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    pages: number;
+  };
+}
+
+export interface SendBroadcastRequest {
+  title?: string;
+  message: string;
+  parseMode?: 'HTML' | 'MarkdownV2' | 'plain';
+  targetType?: 'all' | 'active' | 'selected';
+  targetUserIds?: string[];
+}
+
+export interface SendBroadcastResponse {
+  success: boolean;
+  broadcast: {
+    id: string;
+    sentCount: number;
+    failedCount: number;
+    totalTargeted: number;
+  };
+  failures?: Array<{
+    userId: string;
+    username: string | null;
+    error: string;
+  }>;
+}
+
+export interface BroadcastUser {
+  id: string;
+  username: string | null;
+  firstName: string | null;
+  lastActiveAt: string | null;
+  _count: {
+    subscriptions: number;
+  };
+}
+
+export interface BroadcastUsersResponse {
+  users: BroadcastUser[];
+}
