@@ -27,7 +27,7 @@ export async function processCollectionJob(job: Job<CollectionJobData>): Promise
 
   // Check if the run has been cancelled before doing any work
   if (runId && await isRunCancelled(runId)) {
-    logger.info('Worker:Collection', `[${requestId}] Skipping job ${job.id} - run ${runId} was cancelled`);
+    logger.info('Worker:Collection', `[${requestId}] 🛑 SKIPPED: "${query}" - run was cancelled`);
     return []; // Return empty, don't waste resources
   }
 

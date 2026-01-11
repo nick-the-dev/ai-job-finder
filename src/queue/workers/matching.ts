@@ -28,7 +28,7 @@ export async function processMatchingJob(job: Job<MatchingJobData>): Promise<Mat
 
   // Check if the run has been cancelled before doing any work
   if (runId && await isRunCancelled(runId)) {
-    logger.info('Worker:Matching', `[${requestId}] Skipping job ${job.id} - run ${runId} was cancelled`);
+    logger.info('Worker:Matching', `[${requestId}] 🛑 SKIPPED: "${jobData.title}" @ ${jobData.company} - run was cancelled`);
     // Return a dummy result so the job completes without error
     return {
       match: { score: 0, reasoning: 'Run cancelled', matchedSkills: [], missingSkills: [], pros: [], cons: [] },

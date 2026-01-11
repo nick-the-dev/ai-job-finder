@@ -98,7 +98,7 @@ export async function markRunCancelled(runId: string): Promise<boolean> {
     // Use a hash with TTL per runId
     const key = `${CANCELLED_RUNS_KEY}:${runId}`;
     await redisClient.setex(key, CANCELLATION_TTL_SECONDS, '1');
-    logger.debug('Redis', `Marked run ${runId} as cancelled (TTL: ${CANCELLATION_TTL_SECONDS}s)`);
+    logger.info('Redis', `🛑 Run ${runId} marked as CANCELLED - workers will skip remaining jobs`);
     return true;
   } catch (error) {
     logger.error('Redis', `Failed to mark run ${runId} as cancelled`, error);
