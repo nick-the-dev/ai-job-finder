@@ -6,7 +6,8 @@ import { logger } from '../utils/logger.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { RunTracker } from '../observability/tracker.js';
-import { isSubscriptionRunning, releaseSubscriptionLock } from '../scheduler/cron.js';
+import { isSubscriptionRunning, releaseSubscriptionLock, acquireSubscriptionLock, markSubscriptionFinished } from '../scheduler/cron.js';
+import { runSingleSubscriptionSearch } from '../scheduler/jobs/search-subscriptions.js';
 import { isRedisConnected, getRedis } from '../queue/redis.js';
 import { queueService } from '../queue/service.js';
 import { getQueues } from '../queue/queues.js';
@@ -595,6 +596,175 @@ router.post('/api/subscriptions/:id/debug', async (req: Request, res: Response) 
     }
     logger.error('Admin', 'Failed to toggle debug mode', error);
     res.status(500).json({ error: 'Failed to toggle debug mode' });
+  }
+});
+
+// POST /admin/api/subscriptions/:id/run/start - Trigger an immediate run
+router.post('/api/subscriptions/:id/run/start', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const { id } = req.params;
+
+    // Check subscription exists
+    const subscription = await db.searchSubscription.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        isActive: true,
+        isPaused: true,
+        jobTitles: true,
+        user: {
+          select: {
+            username: true,
+          },
+        },
+      },
+    });
+
+    if (!subscription) {
+      res.status(404).json({ error: 'Subscription not found' });
+      return;
+    }
+
+    // Check if subscription is active
+    if (!subscription.isActive) {
+      res.status(400).json({ error: 'Subscription is inactive. Please activate it first.' });
+      return;
+    }
+
+    // Check if already running
+    const isRunning = await isSubscriptionRunning(id);
+    if (isRunning) {
+      res.status(409).json({ error: 'Subscription is already running' });
+      return;
+    }
+
+    // Acquire lock
+    const lockAcquired = await acquireSubscriptionLock(id);
+    if (!lockAcquired) {
+      res.status(409).json({ error: 'Could not acquire lock - subscription may be running' });
+      return;
+    }
+
+    logger.info(
+      'Admin',
+      `Manual run triggered for subscription ${id} (@${subscription.user.username}: ${subscription.jobTitles.slice(0, 2).join(', ')})`
+    );
+
+    // Run in background (don't block the response)
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    (async () => {
+      try {
+        const result = await runSingleSubscriptionSearch(id, 'manual');
+        logger.info(
+          'Admin',
+          `Manual run completed for ${id}: ${result.matchesFound} matches, ${result.notificationsSent} notifications`
+        );
+      } catch (error) {
+        logger.error('Admin', `Manual run failed for ${id}`, error);
+      } finally {
+        await markSubscriptionFinished(id);
+      }
+    })();
+
+    res.json({
+      success: true,
+      message: 'Run started',
+      subscription: {
+        id: subscription.id,
+        username: subscription.user.username,
+      },
+    });
+  } catch (error) {
+    logger.error('Admin', 'Failed to start subscription run', error);
+    res.status(500).json({ error: 'Failed to start subscription run' });
+  }
+});
+
+// POST /admin/api/runs/:id/stop - Stop a running subscription run
+router.post('/api/runs/:id/stop', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const { id } = req.params;
+
+    // Find the run
+    const run = await db.subscriptionRun.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        status: true,
+        subscriptionId: true,
+        startedAt: true,
+        currentStage: true,
+        progressPercent: true,
+        subscription: {
+          select: {
+            user: {
+              select: {
+                username: true,
+              },
+            },
+            jobTitles: true,
+          },
+        },
+      },
+    });
+
+    if (!run) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+
+    if (run.status !== 'running') {
+      res.status(400).json({ error: `Run is not running (status: ${run.status})` });
+      return;
+    }
+
+    // Mark as failed with manual stop message
+    const durationMs = Date.now() - run.startedAt.getTime();
+    await db.subscriptionRun.update({
+      where: { id },
+      data: {
+        status: 'failed',
+        completedAt: new Date(),
+        durationMs,
+        errorMessage: `Manually stopped by admin at ${run.progressPercent || 0}% (stage: ${run.currentStage || 'unknown'})`,
+        failedStage: run.currentStage || 'manual_stop',
+      },
+    });
+
+    // Release the lock so subscription can run again
+    await releaseSubscriptionLock(run.subscriptionId);
+
+    // Schedule next run at normal interval (don't leave it stuck)
+    await db.searchSubscription.update({
+      where: { id: run.subscriptionId },
+      data: { nextRunAt: new Date(Date.now() + 60 * 60 * 1000) }, // 1 hour from now
+    });
+
+    logger.info(
+      'Admin',
+      `Run ${id} manually stopped (@${run.subscription.user.username}: ${run.subscription.jobTitles.slice(0, 2).join(', ')}) at ${run.progressPercent || 0}%`
+    );
+
+    res.json({
+      success: true,
+      message: 'Run stopped',
+      run: {
+        id: run.id,
+        subscriptionId: run.subscriptionId,
+        durationMs,
+        stoppedAt: run.currentStage,
+        progressPercent: run.progressPercent,
+      },
+    });
+  } catch (error) {
+    if ((error as any).code === 'P2025') {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+    logger.error('Admin', 'Failed to stop run', error);
+    res.status(500).json({ error: 'Failed to stop run' });
   }
 });
 

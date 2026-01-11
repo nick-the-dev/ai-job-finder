@@ -105,3 +105,36 @@ export async function failStuckRuns(minAgeMinutes = 120): Promise<FailStuckRespo
     body: JSON.stringify({ minAgeMinutes }),
   });
 }
+
+export interface StartRunResponse {
+  success: boolean;
+  message: string;
+  subscription: {
+    id: string;
+    username: string | null;
+  };
+}
+
+export async function startSubscriptionRun(subscriptionId: string): Promise<StartRunResponse> {
+  return fetchApi<StartRunResponse>(`/subscriptions/${subscriptionId}/run/start`, {
+    method: 'POST',
+  });
+}
+
+export interface StopRunResponse {
+  success: boolean;
+  message: string;
+  run: {
+    id: string;
+    subscriptionId: string;
+    durationMs: number;
+    stoppedAt: string | null;
+    progressPercent: number | null;
+  };
+}
+
+export async function stopRun(runId: string): Promise<StopRunResponse> {
+  return fetchApi<StopRunResponse>(`/runs/${runId}/stop`, {
+    method: 'POST',
+  });
+}

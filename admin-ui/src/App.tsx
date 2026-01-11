@@ -15,6 +15,8 @@ import {
   setAdminKey,
   hasAdminKey,
   toggleDebugMode,
+  startSubscriptionRun,
+  stopRun,
 } from '@/api/client';
 import type {
   OverviewData,
@@ -321,9 +323,19 @@ function UsersTable({ users }: { users: User[] }) {
   );
 }
 
-function SubscriptionRow({ sub, onDebugToggle }: { sub: Subscription; onDebugToggle: (id: string, enabled: boolean) => void }) {
+function SubscriptionRow({
+  sub,
+  onDebugToggle,
+  onStartRun,
+}: {
+  sub: Subscription;
+  onDebugToggle: (id: string, enabled: boolean) => void;
+  onStartRun: (id: string) => Promise<{ success: boolean; error?: string }>;
+}) {
   const isActive = sub.status === 'active' || sub.status === 'paused';
   const [toggling, setToggling] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
 
   const handleDebugToggle = async () => {
     setToggling(true);
@@ -331,6 +343,20 @@ function SubscriptionRow({ sub, onDebugToggle }: { sub: Subscription; onDebugTog
       await onDebugToggle(sub.id, !sub.debugMode);
     } finally {
       setToggling(false);
+    }
+  };
+
+  const handleStartRun = async () => {
+    setStarting(true);
+    setRunError(null);
+    try {
+      const result = await onStartRun(sub.id);
+      if (!result.success && result.error) {
+        setRunError(result.error);
+        setTimeout(() => setRunError(null), 5000); // Clear error after 5s
+      }
+    } finally {
+      setStarting(false);
     }
   };
 
@@ -377,30 +403,69 @@ function SubscriptionRow({ sub, onDebugToggle }: { sub: Subscription; onDebugTog
         {isActive ? formatNextRun(sub.nextRunAt) : '-'}
       </TableCell>
       <TableCell>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              onClick={handleDebugToggle}
-              disabled={toggling}
-              className={`px-2 py-1 text-xs rounded transition-colors ${
-                sub.debugMode
-                  ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 border border-amber-500/50'
-                  : 'bg-secondary text-muted-foreground hover:bg-secondary/80 border border-border'
-              } disabled:opacity-50`}
-            >
-              {toggling ? '...' : sub.debugMode ? '🔍 Debug ON' : 'Debug'}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>
-            <p>{sub.debugMode ? 'Disable debug logging' : 'Enable detailed debug logging for this subscription'}</p>
-          </TooltipContent>
-        </Tooltip>
+        <div className="flex items-center gap-2">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={handleStartRun}
+                disabled={starting || !isActive}
+                className={`px-2 py-1 text-xs rounded transition-colors ${
+                  starting
+                    ? 'bg-primary/20 text-primary border border-primary/50'
+                    : 'bg-green-500/20 text-green-400 hover:bg-green-500/30 border border-green-500/50'
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
+              >
+                {starting ? '...' : 'Run Now'}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {!isActive ? (
+                <p>Subscription is inactive</p>
+              ) : runError ? (
+                <p className="text-destructive">{runError}</p>
+              ) : (
+                <p>Trigger an immediate run for this subscription</p>
+              )}
+            </TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={handleDebugToggle}
+                disabled={toggling}
+                className={`px-2 py-1 text-xs rounded transition-colors ${
+                  sub.debugMode
+                    ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 border border-amber-500/50'
+                    : 'bg-secondary text-muted-foreground hover:bg-secondary/80 border border-border'
+                } disabled:opacity-50`}
+              >
+                {toggling ? '...' : sub.debugMode ? 'Debug ON' : 'Debug'}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>{sub.debugMode ? 'Disable debug logging' : 'Enable detailed debug logging for this subscription'}</p>
+            </TooltipContent>
+          </Tooltip>
+        </div>
+        {runError && (
+          <p className="text-xs text-destructive mt-1 max-w-[150px] truncate" title={runError}>
+            {runError}
+          </p>
+        )}
       </TableCell>
     </TableRow>
   );
 }
 
-function SubscriptionsTable({ subscriptions, onDebugToggle }: { subscriptions: Subscription[]; onDebugToggle: (id: string, enabled: boolean) => void }) {
+function SubscriptionsTable({
+  subscriptions,
+  onDebugToggle,
+  onStartRun,
+}: {
+  subscriptions: Subscription[];
+  onDebugToggle: (id: string, enabled: boolean) => void;
+  onStartRun: (id: string) => Promise<{ success: boolean; error?: string }>;
+}) {
   // Separate active/paused from inactive
   const activeSubs = subscriptions.filter(s => s.status === 'active' || s.status === 'paused');
   const inactiveSubs = subscriptions.filter(s => s.status === 'inactive');
@@ -422,7 +487,7 @@ function SubscriptionsTable({ subscriptions, onDebugToggle }: { subscriptions: S
       </TableHeader>
       <TableBody>
         {activeSubs.map((sub) => (
-          <SubscriptionRow key={sub.id} sub={sub} onDebugToggle={onDebugToggle} />
+          <SubscriptionRow key={sub.id} sub={sub} onDebugToggle={onDebugToggle} onStartRun={onStartRun} />
         ))}
         {activeSubs.length > 0 && inactiveSubs.length > 0 && (
           <TableRow>
@@ -434,7 +499,7 @@ function SubscriptionsTable({ subscriptions, onDebugToggle }: { subscriptions: S
           </TableRow>
         )}
         {inactiveSubs.map((sub) => (
-          <SubscriptionRow key={sub.id} sub={sub} onDebugToggle={onDebugToggle} />
+          <SubscriptionRow key={sub.id} sub={sub} onDebugToggle={onDebugToggle} onStartRun={onStartRun} />
         ))}
         {subscriptions.length === 0 && (
           <TableRow>
@@ -525,12 +590,37 @@ function ErrorDetails({ run }: { run: Run }) {
   );
 }
 
-function RunRow({ run }: { run: Run }) {
+function RunRow({
+  run,
+  onStopRun,
+}: {
+  run: Run;
+  onStopRun?: (runId: string) => Promise<{ success: boolean; error?: string }>;
+}) {
   const [expanded, setExpanded] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   const isRunning = run.status === 'running';
   const isFailed = run.status === 'failed';
   const startTime = new Date(run.startedAt).getTime();
   const currentDuration = isRunning ? Math.round((Date.now() - startTime) / 1000) : null;
+
+  const handleStopRun = async (e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent row expansion
+    if (!onStopRun) return;
+
+    setStopping(true);
+    setStopError(null);
+    try {
+      const result = await onStopRun(run.id);
+      if (!result.success && result.error) {
+        setStopError(result.error);
+        setTimeout(() => setStopError(null), 5000);
+      }
+    } finally {
+      setStopping(false);
+    }
+  };
 
   return (
     <>
@@ -566,10 +656,39 @@ function RunRow({ run }: { run: Run }) {
           {isRunning ? `${currentDuration}s` : run.durationMs ? `${(run.durationMs / 1000).toFixed(1)}s` : '-'}
         </TableCell>
         <TableCell className="text-muted-foreground">{formatTimeAgo(run.startedAt)}</TableCell>
+        <TableCell>
+          {isRunning && onStopRun && (
+            <div>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={handleStopRun}
+                    disabled={stopping}
+                    className="px-2 py-1 text-xs rounded transition-colors bg-destructive/20 text-destructive hover:bg-destructive/30 border border-destructive/50 disabled:opacity-50"
+                  >
+                    {stopping ? '...' : 'Stop'}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {stopError ? (
+                    <p className="text-destructive">{stopError}</p>
+                  ) : (
+                    <p>Stop this run immediately</p>
+                  )}
+                </TooltipContent>
+              </Tooltip>
+              {stopError && (
+                <p className="text-xs text-destructive mt-1 max-w-[100px] truncate" title={stopError}>
+                  {stopError}
+                </p>
+              )}
+            </div>
+          )}
+        </TableCell>
       </TableRow>
       {isFailed && expanded && (
         <TableRow>
-          <TableCell colSpan={8} className="p-0">
+          <TableCell colSpan={9} className="p-0">
             <ErrorDetails run={run} />
           </TableCell>
         </TableRow>
@@ -578,7 +697,13 @@ function RunRow({ run }: { run: Run }) {
   );
 }
 
-function RunsTable({ runs }: { runs: Run[] }) {
+function RunsTable({
+  runs,
+  onStopRun,
+}: {
+  runs: Run[];
+  onStopRun?: (runId: string) => Promise<{ success: boolean; error?: string }>;
+}) {
   return (
     <Table>
       <TableHeader>
@@ -591,15 +716,16 @@ function RunsTable({ runs }: { runs: Run[] }) {
           <TableHead>Sent</TableHead>
           <TableHead>Duration</TableHead>
           <TableHead>Time</TableHead>
+          <TableHead>Actions</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {runs.map((run) => (
-          <RunRow key={run.id} run={run} />
+          <RunRow key={run.id} run={run} onStopRun={onStopRun} />
         ))}
         {runs.length === 0 && (
           <TableRow>
-            <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
+            <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
               No runs yet
             </TableCell>
           </TableRow>
@@ -976,6 +1102,34 @@ function Dashboard() {
     }
   };
 
+  const handleStartRun = async (subscriptionId: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      await startSubscriptionRun(subscriptionId);
+      // Trigger a refresh to show the new running state
+      const runsData = await getRuns(1, 100);
+      setRuns(runsData.runs);
+      return { success: true };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to start run';
+      console.error('Failed to start run:', err);
+      return { success: false, error: errorMessage };
+    }
+  };
+
+  const handleStopRun = async (runId: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      await stopRun(runId);
+      // Trigger a refresh to show the stopped state
+      const runsData = await getRuns(runsPage, 100);
+      setRuns(runsData.runs);
+      return { success: true };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to stop run';
+      console.error('Failed to stop run:', err);
+      return { success: false, error: errorMessage };
+    }
+  };
+
   if (loading && !overview) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -1046,7 +1200,7 @@ function Dashboard() {
             <TabsContent value="subscriptions" className="mt-4">
               <Card>
                 <CardContent className="pt-6">
-                  <SubscriptionsTable subscriptions={subscriptions} onDebugToggle={handleDebugToggle} />
+                  <SubscriptionsTable subscriptions={subscriptions} onDebugToggle={handleDebugToggle} onStartRun={handleStartRun} />
                 </CardContent>
               </Card>
             </TabsContent>
@@ -1054,7 +1208,7 @@ function Dashboard() {
             <TabsContent value="runs" className="mt-4">
               <Card>
                 <CardContent className="pt-6">
-                  <RunsTable runs={runs} />
+                  <RunsTable runs={runs} onStopRun={handleStopRun} />
                   {runsTotalPages > 1 && (
                     <div className="flex items-center justify-between mt-4 pt-4 border-t border-border">
                       <p className="text-sm text-muted-foreground">
