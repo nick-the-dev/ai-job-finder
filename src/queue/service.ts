@@ -372,6 +372,28 @@ export class QueueService {
   }
 
   /**
+   * Notify JobSpy service about an event (for logging visibility)
+   */
+  private async notifyJobSpy(message: string, runId?: string, level: string = 'info'): Promise<void> {
+    const jobspyUrl = process.env.JOBSPY_URL;
+    if (!jobspyUrl) return;
+
+    try {
+      const response = await fetch(`${jobspyUrl}/notify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, run_id: runId, level }),
+      });
+      if (!response.ok) {
+        logger.debug('QueueService', `JobSpy notify failed: ${response.status}`);
+      }
+    } catch (err) {
+      // Don't fail cancellation if notification fails
+      logger.debug('QueueService', `JobSpy notify error`, err);
+    }
+  }
+
+  /**
    * Cancel all queued jobs for a specific run.
    * This removes waiting and active jobs from both collection and matching queues.
    * Used when a run is manually stopped or fails.
@@ -386,6 +408,9 @@ export class QueueService {
 
     // Mark run as cancelled in Redis FIRST so workers check before processing
     await markRunCancelled(runId);
+
+    // Notify JobSpy service for visibility in Python logs
+    await this.notifyJobSpy(`🛑 Run CANCELLED - stopping all collection jobs`, runId, 'warn');
 
     if (!collectionQueue && !matchingQueue) {
       logger.warn('QueueService', `cancelRunJobs: No queues available`);

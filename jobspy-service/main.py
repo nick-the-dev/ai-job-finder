@@ -103,6 +103,26 @@ def health():
     return {"status": "ok", "service": "jobspy-scraper", "jobspy_version": JOBSPY_VERSION}
 
 
+class NotifyRequest(BaseModel):
+    message: str
+    run_id: Optional[str] = None
+    level: str = "info"  # info, warn, error
+
+
+@app.post("/notify")
+def notify(request: NotifyRequest):
+    """Receive notifications from Node.js service for logging visibility."""
+    log_func = logger.info
+    if request.level == "warn":
+        log_func = logger.warning
+    elif request.level == "error":
+        log_func = logger.error
+
+    run_info = f" [run={request.run_id}]" if request.run_id else ""
+    log_func(f"🔔 NOTIFY{run_info}: {request.message}")
+    return {"status": "logged"}
+
+
 @app.get("/debug/proxies")
 def debug_proxies():
     """Return proxy pool status (count only, not actual credentials)."""
