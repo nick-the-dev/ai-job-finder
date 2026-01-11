@@ -354,7 +354,10 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
   const cappedSpecs = pendingSpecs.slice(0, maxQueries);
   const queriesCapped = pendingSpecs.length > maxQueries;
 
-  const queriesTotal = querySpecs.length;
+  // Calculate the ACTUAL total queries for progress (what will complete, not theoretical)
+  // = already completed (skipped from checkpoint) + what we'll execute (capped)
+  // This ensures progress reaches 100% when all executable queries finish
+  const queriesTotal = skippedCount + cappedSpecs.length;
   let queriesCompleted = skippedCount;
 
   logger.info('Scheduler', `Built ${querySpecs.length} query specs, ${skippedCount} already completed, ${cappedSpecs.length} to execute${queriesCapped ? ` (capped from ${pendingSpecs.length})` : ''}`);
@@ -719,6 +722,7 @@ export async function runSingleSubscriptionSearch(
   });
 
   subLogger.debug('Collection', 'Starting collection stage');
+  let progressRecalculated = false;
   const collectionResult = await collectJobsForSubscription({
     jobTitles: sub.jobTitles,
     normalizedLocations,
@@ -731,6 +735,15 @@ export async function runSingleSubscriptionSearch(
     priority: PRIORITY.MANUAL_SCAN,
     subLogger,
     onProgress: async (current, total, detail, accumulatedJobs, completedQueryKeys) => {
+      // Recalculate progress allocations on first callback when we know actual query count
+      // This fixes the mismatch between estimated queries (used for initial %) and actual queries
+      if (!progressRecalculated) {
+        progressRecalculated = true;
+        // Estimate jobs based on average per query so far
+        const avgJobsPerQuery = current > 0 ? accumulatedJobs.length / current : 50;
+        const estimatedTotalJobs = Math.round(avgJobsPerQuery * total);
+        progress.recalculate(total, Math.max(100, estimatedTotalJobs));
+      }
       const percent = progress.collection(current, total);
       const checkpoint: CollectionCheckpoint = {
         stage: 'collection',
@@ -1270,6 +1283,7 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       });
 
       subLogger.debug('Collection', 'Starting collection stage');
+      let progressRecalculated = false;
       const collectionResult = await collectJobsForSubscription({
         jobTitles: sub.jobTitles,
         normalizedLocations,
@@ -1282,6 +1296,15 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         priority: PRIORITY.SCHEDULED,
         subLogger,
         onProgress: async (current, total, detail, accumulatedJobs, completedQueryKeys) => {
+          // Recalculate progress allocations on first callback when we know actual query count
+          // This fixes the mismatch between estimated queries (used for initial %) and actual queries
+          if (!progressRecalculated) {
+            progressRecalculated = true;
+            // Estimate jobs based on average per query so far
+            const avgJobsPerQuery = current > 0 ? accumulatedJobs.length / current : 50;
+            const estimatedTotalJobs = Math.round(avgJobsPerQuery * total);
+            progress.recalculate(total, Math.max(100, estimatedTotalJobs));
+          }
           const percent = progress.collection(current, total);
           const checkpoint: CollectionCheckpoint = {
             stage: 'collection',
@@ -1939,6 +1962,7 @@ export async function resumeCollectionCheckpoint(
     });
 
     // Continue collection, skipping completed queries
+    let progressRecalculated = false;
     const collectionResult = await collectJobsForSubscription({
       jobTitles: sub.jobTitles,
       normalizedLocations,
@@ -1952,6 +1976,15 @@ export async function resumeCollectionCheckpoint(
       subLogger,
       skipQueryKeys: checkpoint.completedQueryKeys, // Skip already-completed queries
       onProgress: async (current, total, detail, accumulatedJobs, completedQueryKeys) => {
+        // Recalculate progress allocations on first callback when we know actual query count
+        // This fixes the mismatch between estimated queries (used for initial %) and actual queries
+        if (!progressRecalculated) {
+          progressRecalculated = true;
+          // Estimate jobs based on average per query so far
+          const avgJobsPerQuery = current > 0 ? accumulatedJobs.length / current : 50;
+          const estimatedTotalJobs = Math.round(avgJobsPerQuery * total);
+          progress.recalculate(total, Math.max(100, estimatedTotalJobs));
+        }
         const percent = progress.collection(current, total);
         const newCheckpoint: CollectionCheckpoint = {
           stage: 'collection',
