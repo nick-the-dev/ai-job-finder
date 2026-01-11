@@ -300,9 +300,10 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
         }
 
         // Search for country-specific remote jobs (e.g., "Remote in Canada")
+        // Only use first search variant to avoid duplicate searches (e.g., "Toronto" vs "Toronto ON" return same results)
         for (const loc of countrySpecificRemote) {
           if (queriesCapped) break;
-          const variants = loc.searchVariants.slice(0, 2);
+          const variants = loc.searchVariants.slice(0, 1);
           if (variants.length === 0) variants.push(loc.country);
 
           for (const variant of variants) {
@@ -352,10 +353,10 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
           }
         }
 
-        // Search for each physical location using up to 2 searchVariants
+        // Search for each physical location (use only first variant to avoid duplicates)
         for (const loc of physicalLocations) {
           if (queriesCapped) break;
-          const variants = loc.searchVariants.slice(0, 2);
+          const variants = loc.searchVariants.slice(0, 1);
           if (variants.length === 0) variants.push(loc.display);
 
           for (const variant of variants) {
