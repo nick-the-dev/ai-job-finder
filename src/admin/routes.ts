@@ -720,6 +720,13 @@ router.post('/api/runs/:id/stop', async (req: Request, res: Response) => {
       return;
     }
 
+    // Cancel queued jobs for this run (stop JobSpy/LLM requests)
+    const cancelledJobs = await queueService.cancelRunJobs(id);
+    logger.info(
+      'Admin',
+      `Cancelled ${cancelledJobs.collection} collection jobs, ${cancelledJobs.matching} matching jobs for run ${id}`
+    );
+
     // Mark as failed with manual stop message
     const durationMs = Date.now() - run.startedAt.getTime();
     await db.subscriptionRun.update({

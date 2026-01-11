@@ -34,6 +34,7 @@ interface CollectionParams {
   subLogger?: SubscriptionLogger; // Optional subscription-scoped logger for debug mode
   onProgress?: (current: number, total: number, detail: string, accumulatedJobs: RawJob[], completedQueryKeys: string[]) => Promise<void>; // Progress callback with accumulated jobs for checkpoint
   skipQueryKeys?: string[]; // Query keys to skip (for resume from checkpoint)
+  runContext?: { runId: string; subscriptionId: string }; // For job cancellation support
 }
 
 interface CollectionError {
@@ -231,7 +232,7 @@ function generateQueryKey(title: string, location: string | undefined, jobType: 
  * The Bull queue handles concurrency (QUEUE_JOBSPY_CONCURRENCY workers).
  */
 async function collectJobsForSubscription(params: CollectionParams): Promise<CollectionResult> {
-  const { jobTitles, normalizedLocations, legacyLocation, legacyIsRemote, jobTypes, datePosted, limit, skipCache, priority, subLogger, onProgress, skipQueryKeys } = params;
+  const { jobTitles, normalizedLocations, legacyLocation, legacyIsRemote, jobTypes, datePosted, limit, skipCache, priority, subLogger, onProgress, skipQueryKeys, runContext } = params;
   const allRawJobs: RawJob[] = [];
   const errors: CollectionError[] = [];
   const completedQueryKeys: string[] = [];
@@ -408,7 +409,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
           skipCache,
           datePosted: datePosted === 'all' ? undefined : datePosted,
           country: spec.country,
-        }, priority);
+        }, priority, runContext);
 
         // Success - reset consecutive failures
         allRawJobs.push(...jobs);
@@ -734,6 +735,7 @@ export async function runSingleSubscriptionSearch(
     skipCache: true, // Manual scans always fetch fresh results
     priority: PRIORITY.MANUAL_SCAN,
     subLogger,
+    runContext: { runId, subscriptionId },
     onProgress: async (current, total, detail, accumulatedJobs, completedQueryKeys) => {
       // Recalculate progress allocations on first callback when we know actual query count
       // This fixes the mismatch between estimated queries (used for initial %) and actual queries
@@ -1295,6 +1297,7 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
         skipCache: false,
         priority: PRIORITY.SCHEDULED,
         subLogger,
+        runContext: { runId, subscriptionId: sub.id },
         onProgress: async (current, total, detail, accumulatedJobs, completedQueryKeys) => {
           // Recalculate progress allocations on first callback when we know actual query count
           // This fixes the mismatch between estimated queries (used for initial %) and actual queries
@@ -1975,6 +1978,7 @@ export async function resumeCollectionCheckpoint(
       priority: PRIORITY.SCHEDULED,
       subLogger,
       skipQueryKeys: checkpoint.completedQueryKeys, // Skip already-completed queries
+      runContext: { runId, subscriptionId },
       onProgress: async (current, total, detail, accumulatedJobs, completedQueryKeys) => {
         // Recalculate progress allocations on first callback when we know actual query count
         // This fixes the mismatch between estimated queries (used for initial %) and actual queries

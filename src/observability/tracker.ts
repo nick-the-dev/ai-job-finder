@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import * as Sentry from '@sentry/node';
 import { getDb } from '../db/client.js';
+import { queueService } from '../queue/service.js';
 import { logger } from '../utils/logger.js';
 import {
   trackSubscriptionRunCompleted,
@@ -239,6 +240,20 @@ export class RunTracker {
           ...context,
         },
       });
+    }
+
+    // Cancel any queued jobs for this run (no point processing more if run failed)
+    try {
+      const cancelled = await queueService.cancelRunJobs(runId);
+      if (cancelled.collection > 0 || cancelled.matching > 0) {
+        logger.info(
+          'RunTracker',
+          `Cancelled ${cancelled.collection} collection, ${cancelled.matching} matching jobs for failed run ${runId}`
+        );
+      }
+    } catch (cancelError) {
+      // Don't fail the fail() method if cancellation fails
+      logger.warn('RunTracker', `Failed to cancel jobs for run ${runId}`, cancelError);
     }
 
     // Track failed run metrics

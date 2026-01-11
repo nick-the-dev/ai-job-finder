@@ -26,6 +26,9 @@ export interface CollectionJobData {
   country?: string; // Explicit country for Indeed filtering (e.g., 'Canada', 'USA')
   requestId: string;
   priority: Priority;
+  // Optional run context for job cancellation
+  runId?: string;
+  subscriptionId?: string;
 }
 
 export interface MatchingJobData {

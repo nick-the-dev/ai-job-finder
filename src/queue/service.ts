@@ -102,7 +102,8 @@ export class QueueService {
    */
   async enqueueCollection(
     params: Omit<CollectionJobData, 'requestId' | 'priority'>,
-    priority: Priority = PRIORITY.API_REQUEST
+    priority: Priority = PRIORITY.API_REQUEST,
+    runContext?: { runId: string; subscriptionId: string }
   ): Promise<RawJob[]> {
     const requestId = generateRequestId();
     const startTime = Date.now();
@@ -130,7 +131,7 @@ export class QueueService {
       logger.info('QueueService', `[${requestId}] CACHE MISS for "${params.query}" (key: ${cacheKey}) - creating new request`);
 
       // Create the actual request and cache it
-      const requestPromise = this.executeCollection(params, requestId, priority);
+      const requestPromise = this.executeCollection(params, requestId, priority, runContext);
       requestCache.set(cacheKey, {
         promise: requestPromise,
         timestamp: Date.now(),
@@ -150,7 +151,7 @@ export class QueueService {
 
     // skipCache=true: bypass request cache
     logger.info('QueueService', `[${requestId}] SKIP CACHE - executing directly`);
-    const result = await this.executeCollection(params, requestId, priority);
+    const result = await this.executeCollection(params, requestId, priority, runContext);
     logger.info('QueueService', `[${requestId}] <<< enqueueCollection DONE (no cache): "${params.query}" returned ${result.length} jobs in ${Date.now() - startTime}ms`);
     return result;
   }
@@ -161,7 +162,8 @@ export class QueueService {
   private async executeCollection(
     params: Omit<CollectionJobData, 'requestId' | 'priority'>,
     requestId: string,
-    priority: Priority
+    priority: Priority,
+    runContext?: { runId: string; subscriptionId: string }
   ): Promise<RawJob[]> {
     const execStartTime = Date.now();
     const { collectionQueue } = getQueues();
@@ -189,7 +191,7 @@ export class QueueService {
     const addStartTime = Date.now();
 
     const job = await collectionQueue.add(
-      { ...params, requestId, priority },
+      { ...params, requestId, priority, runId: runContext?.runId, subscriptionId: runContext?.subscriptionId },
       {
         priority,
         removeOnComplete: 100,
@@ -367,6 +369,72 @@ export class QueueService {
     stopCacheCleanup();
     this.clearRequestCache();
     logger.info('QueueService', 'Shutdown complete - cleanup interval stopped');
+  }
+
+  /**
+   * Cancel all queued jobs for a specific run.
+   * This removes waiting and active jobs from both collection and matching queues.
+   * Used when a run is manually stopped or fails.
+   *
+   * @param runId - The run ID to cancel jobs for
+   * @returns Number of jobs cancelled
+   */
+  async cancelRunJobs(runId: string): Promise<{ collection: number; matching: number }> {
+    const { collectionQueue, matchingQueue } = getQueues();
+    let collectionCancelled = 0;
+    let matchingCancelled = 0;
+
+    if (!collectionQueue && !matchingQueue) {
+      logger.warn('QueueService', `cancelRunJobs: No queues available`);
+      return { collection: 0, matching: 0 };
+    }
+
+    logger.info('QueueService', `cancelRunJobs: Cancelling jobs for runId=${runId}`);
+
+    // Cancel collection queue jobs
+    if (collectionQueue) {
+      try {
+        const waitingJobs = await collectionQueue.getJobs(['waiting', 'active', 'delayed']);
+        for (const job of waitingJobs) {
+          if (job.data.runId === runId) {
+            try {
+              await job.remove();
+              collectionCancelled++;
+              logger.debug('QueueService', `cancelRunJobs: Removed collection job ${job.id}`);
+            } catch (removeErr) {
+              // Job might have already completed or been processed
+              logger.debug('QueueService', `cancelRunJobs: Could not remove collection job ${job.id}`, removeErr);
+            }
+          }
+        }
+      } catch (err) {
+        logger.error('QueueService', `cancelRunJobs: Error getting collection jobs`, err);
+      }
+    }
+
+    // Cancel matching queue jobs
+    if (matchingQueue) {
+      try {
+        const waitingJobs = await matchingQueue.getJobs(['waiting', 'active', 'delayed']);
+        for (const job of waitingJobs) {
+          if (job.data.traceContext?.runId === runId) {
+            try {
+              await job.remove();
+              matchingCancelled++;
+              logger.debug('QueueService', `cancelRunJobs: Removed matching job ${job.id}`);
+            } catch (removeErr) {
+              // Job might have already completed or been processed
+              logger.debug('QueueService', `cancelRunJobs: Could not remove matching job ${job.id}`, removeErr);
+            }
+          }
+        }
+      } catch (err) {
+        logger.error('QueueService', `cancelRunJobs: Error getting matching jobs`, err);
+      }
+    }
+
+    logger.info('QueueService', `cancelRunJobs: Cancelled ${collectionCancelled} collection jobs, ${matchingCancelled} matching jobs for runId=${runId}`);
+    return { collection: collectionCancelled, matching: matchingCancelled };
   }
 
   // Fallback: direct collection using p-limit
