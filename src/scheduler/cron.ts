@@ -357,8 +357,54 @@ export async function handleInterruptedRuns(): Promise<void> {
 
     logger.info('Scheduler', `Found ${interruptedRuns.length} resumable + ${stuckRuns.length} stuck runs from previous instance`);
 
-    // Handle resumable runs (with matching or collection checkpoint)
+    // Deduplicate: if multiple runs exist for the same subscription, keep only the most recent
+    const runsBySubscription = new Map<string, typeof interruptedRuns>();
     for (const run of interruptedRuns) {
+      const existing = runsBySubscription.get(run.subscriptionId);
+      if (!existing) {
+        runsBySubscription.set(run.subscriptionId, [run]);
+      } else {
+        existing.push(run);
+      }
+    }
+
+    // Fail older duplicate runs, keep only the most recent per subscription
+    const deduplicatedRuns: typeof interruptedRuns = [];
+    for (const [subId, runs] of runsBySubscription) {
+      if (runs.length > 1) {
+        // Sort by startedAt descending (most recent first)
+        runs.sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
+        const [latest, ...older] = runs;
+        deduplicatedRuns.push(latest);
+
+        // Fail the older duplicate runs
+        for (const oldRun of older) {
+          const username = oldRun.subscription.user?.username || 'unknown';
+          logger.info('Scheduler', `Failing duplicate run ${oldRun.id} for @${username} (keeping newer run ${latest.id})`);
+
+          const durationMs = Date.now() - oldRun.startedAt.getTime();
+          await db.subscriptionRun.update({
+            where: { id: oldRun.id },
+            data: {
+              status: 'failed',
+              completedAt: new Date(),
+              durationMs,
+              errorMessage: `Duplicate run cancelled - newer run ${latest.id} takes precedence`,
+              failedStage: oldRun.currentStage || 'unknown',
+            },
+          });
+        }
+      } else {
+        deduplicatedRuns.push(runs[0]);
+      }
+    }
+
+    if (deduplicatedRuns.length < interruptedRuns.length) {
+      logger.info('Scheduler', `Deduplicated ${interruptedRuns.length} runs to ${deduplicatedRuns.length} (cancelled ${interruptedRuns.length - deduplicatedRuns.length} duplicates)`);
+    }
+
+    // Handle resumable runs (with matching or collection checkpoint)
+    for (const run of deduplicatedRuns) {
       const checkpoint = run.checkpoint as MatchingCheckpoint | CollectionCheckpoint | null;
       const stage = checkpoint?.stage || run.currentStage || 'unknown';
       const percent = run.progressPercent || 0;
@@ -437,6 +483,10 @@ export async function handleInterruptedRuns(): Promise<void> {
     }
 
     // Handle stuck runs without checkpoint - fail and schedule re-run
+    // Skip subscriptions that already have a resumable run (they'll be handled above)
+    const subscriptionsWithResumableRun = new Set(deduplicatedRuns.map(r => r.subscriptionId));
+    const subscriptionsScheduledForRerun = new Set<string>();
+
     for (const run of stuckRuns) {
       const stage = run.currentStage || 'unknown';
       const percent = run.progressPercent || 0;
@@ -444,10 +494,18 @@ export async function handleInterruptedRuns(): Promise<void> {
       const durationMs = Date.now() - run.startedAt.getTime();
       const durationMin = Math.round(durationMs / 1000 / 60);
 
-      logger.info(
-        'Scheduler',
-        `Stuck run ${run.id} for @${username}: stage=${stage}, progress=${percent}%, duration=${durationMin}min - failing and scheduling re-run`
-      );
+      // Skip if this subscription already has a resumable run being processed
+      if (subscriptionsWithResumableRun.has(run.subscriptionId)) {
+        logger.info(
+          'Scheduler',
+          `Stuck run ${run.id} for @${username}: failing (subscription has resumable run ${[...deduplicatedRuns].find(r => r.subscriptionId === run.subscriptionId)?.id})`
+        );
+      } else {
+        logger.info(
+          'Scheduler',
+          `Stuck run ${run.id} for @${username}: stage=${stage}, progress=${percent}%, duration=${durationMin}min - failing and scheduling re-run`
+        );
+      }
 
       await db.subscriptionRun.update({
         where: { id: run.id },
@@ -455,19 +513,26 @@ export async function handleInterruptedRuns(): Promise<void> {
           status: 'failed',
           completedAt: new Date(),
           durationMs,
-          errorMessage: `Run stuck at ${stage} stage for ${durationMin} minutes (no progress, likely blocked on queue)`,
+          errorMessage: subscriptionsWithResumableRun.has(run.subscriptionId)
+            ? `Duplicate run cancelled - resumable run takes precedence`
+            : `Run stuck at ${stage} stage for ${durationMin} minutes (no progress, likely blocked on queue)`,
           failedStage: stage,
         },
       });
 
       await releaseSubscriptionLock(run.subscriptionId);
-      await db.searchSubscription.update({
-        where: { id: run.subscriptionId },
-        data: { nextRunAt: new Date() },
-      });
+
+      // Only schedule re-run if no resumable run exists AND we haven't already scheduled one
+      if (!subscriptionsWithResumableRun.has(run.subscriptionId) && !subscriptionsScheduledForRerun.has(run.subscriptionId)) {
+        await db.searchSubscription.update({
+          where: { id: run.subscriptionId },
+          data: { nextRunAt: new Date() },
+        });
+        subscriptionsScheduledForRerun.add(run.subscriptionId);
+      }
     }
 
-    logger.info('Scheduler', `Handled ${interruptedRuns.length + stuckRuns.length} interrupted/stuck run(s)`);
+    logger.info('Scheduler', `Handled ${deduplicatedRuns.length} resumable + ${stuckRuns.length} stuck run(s)`);
   } catch (error) {
     logger.error('Scheduler', 'Failed to handle interrupted runs', error);
     if (error instanceof Error) {
