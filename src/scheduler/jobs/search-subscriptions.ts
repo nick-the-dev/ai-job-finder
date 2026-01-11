@@ -43,6 +43,19 @@ interface CollectionError {
   error: string;
 }
 
+/**
+ * Query specification for parallel collection.
+ * Built first, then executed in parallel batches.
+ */
+interface QuerySpec {
+  title: string;
+  location?: string;
+  isRemote: boolean;
+  jobType?: 'fulltime' | 'parttime' | 'internship' | 'contract';
+  country?: string;
+  queryKey: string;
+}
+
 interface CollectionResult {
   jobs: RawJob[];
   queriesTotal: number;
@@ -212,7 +225,10 @@ function generateQueryKey(title: string, location: string | undefined, jobType: 
 /**
  * Collect jobs for a subscription, supporting multi-location search.
  * Uses normalizedLocations if available, falls back to legacy location/isRemote.
- * Returns detailed result with error tracking for reliability.
+ *
+ * PARALLEL EXECUTION: Queries are built first, then executed in parallel.
+ * Each proxy handles a DIFFERENT query (title/location), not the same one.
+ * The Bull queue handles concurrency (QUEUE_JOBSPY_CONCURRENCY workers).
  */
 async function collectJobsForSubscription(params: CollectionParams): Promise<CollectionResult> {
   const { jobTitles, normalizedLocations, legacyLocation, legacyIsRemote, jobTypes, datePosted, limit, skipCache, priority, subLogger, onProgress, skipQueryKeys } = params;
@@ -220,12 +236,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
   const errors: CollectionError[] = [];
   const completedQueryKeys: string[] = [];
   const skipKeys = new Set(skipQueryKeys || []);
-  let queriesTotal = 0;
-  let queriesFailed = 0;
-  let queriesCompleted = 0;
-  let queriesExecuted = 0;
   const maxQueries = config.COLLECTION_MAX_QUERIES_PER_RUN;
-  let queriesCapped = false;
 
   // Debug mode: Log detailed collection parameters
   subLogger?.debug('Collection', 'Starting job collection with params', {
@@ -243,166 +254,66 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
   // Determine job types to search (empty array = search all types with single call)
   const jobTypesToSearch = jobTypes.length > 0 ? jobTypes : [undefined];
 
-  // Use normalized locations if available
+  // ============================================================================
+  // PHASE 1: Build all query specs (no execution yet)
+  // ============================================================================
+  const querySpecs: QuerySpec[] = [];
+
   if (normalizedLocations && normalizedLocations.length > 0) {
     const physicalLocations = LocationNormalizerAgent.getPhysicalLocations(normalizedLocations);
     const hasWorldwideRemote = LocationNormalizerAgent.hasWorldwideRemote(normalizedLocations);
     const countrySpecificRemote = LocationNormalizerAgent.getCountrySpecificRemote(normalizedLocations);
 
     for (const jobType of jobTypesToSearch) {
-      if (queriesCapped) break;
-      const jobTypeLabel = jobType ? ` (${jobType})` : '';
-
       for (const title of jobTitles) {
-        if (queriesCapped) break;
-        // Search for worldwide remote jobs (no location filter = global search)
+        // Worldwide remote jobs (no location filter = global search)
         if (hasWorldwideRemote) {
-          // Check query cap before executing
-          if (queriesExecuted >= maxQueries) {
-            queriesCapped = true;
-            break;
-          }
-
           const queryKey = generateQueryKey(title, undefined, jobType, true);
-          queriesTotal++;
-
-          // Skip if already completed (resume from checkpoint)
-          if (skipKeys.has(queryKey)) {
-            queriesCompleted++;
-            completedQueryKeys.push(queryKey);
-            continue;
-          }
-
-          try {
-            queriesExecuted++;
-            logger.info('Scheduler', `  Collecting remote jobs globally for: "${title}"${jobTypeLabel}`);
-            const jobs = await queueService.enqueueCollection({
-              query: title,
-              isRemote: true,
-              jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
-              limit,
-              source: 'jobspy',
-              skipCache,
-              datePosted: datePosted === 'all' ? undefined : datePosted,
-              // No location = global search (LinkedIn searches globally, Indeed uses country_indeed default)
-            }, priority);
-            logger.info('Scheduler', `  Found ${jobs.length} remote jobs globally for "${title}"${jobTypeLabel}`);
-            allRawJobs.push(...jobs);
-            queriesCompleted++;
-            completedQueryKeys.push(queryKey);
-            await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`, allRawJobs, completedQueryKeys);
-          } catch (error) {
-            queriesFailed++;
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            errors.push({ query: title, jobType, error: errorMsg });
-            logger.error('Scheduler', `  Failed to collect remote jobs globally for "${title}"${jobTypeLabel}`, error);
-          }
+          querySpecs.push({
+            title,
+            location: undefined,
+            isRemote: true,
+            jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
+            country: undefined,
+            queryKey,
+          });
         }
 
-        // Search for country-specific remote jobs (e.g., "Remote in Canada")
-        // Only use first search variant to avoid duplicate searches (e.g., "Toronto" vs "Toronto ON" return same results)
+        // Country-specific remote jobs (e.g., "Remote in Canada")
         for (const loc of countrySpecificRemote) {
-          if (queriesCapped) break;
           const variants = loc.searchVariants.slice(0, 1);
           if (variants.length === 0) variants.push(loc.country);
 
           for (const variant of variants) {
-            // Check query cap before executing
-            if (queriesExecuted >= maxQueries) {
-              queriesCapped = true;
-              break;
-            }
-
-            // Ensure country is in location string for LinkedIn (which doesn't support country_indeed)
             const locationWithCountry = ensureCountryInLocation(variant, loc.country);
             const queryKey = generateQueryKey(title, locationWithCountry, jobType, true);
-            queriesTotal++;
-
-            // Skip if already completed (resume from checkpoint)
-            if (skipKeys.has(queryKey)) {
-              queriesCompleted++;
-              completedQueryKeys.push(queryKey);
-              continue;
-            }
-
-            try {
-              queriesExecuted++;
-              logger.info('Scheduler', `  Collecting remote jobs for: "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
-              const jobs = await queueService.enqueueCollection({
-                query: title,
-                location: locationWithCountry,
-                isRemote: true, // Remote jobs within this country
-                jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
-                limit,
-                source: 'jobspy',
-                skipCache,
-                datePosted: datePosted === 'all' ? undefined : datePosted,
-                country: loc.country, // Explicit country for Indeed filtering (prevents CA/California ambiguity)
-              }, priority);
-              logger.info('Scheduler', `  Found ${jobs.length} remote jobs for "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
-              allRawJobs.push(...jobs);
-              queriesCompleted++;
-              completedQueryKeys.push(queryKey);
-              await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`, allRawJobs, completedQueryKeys);
-            } catch (error) {
-              queriesFailed++;
-              const errorMsg = error instanceof Error ? error.message : String(error);
-              errors.push({ query: title, location: locationWithCountry, jobType, error: errorMsg });
-              logger.error('Scheduler', `  Failed to collect remote jobs for "${title}" in "${locationWithCountry}"${jobTypeLabel}`, error);
-            }
+            querySpecs.push({
+              title,
+              location: locationWithCountry,
+              isRemote: true,
+              jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
+              country: loc.country,
+              queryKey,
+            });
           }
         }
 
-        // Search for each physical location (use only first variant to avoid duplicates)
+        // Physical locations
         for (const loc of physicalLocations) {
-          if (queriesCapped) break;
           const variants = loc.searchVariants.slice(0, 1);
           if (variants.length === 0) variants.push(loc.display);
 
           for (const variant of variants) {
-            // Check query cap before executing
-            if (queriesExecuted >= maxQueries) {
-              queriesCapped = true;
-              break;
-            }
-
-            // Ensure country is in location string for LinkedIn (which doesn't support country_indeed)
             const locationWithCountry = ensureCountryInLocation(variant, loc.country);
             const queryKey = generateQueryKey(title, locationWithCountry, jobType, false);
-            queriesTotal++;
-
-            // Skip if already completed (resume from checkpoint)
-            if (skipKeys.has(queryKey)) {
-              queriesCompleted++;
-              completedQueryKeys.push(queryKey);
-              continue;
-            }
-
-            try {
-              queriesExecuted++;
-              logger.info('Scheduler', `  Collecting jobs for: "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
-              const jobs = await queueService.enqueueCollection({
-                query: title,
-                location: locationWithCountry,
-                isRemote: false, // Physical locations only
-                jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
-                limit,
-                source: 'jobspy',
-                skipCache,
-                datePosted: datePosted === 'all' ? undefined : datePosted,
-                country: loc.country, // Explicit country for Indeed filtering (prevents CA/California ambiguity)
-              }, priority);
-              logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
-              allRawJobs.push(...jobs);
-              queriesCompleted++;
-              completedQueryKeys.push(queryKey);
-              await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`, allRawJobs, completedQueryKeys);
-            } catch (error) {
-              queriesFailed++;
-              const errorMsg = error instanceof Error ? error.message : String(error);
-              errors.push({ query: title, location: locationWithCountry, jobType, error: errorMsg });
-              logger.error('Scheduler', `  Failed to collect jobs for "${title}" in "${locationWithCountry}"${jobTypeLabel}`, error);
-            }
+            querySpecs.push({
+              title,
+              location: locationWithCountry,
+              isRemote: false,
+              jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
+              country: loc.country,
+              queryKey,
+            });
           }
         }
       }
@@ -410,63 +321,122 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
   } else {
     // Legacy mode: single location (or no location = global search)
     for (const jobType of jobTypesToSearch) {
-      if (queriesCapped) break;
-      const jobTypeLabel = jobType ? ` (${jobType})` : '';
-
       for (const title of jobTitles) {
-        // Check query cap before executing
-        if (queriesExecuted >= maxQueries) {
-          queriesCapped = true;
-          break;
-        }
-
         const queryKey = generateQueryKey(title, legacyLocation ?? undefined, jobType, legacyIsRemote);
-        queriesTotal++;
-
-        // Skip if already completed (resume from checkpoint)
-        if (skipKeys.has(queryKey)) {
-          queriesCompleted++;
-          completedQueryKeys.push(queryKey);
-          continue;
-        }
-
-        try {
-          queriesExecuted++;
-          logger.info('Scheduler', `  Collecting jobs for: "${title}"${jobTypeLabel}`);
-          const jobs = await queueService.enqueueCollection({
-            query: title,
-            location: legacyLocation ?? undefined, // undefined = global search
-            isRemote: legacyIsRemote,
-            jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
-            limit,
-            source: 'jobspy',
-            skipCache,
-            datePosted: datePosted === 'all' ? undefined : datePosted,
-          }, priority);
-          logger.info('Scheduler', `  Found ${jobs.length} jobs for "${title}"${jobTypeLabel}`);
-          allRawJobs.push(...jobs);
-          queriesCompleted++;
-          completedQueryKeys.push(queryKey);
-          await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`, allRawJobs, completedQueryKeys);
-        } catch (error) {
-          queriesFailed++;
-          const errorMsg = error instanceof Error ? error.message : String(error);
-          errors.push({ query: title, location: legacyLocation ?? undefined, jobType, error: errorMsg });
-          logger.error('Scheduler', `  Failed to collect jobs for "${title}"${jobTypeLabel}`, error);
-        }
+        querySpecs.push({
+          title,
+          location: legacyLocation ?? undefined,
+          isRemote: legacyIsRemote,
+          jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
+          country: undefined,
+          queryKey,
+        });
       }
     }
   }
 
+  // ============================================================================
+  // PHASE 2: Filter and cap queries
+  // ============================================================================
+
+  // Filter out already-completed queries (checkpoint resume)
+  const pendingSpecs = querySpecs.filter(spec => !skipKeys.has(spec.queryKey));
+  const skippedCount = querySpecs.length - pendingSpecs.length;
+
+  // Add skipped query keys to completed list
+  for (const spec of querySpecs) {
+    if (skipKeys.has(spec.queryKey)) {
+      completedQueryKeys.push(spec.queryKey);
+    }
+  }
+
+  // Apply query cap
+  const cappedSpecs = pendingSpecs.slice(0, maxQueries);
+  const queriesCapped = pendingSpecs.length > maxQueries;
+
+  const queriesTotal = querySpecs.length;
+  let queriesCompleted = skippedCount;
+
+  logger.info('Scheduler', `Built ${querySpecs.length} query specs, ${skippedCount} already completed, ${cappedSpecs.length} to execute${queriesCapped ? ` (capped from ${pendingSpecs.length})` : ''}`);
+
+  // ============================================================================
+  // PHASE 3: Execute queries in PARALLEL
+  // ============================================================================
+
+  if (cappedSpecs.length > 0) {
+    logger.info('Scheduler', `Starting parallel collection of ${cappedSpecs.length} queries (Bull queue handles concurrency)`);
+
+    // Start ALL queries at once - the Bull queue will handle concurrency
+    // Each concurrent worker gets a DIFFERENT query, not the same one
+    const queryPromises = cappedSpecs.map(async (spec) => {
+      const jobTypeLabel = spec.jobType ? ` (${spec.jobType})` : '';
+      const locationLabel = spec.location || 'global';
+
+      try {
+        logger.info('Scheduler', `  Collecting: "${spec.title}" @ ${locationLabel}${jobTypeLabel}`);
+        const jobs = await queueService.enqueueCollection({
+          query: spec.title,
+          location: spec.location,
+          isRemote: spec.isRemote,
+          jobType: spec.jobType,
+          limit,
+          source: 'jobspy',
+          skipCache,
+          datePosted: datePosted === 'all' ? undefined : datePosted,
+          country: spec.country,
+        }, priority);
+
+        return { success: true, jobs, spec };
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        logger.error('Scheduler', `  Failed: "${spec.title}" @ ${locationLabel}${jobTypeLabel}: ${errorMsg}`);
+        return { success: false, jobs: [] as RawJob[], spec, error: errorMsg };
+      }
+    });
+
+    // Wait for all queries to complete
+    const results = await Promise.allSettled(queryPromises);
+
+    // Process results
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        const { success, jobs, spec, error } = result.value;
+
+        if (success) {
+          allRawJobs.push(...jobs);
+          queriesCompleted++;
+          completedQueryKeys.push(spec.queryKey);
+          logger.info('Scheduler', `  Found ${jobs.length} jobs for "${spec.title}" @ ${spec.location || 'global'}`);
+        } else {
+          errors.push({
+            query: spec.title,
+            location: spec.location,
+            jobType: spec.jobType,
+            error: error || 'Unknown error',
+          });
+        }
+      } else {
+        // Promise rejected (shouldn't happen with our try/catch, but just in case)
+        const errorMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        errors.push({ query: 'unknown', error: errorMsg });
+      }
+    }
+
+    // Report final progress
+    await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`, allRawJobs, completedQueryKeys);
+  }
+
   // Log warning if query cap was hit
   if (queriesCapped) {
-    logger.warn('Scheduler', `Query cap reached: executed ${queriesExecuted}/${maxQueries} max queries (subscription may have too many combinations of titles/locations/job types)`);
+    logger.warn('Scheduler', `Query cap reached: executed ${cappedSpecs.length}/${maxQueries} max queries (${pendingSpecs.length - cappedSpecs.length} queries dropped)`);
   }
+
+  logger.info('Scheduler', `Parallel collection complete: ${allRawJobs.length} jobs from ${queriesCompleted - skippedCount} queries (${errors.length} failed)`);
 
   return {
     jobs: allRawJobs,
     queriesTotal,
-    queriesFailed,
+    queriesFailed: errors.length,
     errors,
   };
 }
