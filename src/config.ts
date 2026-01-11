@@ -12,7 +12,7 @@ const envSchema = z.object({
   REDIS_URL: z.string().default('redis://localhost:6379'),
 
   // Queue concurrency limits
-  QUEUE_JOBSPY_CONCURRENCY: z.coerce.number().default(2),
+  QUEUE_JOBSPY_CONCURRENCY: z.coerce.number().default(20),
   QUEUE_LLM_CONCURRENCY: z.coerce.number().default(5),
   QUEUE_FALLBACK_ENABLED: z.coerce.boolean().default(true),
 
