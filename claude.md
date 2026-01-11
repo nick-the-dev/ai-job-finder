@@ -683,10 +683,27 @@ When runs fail, structured context is captured for debugging:
 
 ### Stuck Run Cleanup
 
-A cron job runs every 5 minutes to detect and fail stuck runs:
-- Runs with `status: 'running'` for >24 hours are marked as failed
-- Prevents zombie runs from blocking the system
-- Logs cleanup actions for visibility
+A cron job runs every 5 minutes with three tiers of stuck detection:
+
+**Tier 1: No Progress At All (2 hours)**
+- Detects runs with `status: 'running'` + `jobs_collected=0` + `collection_queries_total=0` + `checkpoint=NULL`
+- Catches runs that got stuck before doing anything (queue issues, early failures)
+- Fails the run and schedules immediate retry
+
+**Tier 2: Stalled Progress (2 hours)**
+- Uses `lastProgressAt` timestamp to detect runs that stopped making progress
+- Detects runs where `lastProgressAt` is >2 hours ago but status is still `running`
+- Only applies to runs that started making progress (has jobs, queries, or checkpoint)
+- Fails the run and schedules immediate retry
+
+**Tier 3: Legacy Crash Recovery (24 hours)**
+- Any run with `status: 'running'` for >24 hours is marked as failed
+- Acts as a safety net for edge cases not caught by Tier 1/2
+
+All tiers:
+- Release subscription locks to allow re-runs
+- Schedule immediate retry via `nextRunAt = NOW()`
+- Log cleanup actions for visibility
 
 ### Preventing Duplicate Runs
 
