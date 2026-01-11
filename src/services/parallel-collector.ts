@@ -70,24 +70,36 @@ export class ParallelCollector {
         // Calculate jobs per worker (with some overlap for deduplication)
         const jobsPerWorker = Math.ceil((limit * 1.5) / this.concurrencyLimit);
 
-        // Create worker tasks
-        const workerTasks = Array.from({ length: this.concurrencyLimit }, (_, index) =>
-          this.fetchWithProxy(
-            {
-              query,
-              location,
-              isRemote,
-              jobType,
-              limit: jobsPerWorker,
-              datePosted,
-              country,
-            },
-            index
-          )
-        );
+        // Stagger worker starts to avoid hitting LinkedIn rate limits
+        // Add 100-300ms delay between each worker start (random to avoid patterns)
+        const staggeredWorkers: Promise<WorkerResult>[] = [];
+        for (let index = 0; index < this.concurrencyLimit; index++) {
+          // First worker starts immediately, others are staggered
+          if (index > 0) {
+            const delay = 100 + Math.random() * 200; // 100-300ms random delay
+            await this.sleep(delay);
+          }
+
+          staggeredWorkers.push(
+            this.fetchWithProxy(
+              {
+                query,
+                location,
+                isRemote,
+                jobType,
+                limit: jobsPerWorker,
+                datePosted,
+                country,
+              },
+              index
+            )
+          );
+        }
+
+        logger.info('ParallelCollector', `All ${this.concurrencyLimit} workers started with staggered delays`);
 
         // Execute all workers in parallel with fault tolerance
-        const results = await Promise.allSettled(workerTasks);
+        const results = await Promise.allSettled(staggeredWorkers);
 
         // Process results
         const successfulResults: WorkerResult[] = [];
