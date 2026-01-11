@@ -779,6 +779,79 @@ function ErrorsTable({ errors }: { errors: ErrorEntry[] }) {
   );
 }
 
+function TelegramPreview({ message, parseMode }: { message: string; parseMode: 'HTML' | 'MarkdownV2' | 'plain' }) {
+  if (!message.trim()) {
+    return (
+      <div className="text-muted-foreground italic text-sm">
+        Preview will appear here...
+      </div>
+    );
+  }
+
+  // For plain text, just show as-is with newlines preserved
+  if (parseMode === 'plain') {
+    return <div className="whitespace-pre-wrap">{message}</div>;
+  }
+
+  // For HTML, render with dangerouslySetInnerHTML but with Telegram-like styling
+  if (parseMode === 'HTML') {
+    // Add CSS classes for Telegram-like styling
+    const styledMessage = message
+      .replace(/<b>/g, '<strong class="font-bold">')
+      .replace(/<\/b>/g, '</strong>')
+      .replace(/<i>/g, '<em class="italic">')
+      .replace(/<\/i>/g, '</em>')
+      .replace(/<u>/g, '<span class="underline">')
+      .replace(/<\/u>/g, '</span>')
+      .replace(/<s>/g, '<span class="line-through">')
+      .replace(/<\/s>/g, '</span>')
+      .replace(/<code>/g, '<code class="bg-secondary/50 px-1 py-0.5 rounded text-sm font-mono">')
+      .replace(/<\/code>/g, '</code>')
+      .replace(/<pre>/g, '<pre class="bg-secondary/50 p-2 rounded text-sm font-mono overflow-x-auto my-2">')
+      .replace(/<\/pre>/g, '</pre>')
+      .replace(/<blockquote>/g, '<blockquote class="border-l-4 border-primary/50 pl-3 my-2 text-muted-foreground">')
+      .replace(/<\/blockquote>/g, '</blockquote>')
+      .replace(/\n/g, '<br />');
+
+    return (
+      <div
+        className="whitespace-pre-wrap break-words"
+        dangerouslySetInnerHTML={{ __html: styledMessage }}
+      />
+    );
+  }
+
+  // For MarkdownV2, parse basic markdown
+  if (parseMode === 'MarkdownV2') {
+    let html = message
+      // Escape HTML first
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      // Bold: *text*
+      .replace(/\*([^*]+)\*/g, '<strong class="font-bold">$1</strong>')
+      // Italic: _text_
+      .replace(/_([^_]+)_/g, '<em class="italic">$1</em>')
+      // Underline: __text__
+      .replace(/__([^_]+)__/g, '<span class="underline">$1</span>')
+      // Strikethrough: ~text~
+      .replace(/~([^~]+)~/g, '<span class="line-through">$1</span>')
+      // Code: `text`
+      .replace(/`([^`]+)`/g, '<code class="bg-secondary/50 px-1 py-0.5 rounded text-sm font-mono">$1</code>')
+      // Newlines
+      .replace(/\n/g, '<br />');
+
+    return (
+      <div
+        className="whitespace-pre-wrap break-words"
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    );
+  }
+
+  return <div>{message}</div>;
+}
+
 function NotificationsPanel({
   broadcasts,
   onSend,
@@ -930,6 +1003,22 @@ function NotificationsPanel({
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Preview */}
+          <div>
+            <label className="block text-sm font-medium text-muted-foreground mb-1">
+              Preview
+            </label>
+            <div className="bg-[#1e2c3a] text-white p-4 rounded-lg min-h-[100px] border border-[#2d3f50]">
+              {title && (
+                <div className="font-bold text-lg mb-2">{title}</div>
+              )}
+              <TelegramPreview message={message} parseMode={parseMode} />
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              This shows how your message will appear in Telegram
+            </p>
           </div>
 
           {/* Target Type */}
