@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import * as Sentry from '@sentry/node';
+import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
 import { getDb } from '../db/client.js';
@@ -24,6 +25,12 @@ const MAX_PER_MINUTE = 5;
 // NOTE: This is only for crash recovery - runs that are ACTUALLY stuck due to server crash
 // We do NOT auto-fail runs just because they take long - that would mask implementation bugs
 const STUCK_RUN_THRESHOLD = 24 * 60 * 60 * 1000; // 24 hours - only for crash recovery
+
+// Tier 1: Runs with no progress at all (0 jobs, 0 queries, no checkpoint) for this long are stuck
+const NO_PROGRESS_THRESHOLD = 2 * 60 * 60 * 1000; // 2 hours
+
+// Tier 2: Runs that had progress but stalled (no lastProgressAt update) for this long are stuck
+const STALLED_PROGRESS_THRESHOLD = 2 * 60 * 60 * 1000; // 2 hours
 
 // Default lock TTL in seconds - must be MUCH longer than max expected run time
 // Runs can take up to 1 hour, so we use 2 hours to be safe
@@ -193,6 +200,145 @@ async function cleanupStuckRuns(): Promise<void> {
     if (error instanceof Error) {
       Sentry.captureException(error, {
         tags: { component: 'scheduler', operation: 'cleanupStuckRuns' },
+      });
+    }
+  }
+}
+
+/**
+ * Tier 1: Cleanup runs that never made any progress at all
+ * These runs got stuck before doing anything (0 jobs, 0 queries, no checkpoint)
+ */
+async function cleanupNoProgressRuns(): Promise<void> {
+  const db = getDb();
+  const threshold = new Date(Date.now() - NO_PROGRESS_THRESHOLD);
+
+  try {
+    const stuckRuns = await db.subscriptionRun.findMany({
+      where: {
+        status: 'running',
+        startedAt: { lt: threshold },
+        jobsCollected: 0,
+        collectionQueriesTotal: 0,
+        checkpoint: { equals: Prisma.DbNull },
+      },
+      select: {
+        id: true,
+        subscriptionId: true,
+        startedAt: true,
+        currentStage: true,
+      },
+    });
+
+    for (const run of stuckRuns) {
+      const durationMin = Math.round((Date.now() - run.startedAt.getTime()) / 60000);
+
+      await db.subscriptionRun.update({
+        where: { id: run.id },
+        data: {
+          status: 'failed',
+          completedAt: new Date(),
+          durationMs: Date.now() - run.startedAt.getTime(),
+          errorMessage: `Run stuck with no progress for ${durationMin} minutes (0 jobs, 0 queries)`,
+          failedStage: run.currentStage || 'collection',
+        },
+      });
+
+      await releaseSubscriptionLock(run.subscriptionId);
+
+      // Schedule immediate retry
+      await db.searchSubscription.update({
+        where: { id: run.subscriptionId },
+        data: { nextRunAt: new Date() },
+      });
+
+      logger.warn('Scheduler', `[Tier 1] Failed no-progress run ${run.id} - stuck for ${durationMin}m (0 jobs, 0 queries)`);
+    }
+
+    if (stuckRuns.length > 0) {
+      logger.info('Scheduler', `[Tier 1] Cleaned up ${stuckRuns.length} no-progress run(s)`);
+    }
+  } catch (error) {
+    logger.error('Scheduler', 'Failed to cleanup no-progress runs', error);
+    if (error instanceof Error) {
+      Sentry.captureException(error, {
+        tags: { component: 'scheduler', operation: 'cleanupNoProgressRuns' },
+      });
+    }
+  }
+}
+
+/**
+ * Tier 2: Cleanup runs that started making progress but then stalled
+ * Uses lastProgressAt to detect runs that haven't updated progress in a while
+ */
+async function cleanupStalledRuns(): Promise<void> {
+  const db = getDb();
+  const threshold = new Date(Date.now() - STALLED_PROGRESS_THRESHOLD);
+
+  try {
+    const stalledRuns = await db.subscriptionRun.findMany({
+      where: {
+        status: 'running',
+        lastProgressAt: { lt: threshold },
+        // Must have made SOME progress (otherwise Tier 1 handles it)
+        OR: [
+          { jobsCollected: { gt: 0 } },
+          { collectionQueriesTotal: { gt: 0 } },
+          { checkpoint: { not: Prisma.DbNull } },
+        ],
+      },
+      select: {
+        id: true,
+        subscriptionId: true,
+        startedAt: true,
+        lastProgressAt: true,
+        currentStage: true,
+        progressPercent: true,
+        jobsCollected: true,
+        collectionQueriesTotal: true,
+      },
+    });
+
+    for (const run of stalledRuns) {
+      const durationMin = Math.round((Date.now() - run.startedAt.getTime()) / 60000);
+      const stalledMin = run.lastProgressAt
+        ? Math.round((Date.now() - run.lastProgressAt.getTime()) / 60000)
+        : durationMin;
+
+      await db.subscriptionRun.update({
+        where: { id: run.id },
+        data: {
+          status: 'failed',
+          completedAt: new Date(),
+          durationMs: Date.now() - run.startedAt.getTime(),
+          errorMessage: `Run stalled at ${run.progressPercent}% for ${stalledMin} minutes (collected: ${run.jobsCollected}, queries: ${run.collectionQueriesTotal})`,
+          failedStage: run.currentStage || 'unknown',
+        },
+      });
+
+      await releaseSubscriptionLock(run.subscriptionId);
+
+      // Schedule immediate retry
+      await db.searchSubscription.update({
+        where: { id: run.subscriptionId },
+        data: { nextRunAt: new Date() },
+      });
+
+      logger.warn(
+        'Scheduler',
+        `[Tier 2] Failed stalled run ${run.id} - no progress for ${stalledMin}m at ${run.progressPercent}% (stage: ${run.currentStage})`
+      );
+    }
+
+    if (stalledRuns.length > 0) {
+      logger.info('Scheduler', `[Tier 2] Cleaned up ${stalledRuns.length} stalled run(s)`);
+    }
+  } catch (error) {
+    logger.error('Scheduler', 'Failed to cleanup stalled runs', error);
+    if (error instanceof Error) {
+      Sentry.captureException(error, {
+        tags: { component: 'scheduler', operation: 'cleanupStalledRuns' },
       });
     }
   }
@@ -543,6 +689,18 @@ export async function handleInterruptedRuns(): Promise<void> {
   }
 }
 
+/**
+ * Run all cleanup tasks:
+ * - Tier 1: Runs with no progress at all (2 hours threshold)
+ * - Tier 2: Runs that stalled (no lastProgressAt update for 2 hours)
+ * - Legacy: Runs stuck for 24+ hours (crash recovery)
+ */
+async function runAllCleanups(): Promise<void> {
+  await cleanupNoProgressRuns();   // Tier 1: 0 jobs, 0 queries, no checkpoint
+  await cleanupStalledRuns();      // Tier 2: no progress update for 2 hours
+  await cleanupStuckRuns();        // Legacy: 24+ hour runs (crash recovery)
+}
+
 export function initScheduler(): void {
   if (scheduledTask) {
     logger.warn('Scheduler', 'Scheduler already initialized');
@@ -550,14 +708,20 @@ export function initScheduler(): void {
   }
 
   scheduledTask = cron.schedule(DUE_CHECK_SCHEDULE, checkDueSubscriptions);
-  cleanupTask = cron.schedule(CLEANUP_SCHEDULE, cleanupStuckRuns);
+  cleanupTask = cron.schedule(CLEANUP_SCHEDULE, () => {
+    runAllCleanups().catch(error => {
+      logger.error('Scheduler', 'Cleanup task failed', error);
+    });
+  });
 
   // Run cleanup immediately on startup to clear any stuck runs from previous crashes
-  cleanupStuckRuns();
+  runAllCleanups().catch(error => {
+    logger.error('Scheduler', 'Initial cleanup failed', error);
+  });
 
   logger.info(
     'Scheduler',
-    `Initialized with staggered scheduling | Check: every minute | Interval: ${config.SUBSCRIPTION_INTERVAL_HOURS}h | Max/min: ${MAX_PER_MINUTE} | Cleanup: every 5min`
+    `Initialized with staggered scheduling | Check: every minute | Interval: ${config.SUBSCRIPTION_INTERVAL_HOURS}h | Max/min: ${MAX_PER_MINUTE} | Cleanup: every 5min (Tier1: 2h no-progress, Tier2: 2h stalled)`
   );
 }
 

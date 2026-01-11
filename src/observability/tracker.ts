@@ -75,6 +75,7 @@ export class RunTracker {
         subscriptionId,
         triggerType,
         status: 'running',
+        lastProgressAt: new Date(), // Initialize for stuck detection
       },
     });
 
@@ -99,6 +100,7 @@ export class RunTracker {
         collectionQueriesFailed: stats.collectionQueriesFailed,
         matchingJobsTotal: stats.matchingJobsTotal,
         matchingJobsFailed: stats.matchingJobsFailed,
+        lastProgressAt: new Date(), // Track last progress for stuck detection
       },
     });
   }
@@ -118,6 +120,7 @@ export class RunTracker {
           progressPercent: progress.percent,
           progressDetail: progress.detail,
           checkpoint: progress.checkpoint ? JSON.parse(JSON.stringify(progress.checkpoint)) : undefined,
+          lastProgressAt: new Date(), // Track last progress for stuck detection
         },
       });
     } catch (error) {

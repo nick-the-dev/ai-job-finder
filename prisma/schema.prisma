@@ -254,6 +254,7 @@ model SubscriptionRun {
   currentStage      String?  @map("current_stage")    // "collection" | "normalization" | "matching" | "notification"
   progressPercent   Int      @default(0) @map("progress_percent")
   progressDetail    String?  @map("progress_detail")  // e.g., "Matching job 15/50"
+  lastProgressAt    DateTime? @map("last_progress_at") // Updated when progress changes (for stuck detection)
   checkpoint        Json?    @map("checkpoint")       // For resume on restart
 
   // Metrics
