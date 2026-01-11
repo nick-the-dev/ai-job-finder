@@ -879,6 +879,7 @@ function Dashboard() {
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
+  const [subscriptionsTotal, setSubscriptionsTotal] = useState(0);
   const [runs, setRuns] = useState<Run[]>([]);
   const [runsPage, setRunsPage] = useState(1);
   const [runsTotalPages, setRunsTotalPages] = useState(1);
@@ -934,6 +935,7 @@ function Dashboard() {
         setOverview(overviewData);
         setUsers(usersData.users);
         setSubscriptions(subsData.subscriptions);
+        setSubscriptionsTotal(subsData.pagination.total);
         setRuns(runsData.runs);
         setRunsPage(runsData.pagination.page);
         setRunsTotalPages(runsData.pagination.pages);
@@ -1022,7 +1024,7 @@ function Dashboard() {
           <Tabs defaultValue="users">
             <TabsList>
               <TabsTrigger value="users">Users ({users.length})</TabsTrigger>
-              <TabsTrigger value="subscriptions">Subscriptions ({subscriptions.length})</TabsTrigger>
+              <TabsTrigger value="subscriptions">Subscriptions ({subscriptionsTotal})</TabsTrigger>
               <TabsTrigger value="runs">Runs ({runsTotal})</TabsTrigger>
               <TabsTrigger value="errors">
                 Errors ({errors.length})

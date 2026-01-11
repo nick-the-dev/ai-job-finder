@@ -59,7 +59,7 @@ export async function getUsers(page = 1, limit = 20): Promise<UsersResponse> {
 
 export async function getSubscriptions(
   page = 1,
-  limit = 20,
+  limit = 10000,
   status?: string
 ): Promise<SubscriptionsResponse> {
   let url = `/subscriptions?page=${page}&limit=${limit}`;
