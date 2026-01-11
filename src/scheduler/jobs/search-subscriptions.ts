@@ -808,9 +808,15 @@ export async function runSingleSubscriptionSearch(
     const beforeExclusionFilter = normalizedJobs.length;
     normalizedJobs = normalizedJobs.filter((job) => {
       const titleLower = job.title.toLowerCase();
+      const descriptionLower = job.description.toLowerCase();
       for (const excluded of excludedTitles) {
-        if (titleLower.includes(excluded.toLowerCase())) {
+        const excludedLower = excluded.toLowerCase();
+        if (titleLower.includes(excludedLower)) {
           subLogger.debug('Filter', `Excluded job by title: "${job.title}" matches excluded term "${excluded}"`);
+          return false;
+        }
+        if (descriptionLower.includes(excludedLower)) {
+          subLogger.debug('Filter', `Excluded job by description: "${job.title}" at ${job.company} - description contains excluded term "${excluded}"`);
           return false;
         }
       }
@@ -1363,11 +1369,17 @@ export async function runSubscriptionSearches(): Promise<SearchResult> {
       if (excludedTitles.length > 0 || excludedCompanies.length > 0) {
         const beforeFilter = normalizedJobs.length;
         normalizedJobs = normalizedJobs.filter((job) => {
-          // Check excluded titles (case-insensitive partial match)
+          // Check excluded titles in title and description (case-insensitive partial match)
           const titleLower = job.title.toLowerCase();
+          const descriptionLower = job.description.toLowerCase();
           for (const excluded of excludedTitles) {
-            if (titleLower.includes(excluded.toLowerCase())) {
+            const excludedLower = excluded.toLowerCase();
+            if (titleLower.includes(excludedLower)) {
               subLogger.debug('Filter', `Excluded job by title: "${job.title}" matches excluded term "${excluded}"`);
+              return false;
+            }
+            if (descriptionLower.includes(excludedLower)) {
+              subLogger.debug('Filter', `Excluded job by description: "${job.title}" at ${job.company} - description contains excluded term "${excluded}"`);
               return false;
             }
           }
@@ -2030,8 +2042,11 @@ export async function resumeCollectionCheckpoint(
     if (excludedTitles.length > 0 || excludedCompanies.length > 0) {
       normalizedJobs = normalizedJobs.filter((job) => {
         const titleLower = job.title.toLowerCase();
+        const descriptionLower = job.description.toLowerCase();
         for (const excluded of excludedTitles) {
-          if (titleLower.includes(excluded.toLowerCase())) return false;
+          const excludedLower = excluded.toLowerCase();
+          if (titleLower.includes(excludedLower)) return false;
+          if (descriptionLower.includes(excludedLower)) return false;
         }
         const companyLower = job.company.toLowerCase();
         for (const excluded of excludedCompanies) {
