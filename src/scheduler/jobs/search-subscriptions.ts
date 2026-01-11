@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { Prisma } from '@prisma/client';
+import { config } from '../../config.js';
 import { getDb } from '../../db/client.js';
 import { NormalizerService } from '../../services/normalizer.js';
 import { MatcherAgent } from '../../agents/matcher.js';
@@ -222,6 +223,9 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
   let queriesTotal = 0;
   let queriesFailed = 0;
   let queriesCompleted = 0;
+  let queriesExecuted = 0;
+  const maxQueries = config.COLLECTION_MAX_QUERIES_PER_RUN;
+  let queriesCapped = false;
 
   // Debug mode: Log detailed collection parameters
   subLogger?.debug('Collection', 'Starting job collection with params', {
@@ -246,11 +250,19 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
     const countrySpecificRemote = LocationNormalizerAgent.getCountrySpecificRemote(normalizedLocations);
 
     for (const jobType of jobTypesToSearch) {
+      if (queriesCapped) break;
       const jobTypeLabel = jobType ? ` (${jobType})` : '';
 
       for (const title of jobTitles) {
+        if (queriesCapped) break;
         // Search for worldwide remote jobs (no location filter = global search)
         if (hasWorldwideRemote) {
+          // Check query cap before executing
+          if (queriesExecuted >= maxQueries) {
+            queriesCapped = true;
+            break;
+          }
+
           const queryKey = generateQueryKey(title, undefined, jobType, true);
           queriesTotal++;
 
@@ -262,6 +274,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
           }
 
           try {
+            queriesExecuted++;
             logger.info('Scheduler', `  Collecting remote jobs globally for: "${title}"${jobTypeLabel}`);
             const jobs = await queueService.enqueueCollection({
               query: title,
@@ -288,10 +301,17 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
 
         // Search for country-specific remote jobs (e.g., "Remote in Canada")
         for (const loc of countrySpecificRemote) {
+          if (queriesCapped) break;
           const variants = loc.searchVariants.slice(0, 2);
           if (variants.length === 0) variants.push(loc.country);
 
           for (const variant of variants) {
+            // Check query cap before executing
+            if (queriesExecuted >= maxQueries) {
+              queriesCapped = true;
+              break;
+            }
+
             // Ensure country is in location string for LinkedIn (which doesn't support country_indeed)
             const locationWithCountry = ensureCountryInLocation(variant, loc.country);
             const queryKey = generateQueryKey(title, locationWithCountry, jobType, true);
@@ -305,6 +325,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
             }
 
             try {
+              queriesExecuted++;
               logger.info('Scheduler', `  Collecting remote jobs for: "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
               const jobs = await queueService.enqueueCollection({
                 query: title,
@@ -333,10 +354,17 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
 
         // Search for each physical location using up to 2 searchVariants
         for (const loc of physicalLocations) {
+          if (queriesCapped) break;
           const variants = loc.searchVariants.slice(0, 2);
           if (variants.length === 0) variants.push(loc.display);
 
           for (const variant of variants) {
+            // Check query cap before executing
+            if (queriesExecuted >= maxQueries) {
+              queriesCapped = true;
+              break;
+            }
+
             // Ensure country is in location string for LinkedIn (which doesn't support country_indeed)
             const locationWithCountry = ensureCountryInLocation(variant, loc.country);
             const queryKey = generateQueryKey(title, locationWithCountry, jobType, false);
@@ -350,6 +378,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
             }
 
             try {
+              queriesExecuted++;
               logger.info('Scheduler', `  Collecting jobs for: "${title}" in "${locationWithCountry}"${jobTypeLabel}`);
               const jobs = await queueService.enqueueCollection({
                 query: title,
@@ -380,9 +409,16 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
   } else {
     // Legacy mode: single location (or no location = global search)
     for (const jobType of jobTypesToSearch) {
+      if (queriesCapped) break;
       const jobTypeLabel = jobType ? ` (${jobType})` : '';
 
       for (const title of jobTitles) {
+        // Check query cap before executing
+        if (queriesExecuted >= maxQueries) {
+          queriesCapped = true;
+          break;
+        }
+
         const queryKey = generateQueryKey(title, legacyLocation ?? undefined, jobType, legacyIsRemote);
         queriesTotal++;
 
@@ -394,6 +430,7 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
         }
 
         try {
+          queriesExecuted++;
           logger.info('Scheduler', `  Collecting jobs for: "${title}"${jobTypeLabel}`);
           const jobs = await queueService.enqueueCollection({
             query: title,
@@ -418,6 +455,11 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
         }
       }
     }
+  }
+
+  // Log warning if query cap was hit
+  if (queriesCapped) {
+    logger.warn('Scheduler', `Query cap reached: executed ${queriesExecuted}/${maxQueries} max queries (subscription may have too many combinations of titles/locations/job types)`);
   }
 
   return {

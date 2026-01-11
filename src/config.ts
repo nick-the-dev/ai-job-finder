@@ -33,6 +33,13 @@ const envSchema = z.object({
   JOBSPY_PARALLEL_ENABLED: z.coerce.boolean().default(false),
   JOBSPY_PARALLEL_WORKERS: z.coerce.number().default(10),
 
+  // Rate Limiting for Job Collection
+  // LinkedIn is aggressive - needs conservative limits to avoid 429s
+  COLLECTION_MIN_DELAY_MS: z.coerce.number().default(1500),      // Minimum delay between any collection requests (ms)
+  COLLECTION_LINKEDIN_DELAY_MS: z.coerce.number().default(3000), // Delay between LinkedIn requests (ms)
+  COLLECTION_INDEED_DELAY_MS: z.coerce.number().default(1000),   // Delay between Indeed requests (ms)
+  COLLECTION_MAX_QUERIES_PER_RUN: z.coerce.number().default(100), // Max queries per subscription run (prevents overload)
+
   // Server
   PORT: z.string().default('3000').transform(Number),
   APP_URL: z.string().url().optional(), // Base URL for download links (e.g., https://app.example.com)
