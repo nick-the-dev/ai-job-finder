@@ -1166,7 +1166,16 @@ function NotificationsPanel({
                   {broadcast.title || <span className="text-muted-foreground">-</span>}
                 </TableCell>
                 <TableCell>
-                  <TruncatedCell value={broadcast.message} maxWidth={200} />
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="block truncate cursor-default max-w-[200px]">
+                        {broadcast.message}
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-md bg-[#1e2c3a] text-white border-[#2d3f50]">
+                      <TelegramPreview message={broadcast.message} parseMode={broadcast.parseMode} />
+                    </TooltipContent>
+                  </Tooltip>
                 </TableCell>
                 <TableCell>
                   <Badge variant="secondary">
