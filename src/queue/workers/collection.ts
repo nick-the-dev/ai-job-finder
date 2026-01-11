@@ -4,6 +4,7 @@ import { config } from '../../config.js';
 import { logger } from '../../utils/logger.js';
 import { CollectorService } from '../../services/collector.js';
 import { getQueues, type CollectionJobData } from '../queues.js';
+import { isRunCancelled } from '../redis.js';
 import { rateLimiter } from '../rate-limiter.js';
 import type { RawJob } from '../../core/types.js';
 import { addQueueBreadcrumb } from '../../utils/sentry.js';
@@ -22,7 +23,13 @@ let lastJobCompletionTime = 0;
  * - Enters cooldown mode after consecutive 429s
  */
 export async function processCollectionJob(job: Job<CollectionJobData>): Promise<RawJob[]> {
-  const { query, location, isRemote, jobType, limit, source, skipCache, datePosted, country, requestId } = job.data;
+  const { query, location, isRemote, jobType, limit, source, skipCache, datePosted, country, requestId, runId } = job.data;
+
+  // Check if the run has been cancelled before doing any work
+  if (runId && await isRunCancelled(runId)) {
+    logger.info('Worker:Collection', `[${requestId}] Skipping job ${job.id} - run ${runId} was cancelled`);
+    return []; // Return empty, don't waste resources
+  }
 
   const jobTypeLabel = jobType ? ` [${jobType}]` : '';
   logger.info('Worker:Collection', `[${requestId}] >>> WORKER START (jobId=${job.id}): "${query}"${jobTypeLabel} @ ${location || 'any'} (${source}, limit: ${limit}, country: ${country || 'auto'})`);

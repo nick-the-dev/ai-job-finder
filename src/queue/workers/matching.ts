@@ -5,6 +5,7 @@ import { logger } from '../../utils/logger.js';
 import { MatcherAgent } from '../../agents/matcher.js';
 import { getDb } from '../../db/client.js';
 import { getQueues, type MatchingJobData } from '../queues.js';
+import { isRunCancelled } from '../redis.js';
 import type { NormalizedJob, JobMatchResult } from '../../core/types.js';
 import { addQueueBreadcrumb, sentryLog } from '../../utils/sentry.js';
 import { trackMatchCacheHit, trackMatchScore } from '../../observability/metrics.js';
@@ -21,8 +22,19 @@ interface MatchingResult {
  * Process a matching job from the queue
  */
 export async function processMatchingJob(job: Job<MatchingJobData>): Promise<MatchingResult> {
-  const { job: jobData, resumeText, resumeHash, requestId } = job.data;
+  const { job: jobData, resumeText, resumeHash, requestId, traceContext } = job.data;
+  const runId = traceContext?.runId;
   const db = getDb();
+
+  // Check if the run has been cancelled before doing any work
+  if (runId && await isRunCancelled(runId)) {
+    logger.info('Worker:Matching', `[${requestId}] Skipping job ${job.id} - run ${runId} was cancelled`);
+    // Return a dummy result so the job completes without error
+    return {
+      match: { score: 0, reasoning: 'Run cancelled', matchedSkills: [], missingSkills: [], pros: [], cons: [] },
+      cached: false,
+    };
+  }
 
   logger.debug('Worker:Matching', `[${requestId}] Processing: "${jobData.title}" @ ${jobData.company}`);
 
@@ -90,7 +102,6 @@ export async function processMatchingJob(job: Job<MatchingJobData>): Promise<Mat
       };
 
       // Call LLM for matching with trace context for observability
-      const { traceContext } = job.data;
       const matchResult = await matcher.execute({
         job: normalizedJob,
         resumeText,

@@ -3,7 +3,7 @@ import pLimit from 'p-limit';
 import { Job } from 'bull';
 import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
-import { isRedisConnected } from './redis.js';
+import { isRedisConnected, markRunCancelled } from './redis.js';
 import { getQueues, PRIORITY, type CollectionJobData, type MatchingJobData, type Priority } from './queues.js';
 import type { RawJob, NormalizedJob, JobMatchResult } from '../core/types.js';
 
@@ -383,6 +383,9 @@ export class QueueService {
     const { collectionQueue, matchingQueue } = getQueues();
     let collectionCancelled = 0;
     let matchingCancelled = 0;
+
+    // Mark run as cancelled in Redis FIRST so workers check before processing
+    await markRunCancelled(runId);
 
     if (!collectionQueue && !matchingQueue) {
       logger.warn('QueueService', `cancelRunJobs: No queues available`);

@@ -79,3 +79,48 @@ export async function disconnectRedis(): Promise<void> {
     logger.info('Redis', 'Disconnected');
   }
 }
+
+// Run cancellation tracking
+// When a run is stopped/failed, we mark it as cancelled so workers can skip processing
+const CANCELLED_RUNS_KEY = 'cancelled_runs';
+const CANCELLATION_TTL_SECONDS = 3600; // 1 hour - plenty of time for queued jobs to see it
+
+/**
+ * Mark a run as cancelled so workers will skip jobs for this run
+ */
+export async function markRunCancelled(runId: string): Promise<boolean> {
+  if (!redisClient || !isRedisAvailable) {
+    logger.warn('Redis', `Cannot mark run ${runId} as cancelled - Redis not available`);
+    return false;
+  }
+
+  try {
+    // Use a hash with TTL per runId
+    const key = `${CANCELLED_RUNS_KEY}:${runId}`;
+    await redisClient.setex(key, CANCELLATION_TTL_SECONDS, '1');
+    logger.debug('Redis', `Marked run ${runId} as cancelled (TTL: ${CANCELLATION_TTL_SECONDS}s)`);
+    return true;
+  } catch (error) {
+    logger.error('Redis', `Failed to mark run ${runId} as cancelled`, error);
+    return false;
+  }
+}
+
+/**
+ * Check if a run has been cancelled
+ */
+export async function isRunCancelled(runId: string): Promise<boolean> {
+  if (!runId) return false;
+  if (!redisClient || !isRedisAvailable) {
+    return false; // If Redis is down, allow jobs to proceed
+  }
+
+  try {
+    const key = `${CANCELLED_RUNS_KEY}:${runId}`;
+    const result = await redisClient.get(key);
+    return result === '1';
+  } catch (error) {
+    logger.warn('Redis', `Failed to check cancellation for run ${runId}`, error);
+    return false; // On error, allow jobs to proceed
+  }
+}
