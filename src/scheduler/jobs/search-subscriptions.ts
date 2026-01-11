@@ -360,17 +360,38 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
   logger.info('Scheduler', `Built ${querySpecs.length} query specs, ${skippedCount} already completed, ${cappedSpecs.length} to execute${queriesCapped ? ` (capped from ${pendingSpecs.length})` : ''}`);
 
   // ============================================================================
-  // PHASE 3: Execute queries in PARALLEL
+  // PHASE 3: Execute queries with CIRCUIT BREAKER
+  // Queries run sequentially to detect consecutive failures and fail fast.
+  // Circuit breaker opens after N consecutive failures, skipping remaining queries.
   // ============================================================================
 
   if (cappedSpecs.length > 0) {
-    logger.info('Scheduler', `Starting parallel collection of ${cappedSpecs.length} queries (Bull queue handles concurrency)`);
+    logger.info('Scheduler', `Starting collection of ${cappedSpecs.length} queries with circuit breaker (threshold: ${config.COLLECTION_CIRCUIT_BREAKER_THRESHOLD})`);
 
-    // Start ALL queries at once - the Bull queue will handle concurrency
-    // Each concurrent worker gets a DIFFERENT query, not the same one
-    const queryPromises = cappedSpecs.map(async (spec) => {
+    // Circuit breaker state
+    const circuitBreakerThreshold = config.COLLECTION_CIRCUIT_BREAKER_THRESHOLD;
+    let consecutiveFailures = 0;
+    let circuitOpen = false;
+    let queriesSkipped = 0;
+
+    // Process queries sequentially with circuit breaker
+    // Note: Bull queue handles internal concurrency, but we process results sequentially
+    // to detect consecutive failures and open circuit breaker early
+    for (const spec of cappedSpecs) {
       const jobTypeLabel = spec.jobType ? ` (${spec.jobType})` : '';
       const locationLabel = spec.location || 'global';
+
+      // Check if circuit breaker is open
+      if (circuitOpen) {
+        queriesSkipped++;
+        errors.push({
+          query: spec.title,
+          location: spec.location,
+          jobType: spec.jobType,
+          error: `Skipped: Circuit breaker opened after ${circuitBreakerThreshold} consecutive failures`,
+        });
+        continue;
+      }
 
       try {
         logger.info('Scheduler', `  Collecting: "${spec.title}" @ ${locationLabel}${jobTypeLabel}`);
@@ -386,44 +407,39 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
           country: spec.country,
         }, priority);
 
-        return { success: true, jobs, spec };
+        // Success - reset consecutive failures
+        allRawJobs.push(...jobs);
+        queriesCompleted++;
+        completedQueryKeys.push(spec.queryKey);
+        consecutiveFailures = 0;
+        logger.info('Scheduler', `  Found ${jobs.length} jobs for "${spec.title}" @ ${spec.location || 'global'}`);
+
+        // Report progress after each successful query
+        await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`, allRawJobs, completedQueryKeys);
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
         logger.error('Scheduler', `  Failed: "${spec.title}" @ ${locationLabel}${jobTypeLabel}: ${errorMsg}`);
-        return { success: false, jobs: [] as RawJob[], spec, error: errorMsg };
-      }
-    });
 
-    // Wait for all queries to complete
-    const results = await Promise.allSettled(queryPromises);
+        consecutiveFailures++;
+        errors.push({
+          query: spec.title,
+          location: spec.location,
+          jobType: spec.jobType,
+          error: errorMsg,
+        });
 
-    // Process results
-    for (const result of results) {
-      if (result.status === 'fulfilled') {
-        const { success, jobs, spec, error } = result.value;
-
-        if (success) {
-          allRawJobs.push(...jobs);
-          queriesCompleted++;
-          completedQueryKeys.push(spec.queryKey);
-          logger.info('Scheduler', `  Found ${jobs.length} jobs for "${spec.title}" @ ${spec.location || 'global'}`);
-        } else {
-          errors.push({
-            query: spec.title,
-            location: spec.location,
-            jobType: spec.jobType,
-            error: error || 'Unknown error',
-          });
+        // Check if we should open the circuit breaker
+        if (consecutiveFailures >= circuitBreakerThreshold) {
+          circuitOpen = true;
+          logger.warn('Scheduler', `Circuit breaker OPEN after ${consecutiveFailures} consecutive failures. Remaining ${cappedSpecs.length - queriesCompleted - errors.length + queriesSkipped} queries will be skipped.`);
         }
-      } else {
-        // Promise rejected (shouldn't happen with our try/catch, but just in case)
-        const errorMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);
-        errors.push({ query: 'unknown', error: errorMsg });
       }
     }
 
-    // Report final progress
-    await onProgress?.(queriesCompleted, queriesTotal, `Collected ${allRawJobs.length} jobs`, allRawJobs, completedQueryKeys);
+    // Log circuit breaker summary if it was triggered
+    if (queriesSkipped > 0) {
+      logger.warn('Scheduler', `Circuit breaker skipped ${queriesSkipped} queries`);
+    }
   }
 
   // Log warning if query cap was hit

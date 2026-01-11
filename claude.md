@@ -308,7 +308,7 @@ All LLM responses are validated with Zod schemas to prevent hallucinations.
 
 ```bash
 # Required
-DATABASE_URL=postgresql://EXAMPLE_USER:EXAMPLE_PASS@localhost:5433/jobfinder
+DATABASE_URL=postgresql://user:pass@localhost:5433/jobfinder
 OPENROUTER_API_KEY=sk-or-...
 OPENROUTER_MODEL=xiaomi/mimo-v2-flash:free
 
@@ -326,6 +326,9 @@ REDIS_URL=redis://localhost:6379
 QUEUE_JOBSPY_CONCURRENCY=2      # Max concurrent JobSpy requests
 QUEUE_LLM_CONCURRENCY=5         # Max concurrent LLM calls
 QUEUE_FALLBACK_ENABLED=true     # Fallback to in-process p-limit if Redis unavailable
+
+# Collection settings
+COLLECTION_CIRCUIT_BREAKER_THRESHOLD=3  # Open circuit after N consecutive failures (fail fast)
 
 # Scheduling
 SUBSCRIPTION_INTERVAL_HOURS=1   # Hours between subscription runs
@@ -459,6 +462,18 @@ curl http://localhost:3001/queue/status
   }
 }
 ```
+
+### Circuit Breaker
+The collection phase includes a circuit breaker to fail fast when JobSpy is unavailable:
+
+- **Threshold**: Opens after 3 consecutive query failures (configurable via `COLLECTION_CIRCUIT_BREAKER_THRESHOLD`)
+- **Behavior**: When circuit opens, remaining queries are skipped immediately
+- **Benefit**: Prevents wasting 30+ minutes on timeouts when all queries would fail anyway
+- **Recovery**: Any successful query resets the consecutive failure counter
+
+Example scenario with 21 queries:
+- Without circuit breaker: All 21 queries timeout → 63 minutes wasted (21 × 3 min)
+- With circuit breaker: First 3 queries timeout → circuit opens → 18 queries skipped → ~9 minutes total
 
 ## Subscription Scheduler
 

@@ -39,6 +39,7 @@ const envSchema = z.object({
   COLLECTION_LINKEDIN_DELAY_MS: z.coerce.number().default(3000), // Delay between LinkedIn requests (ms)
   COLLECTION_INDEED_DELAY_MS: z.coerce.number().default(1000),   // Delay between Indeed requests (ms)
   COLLECTION_MAX_QUERIES_PER_RUN: z.coerce.number().default(100), // Max queries per subscription run (prevents overload)
+  COLLECTION_CIRCUIT_BREAKER_THRESHOLD: z.coerce.number().default(3), // Open circuit after N consecutive failures
 
   // Server
   PORT: z.string().default('3000').transform(Number),
