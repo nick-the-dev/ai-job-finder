@@ -196,7 +196,11 @@ export class AdaptiveBatchProcessor {
   }
 
   /**
-   * Process a single batch of jobs in parallel
+   * Process a single batch of jobs in parallel with staggered starts.
+   *
+   * Adds 50-100ms delay between each job start to avoid hitting all API keys
+   * at the exact same millisecond (which can trigger rate limits even with
+   * multiple keys).
    */
   private async processBatch(
     batch: NormalizedJob[],
@@ -205,9 +209,21 @@ export class AdaptiveBatchProcessor {
     priority: Priority,
     traceContext?: BatchTraceContext
   ): Promise<MatchingResult[]> {
-    const promises = batch.map(job =>
-      this.processWithErrorHandling(job, resumeText, resumeHash, priority, traceContext)
-    );
+    // Stagger job starts to spread load across API keys
+    const promises: Promise<MatchingResult>[] = [];
+
+    for (let i = 0; i < batch.length; i++) {
+      // First job starts immediately, others are staggered 50-100ms apart
+      if (i > 0) {
+        const staggerDelay = 50 + Math.random() * 50; // 50-100ms random delay
+        await this.delay(staggerDelay);
+      }
+
+      // Start this job (doesn't block - we're just staggering the START times)
+      promises.push(
+        this.processWithErrorHandling(batch[i], resumeText, resumeHash, priority, traceContext)
+      );
+    }
 
     const results = await Promise.allSettled(promises);
 

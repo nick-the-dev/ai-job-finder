@@ -50,11 +50,18 @@ export class ParallelCollector {
 
   /**
    * Collect jobs using parallel workers across multiple proxies
+   *
+   * NOTE: For a single query, we only use 1 worker (but still use proxy rotation).
+   * Running the same query 50 times just produces 50x duplicates!
+   * Parallelism is only useful when collectMultiple() is called with different queries.
    */
   async collect(input: ParallelCollectorInput): Promise<RawJob[]> {
     const { query, location, isRemote, jobType, limit = 100, datePosted = 'month', country } = input;
 
-    logger.info('ParallelCollector', `Starting parallel collection: "${query}" @ ${location || 'global'} (workers: ${this.concurrencyLimit})`);
+    // For a SINGLE query, only use 1 worker - running same query multiple times = duplicates
+    const actualWorkers = 1;
+
+    logger.info('ParallelCollector', `Starting collection: "${query}" @ ${location || 'global'} (1 worker, proxy rotation enabled)`);
 
     return Sentry.startSpan(
       {
@@ -63,40 +70,28 @@ export class ParallelCollector {
         attributes: {
           'job.query': query,
           'job.location': location || 'global',
-          'parallel.workers': this.concurrencyLimit,
+          'parallel.workers': actualWorkers,
         },
       },
       async (span) => {
-        // Calculate jobs per worker (with some overlap for deduplication)
-        const jobsPerWorker = Math.ceil((limit * 1.5) / this.concurrencyLimit);
-
-        // Stagger worker starts to avoid hitting LinkedIn rate limits
-        // Add 100-300ms delay between each worker start (random to avoid patterns)
+        // Single worker fetches all jobs (proxy pool still rotates on each request)
         const staggeredWorkers: Promise<WorkerResult>[] = [];
-        for (let index = 0; index < this.concurrencyLimit; index++) {
-          // First worker starts immediately, others are staggered
-          if (index > 0) {
-            const delay = 100 + Math.random() * 200; // 100-300ms random delay
-            await this.sleep(delay);
-          }
+        staggeredWorkers.push(
+          this.fetchWithProxy(
+            {
+              query,
+              location,
+              isRemote,
+              jobType,
+              limit,
+              datePosted,
+              country,
+            },
+            0
+          )
+        );
 
-          staggeredWorkers.push(
-            this.fetchWithProxy(
-              {
-                query,
-                location,
-                isRemote,
-                jobType,
-                limit: jobsPerWorker,
-                datePosted,
-                country,
-              },
-              index
-            )
-          );
-        }
-
-        logger.info('ParallelCollector', `All ${this.concurrencyLimit} workers started with staggered delays`);
+        logger.info('ParallelCollector', `Worker started (proxy rotation active)`);
 
         // Execute all workers in parallel with fault tolerance
         const results = await Promise.allSettled(staggeredWorkers);
