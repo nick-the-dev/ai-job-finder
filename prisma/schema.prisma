@@ -26,9 +26,10 @@ model Job {
   salaryCurrency String?  @map("salary_currency")
 
   // Source
-  source         String   // serpapi, jobspy
+  source         String   // serpapi, jobspy, google_jobs
   sourceId       String?  @map("source_id")
   applicationUrl String?  @map("application_url")
+  applyUrls      Json?    @map("apply_urls")  // Array of {url, source} for Google Jobs
 
   // Timestamps
   postedDate     DateTime? @map("posted_date")

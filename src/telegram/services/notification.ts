@@ -108,8 +108,17 @@ ${escapeHtml(truncate(match.reasoning || 'No reasoning provided', 300))}
 <b>Missing Skills:</b> ${escapeHtml(missingSkills)}
   `.trim();
 
-  // Add apply link if available
-  if (job.applicationUrl) {
+  // Add apply link(s) if available
+  if (job.applyUrls && job.applyUrls.length > 0) {
+    // Show up to 3 apply links for Google Jobs
+    const links = job.applyUrls.slice(0, 3).map(u => 
+      `<a href="${u.url}">${escapeHtml(u.source || 'Apply')}</a>`
+    ).join(' | ');
+    message += `\n\n${links}`;
+    if (job.applyUrls.length > 3) {
+      message += ` <i>(+${job.applyUrls.length - 3} more)</i>`;
+    }
+  } else if (job.applicationUrl) {
     message += `\n\n<a href="${job.applicationUrl}">Apply Now</a>`;
   }
 
@@ -167,7 +176,13 @@ export async function sendMatchSummary(
     message += `   ${escapeHtml(truncate(job.company, 30))} | ${match.score} pts\n`;
     message += `   ${escapeHtml(location)} | ${salary}\n`;
 
-    if (job.applicationUrl) {
+    // Show apply links (multiple for Google Jobs, single for others)
+    if (job.applyUrls && job.applyUrls.length > 0) {
+      const links = job.applyUrls.slice(0, 2).map(u => 
+        `<a href="${u.url}">${escapeHtml(u.source || 'Apply')}</a>`
+      ).join(' | ');
+      message += `   ${links}\n`;
+    } else if (job.applicationUrl) {
       message += `   <a href="${job.applicationUrl}">Apply</a>\n`;
     }
     message += '\n';

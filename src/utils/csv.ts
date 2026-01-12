@@ -214,6 +214,21 @@ function formatSalary(job: NormalizedJob, aiExtracted?: ExtractedSalary | null):
 }
 
 /**
+ * Format all apply URLs for CSV
+ * If applyUrls array exists (Google Jobs), join all URLs with " | "
+ * Otherwise fall back to single applicationUrl
+ */
+function formatApplyUrls(job: NormalizedJob): string {
+  if (job.applyUrls && job.applyUrls.length > 0) {
+    // Format as "URL (Source) | URL (Source) | ..."
+    return job.applyUrls
+      .map(u => u.source ? `${u.url} (${u.source})` : u.url)
+      .join(' | ');
+  }
+  return job.applicationUrl || '';
+}
+
+/**
  * Convert matches array to CSV string
  */
 function matchesToCSV(matches: MatchEntry[]): string {
@@ -224,7 +239,7 @@ function matchesToCSV(matches: MatchEntry[]): string {
     'Location',
     'Remote',
     'Salary',
-    'Application URL',
+    'Application URLs',
     'Posted Date',
     'Source',
     'Matched Skills',
@@ -241,7 +256,7 @@ function matchesToCSV(matches: MatchEntry[]): string {
     escapeCSV(job.location),
     job.isRemote ? 'Yes' : 'No',
     escapeCSV(formatSalary(job, match.extractedSalary)),
-    escapeCSV(job.applicationUrl),
+    escapeCSV(formatApplyUrls(job)),
     job.postedDate ? formatDate(job.postedDate) : '',
     escapeCSV(job.source),
     escapeCSV(match.matchedSkills.join('; ')),
