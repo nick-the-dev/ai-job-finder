@@ -623,6 +623,65 @@ def scrape(request: ScrapeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================
+# GOOGLE JOBS SCRAPING (Experimental)
+# Uses Camoufox + DataImpulse residential proxies
+# ============================================================
+
+class GoogleScrapeRequest(BaseModel):
+    """Request for Google Jobs scraping."""
+    search_term: str
+    location: str
+    max_jobs: int = 50
+    countries: Optional[list[str]] = None  # Proxy country filter, e.g., ["us", "ca"]
+
+
+class GoogleJobResult(BaseModel):
+    """A job from Google Jobs with multiple apply URLs."""
+    title: str
+    company: str
+    location: Optional[str] = None
+    description: Optional[str] = None
+    apply_urls: list[dict] = []  # [{url, source}, ...]
+    search_query: str = ""
+    source: str = "google_jobs"
+
+
+@app.post("/scrape-google")
+async def scrape_google(request: GoogleScrapeRequest):
+    """
+    Scrape Google Jobs using Camoufox and residential proxies.
+    
+    Returns jobs with ALL apply URLs from different sources (LinkedIn, Indeed, company sites, etc.)
+    
+    This is experimental - uses residential proxies which have per-GB costs.
+    """
+    try:
+        from google_scraper import scrape_google_jobs
+        
+        logger.info(f"Google Jobs scrape: '{request.search_term}' in '{request.location}'")
+        
+        jobs = await scrape_google_jobs(
+            query=request.search_term,
+            location=request.location,
+            max_jobs=request.max_jobs,
+            countries=request.countries,
+        )
+        
+        logger.info(f"Google Jobs: found {len(jobs)} jobs")
+        return {"jobs": jobs, "count": len(jobs)}
+        
+    except ImportError as e:
+        logger.error(f"Google Jobs scraper not available: {e}")
+        raise HTTPException(
+            status_code=501,
+            detail="Google Jobs scraper not available. Camoufox may not be installed."
+        )
+    except Exception as e:
+        logger.error(f"Google Jobs scraping failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

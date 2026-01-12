@@ -822,4 +822,72 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
     return transformedJobs;
   }
+
+  /**
+   * Fetch jobs from Google Jobs (experimental)
+   * Uses Camoufox + DataImpulse residential proxies
+   * Returns jobs with multiple apply URLs from all sources
+   */
+  async fetchFromGoogleJobs(
+    query: string,
+    location: string,
+    limit: number = 50,
+    countries?: string[]
+  ): Promise<RawJob[]> {
+    const jobspyUrl = process.env.JOBSPY_URL;
+    if (!jobspyUrl) {
+      logger.warn('Collector', 'Google Jobs: JOBSPY_URL not configured');
+      return [];
+    }
+
+    try {
+      logger.info('Collector', `[Google Jobs] Scraping: "${query}" in "${location}"`);
+      addApiCallBreadcrumb('GoogleJobs', 'scrape', { query, location, limit: String(limit) });
+
+      const response = await axios.post(
+        `${jobspyUrl}/scrape-google`,
+        {
+          search_term: query,
+          location,
+          max_jobs: limit,
+          countries,
+        },
+        { timeout: 180000 } // 3 minutes - Google Jobs scraping is slow
+      );
+
+      const jobs = response.data.jobs || [];
+      logger.info('Collector', `[Google Jobs] Found ${jobs.length} jobs`);
+
+      // Track metrics (note: count first, then source)
+      trackJobsCollected(jobs.length, 'jobspy');
+
+      // Transform to RawJob format
+      return jobs.map((job: any) => this.transformGoogleJob(job));
+    } catch (error: any) {
+      const errorMessage = error.response?.data?.detail || error.message;
+      logger.error('Collector', `[Google Jobs] Error: ${errorMessage}`);
+      trackApiError('jobspy', error.code || 'unknown');
+
+      // Don't fail the whole collection, just return empty
+      return [];
+    }
+  }
+
+  /**
+   * Transform Google Jobs API response to RawJob format
+   */
+  private transformGoogleJob(job: any): RawJob {
+    const locationStr = job.location || '';
+    return {
+      title: job.title || 'Unknown Title',
+      company: job.company || 'Unknown Company',
+      description: job.description || '',
+      location: locationStr || undefined,
+      isRemote: this.detectRemote(undefined, locationStr, job.description || ''),
+      applicationUrl: job.apply_urls?.[0]?.url || undefined,
+      applyUrls: job.apply_urls || [],
+      source: 'google_jobs',
+      sourceId: undefined, // Google Jobs doesn't provide stable IDs
+    };
+  }
 }

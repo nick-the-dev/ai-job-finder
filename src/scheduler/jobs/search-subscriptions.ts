@@ -777,6 +777,49 @@ export async function runSingleSubscriptionSearch(
   logger.info('Scheduler', `[${triggerLabel}] <<< STAGE: collection - Completed in ${collectionDuration}s: ${allRawJobs.length} jobs (${collectionResult.queriesFailed}/${collectionResult.queriesTotal} queries failed)`);
   subLogger.debug('Collection', `Collection complete: ${allRawJobs.length} raw jobs, ${collectionResult.queriesFailed} failed queries`);
 
+  // Google Jobs collection (experimental - opt-in only)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const useGoogleJobs = (sub as any).useGoogleJobs === true;
+  if (useGoogleJobs) {
+    logger.info('Scheduler', `[${triggerLabel}] >>> Google Jobs (experimental) enabled - starting additional collection`);
+    subLogger.debug('GoogleJobs', 'Google Jobs is enabled for this subscription');
+
+    try {
+      const { CollectorService } = await import('../../services/collector.js');
+      const collector = new CollectorService();
+
+      // Get location for Google Jobs (use first physical location or legacy location)
+      const googleLocation = normalizedLocations?.find(l => l.type === 'physical')?.display 
+        || sub.location 
+        || 'United States';
+
+      // Collect from Google Jobs for each job title
+      for (const jobTitle of sub.jobTitles) {
+        try {
+          const googleJobs = await collector.fetchFromGoogleJobs(
+            jobTitle,
+            googleLocation,
+            30 // Limit per query to control proxy costs
+          );
+          
+          if (googleJobs.length > 0) {
+            allRawJobs.push(...googleJobs);
+            logger.info('Scheduler', `[${triggerLabel}] Google Jobs: +${googleJobs.length} jobs for "${jobTitle}"`);
+          }
+        } catch (googleError: any) {
+          // Log but don't fail the run - Google Jobs is experimental
+          logger.warn('Scheduler', `[${triggerLabel}] Google Jobs failed for "${jobTitle}": ${googleError.message}`);
+        }
+      }
+
+      logger.info('Scheduler', `[${triggerLabel}] <<< Google Jobs complete - total now ${allRawJobs.length} jobs`);
+    } catch (importError: any) {
+      logger.warn('Scheduler', `[${triggerLabel}] Google Jobs unavailable: ${importError.message}`);
+    }
+
+    errorContext.partialResults!.jobsCollected = allRawJobs.length;
+  }
+
   // Recalculate progress allocations now that we know actual job count
   // This adjusts phase percentages so remaining time estimate is accurate
   progress.recalculate(collectionResult.queriesTotal, allRawJobs.length);

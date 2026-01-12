@@ -23,6 +23,7 @@ interface ConversationData {
   excludedTitles?: string[];
   excludedCompanies?: string[];
   skipCrossSubDuplicates?: boolean;
+  useGoogleJobs?: boolean;        // Experimental: enable Google Jobs scraping
 }
 
 // Date range options for JobSpy
@@ -161,7 +162,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
     await ctx.answerCallbackQuery();
     await ctx.editMessageText(
       `<b>📍 Location:</b>\n${locationDisplay}\n\n` +
-        '<b>Step 3/9: Job Type</b>\n\n' +
+        '<b>Step 3/10: Job Type</b>\n\n' +
         'What type of employment are you looking for?\n\n' +
         '1️⃣ Full-time\n' +
         '2️⃣ Part-time\n' +
@@ -307,7 +308,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Got it!</b> Searching for: ${titles.join(', ')}\n\n` +
-            '<b>Step 2/9: Location</b>\n\n' +
+            '<b>Step 2/10: Location</b>\n\n' +
             'Where should I search for jobs?\n\n' +
             '<b>Examples:</b>\n' +
             '• <code>New York</code> - single city\n' +
@@ -337,7 +338,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
           await ctx.reply(
             `<b>📍 Location:</b> Anywhere\n\n` +
-              '<b>Step 3/9: Job Type</b>\n\n' +
+              '<b>Step 3/10: Job Type</b>\n\n' +
               'What type of employment are you looking for?\n\n' +
               '1️⃣ Full-time\n' +
               '2️⃣ Part-time\n' +
@@ -463,7 +464,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
           await ctx.reply(
             `<b>📍 Location:</b> Anywhere\n\n` +
-              '<b>Step 3/9: Job Type</b>\n\n' +
+              '<b>Step 3/10: Job Type</b>\n\n' +
               'What type of employment are you looking for?\n\n' +
               '1️⃣ Full-time\n' +
               '2️⃣ Part-time\n' +
@@ -554,7 +555,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Job Type:</b> ${jobTypesText}\n\n` +
-            '<b>Step 4/9: Resume</b>\n\n' +
+            '<b>Step 4/10: Resume</b>\n\n' +
             'Now I need your resume to match you with jobs.\n\n' +
             'You can:\n' +
             '- <b>Upload</b> a PDF or DOCX file\n' +
@@ -583,7 +584,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Resume received!</b> (${text.length} characters)\n\n` +
-            '<b>Step 5/9: Minimum Match Score</b>\n\n' +
+            '<b>Step 5/10: Minimum Match Score</b>\n\n' +
             "I'll only notify you about jobs with a score >= this value.\n\n" +
             '<b>Score ranges:</b>\n' +
             '- 90-100: Perfect match\n' +
@@ -622,7 +623,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Min Score:</b> ${minScore}\n\n` +
-            '<b>Step 6/9: Job Posting Date Range</b>\n\n' +
+            '<b>Step 6/10: Job Posting Date Range</b>\n\n' +
             'How far back should I search for jobs?\n\n' +
             '1️⃣ Last 24 hours\n' +
             '2️⃣ Last 3 days\n' +
@@ -661,7 +662,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Date Range:</b> ${DATE_RANGE_LABELS[datePosted]}\n\n` +
-            '<b>Step 7/9: Excluded Job Titles (Optional)</b>\n\n' +
+            '<b>Step 7/10: Excluded Job Titles (Optional)</b>\n\n' +
             'Any job title keywords to exclude?\n\n' +
             'Examples: <b>"Manager, Director, Lead"</b>\n' +
             '(Jobs with these words in the title will be skipped)\n\n' +
@@ -696,7 +697,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Excluded Titles:</b> ${excludedText}\n\n` +
-            '<b>Step 8/9: Excluded Companies (Optional)</b>\n\n' +
+            '<b>Step 8/10: Excluded Companies (Optional)</b>\n\n' +
             'Any companies to exclude?\n\n' +
             'Examples: <b>"Amazon, Meta, Google"</b>\n' +
             '(Jobs from these companies will be skipped)\n\n' +
@@ -732,7 +733,7 @@ export function setupConversation(bot: Bot<BotContext>): void {
 
         await ctx.reply(
           `<b>Excluded Companies:</b> ${excludedText}\n\n` +
-            '<b>Step 9/9: Cross-Subscription Duplicates</b>\n\n' +
+            '<b>Step 9/10: Cross-Subscription Duplicates</b>\n\n' +
             'If a job matches multiple of your subscriptions, should I:\n\n' +
             '1️⃣ <b>Skip it</b> - Only notify once (Recommended)\n' +
             '2️⃣ <b>Show it</b> - Notify for each subscription (marked with 🔄)\n\n' +
@@ -757,8 +758,50 @@ export function setupConversation(bot: Bot<BotContext>): void {
           }
         }
 
+        // Move to step 10: Google Jobs (experimental)
+        await db.telegramUser.update({
+          where: { id: ctx.telegramUser.id },
+          data: {
+            conversationState: 'awaiting_google_jobs_preference',
+            conversationData: { ...data, skipCrossSubDuplicates },
+          },
+        });
+
+        const crossSubText = skipCrossSubDuplicates ? 'Skip duplicates' : 'Show with 🔄 marker';
+
+        await ctx.reply(
+          `<b>Cross-Sub Duplicates:</b> ${crossSubText}\n\n` +
+            '<b>Step 10/10: Experimental - Google Jobs</b>\n\n' +
+            '🧪 <b>Enable Google Jobs search?</b>\n\n' +
+            'This experimental feature searches Google Jobs directly and provides ' +
+            '<b>apply links from all sources</b> (LinkedIn, Indeed, Glassdoor, company websites, etc.)\n\n' +
+            '⚠️ <b>Note:</b> Uses residential proxies with per-GB costs. ' +
+            'May occasionally fail due to anti-bot measures.\n\n' +
+            '1️⃣ <b>No</b> - Use standard sources only (Recommended)\n' +
+            '2️⃣ <b>Yes</b> - Enable Google Jobs (experimental)\n\n' +
+            'Send <b>1</b> or <b>2</b>, or <b>"Skip"</b> for default (No)',
+          { parse_mode: 'HTML' }
+        );
+        break;
+      }
+
+      case 'awaiting_google_jobs_preference': {
+        let useGoogleJobs = false; // default - disabled
+
+        const lowerText = text.toLowerCase();
+        if (lowerText !== 'skip') {
+          if (text === '1') {
+            useGoogleJobs = false;
+          } else if (text === '2') {
+            useGoogleJobs = true;
+          } else {
+            await ctx.reply('Please enter 1 or 2, or "Skip" for default.');
+            return;
+          }
+        }
+
         // Create subscription with all data
-        const finalData = { ...data, skipCrossSubDuplicates } as ConversationData;
+        const finalData = { ...data, useGoogleJobs } as ConversationData;
         await createSubscription(ctx, finalData);
         break;
       }
@@ -835,6 +878,7 @@ async function createSubscription(
       excludedCompanies: data.excludedCompanies ?? [],
       isActive: true,
       isPaused: false,
+      useGoogleJobs: data.useGoogleJobs ?? false,  // Experimental Google Jobs
     };
     const subscription = await db.searchSubscription.create({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -872,6 +916,9 @@ async function createSubscription(
     const crossSubText = data.skipCrossSubDuplicates === false
       ? 'Show with 🔄 marker'
       : 'Skip duplicates';
+    const googleJobsText = data.useGoogleJobs
+      ? '🧪 Enabled'
+      : 'Disabled';
 
     // Build inline keyboard
     const keyboard = new InlineKeyboard()
@@ -888,7 +935,8 @@ async function createSubscription(
         `<b>Resume:</b> ${data.resumeName || 'Uploaded'}\n` +
         `<b>Excluded Titles:</b> ${excludedTitlesText}\n` +
         `<b>Excluded Companies:</b> ${excludedCompaniesText}\n` +
-        `<b>Cross-Sub Duplicates:</b> ${crossSubText}\n\n` +
+        `<b>Cross-Sub Duplicates:</b> ${crossSubText}\n` +
+        `<b>Google Jobs:</b> ${googleJobsText}\n\n` +
         '🔍 <b>Starting your first scan now...</b>\n' +
         "I'll notify you when I find matches, and continue searching every hour.",
       { parse_mode: 'HTML', reply_markup: keyboard }

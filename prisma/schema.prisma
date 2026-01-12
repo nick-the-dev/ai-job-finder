@@ -194,6 +194,9 @@ model SearchSubscription {
   isPaused        Boolean  @default(false) @map("is_paused")
   debugMode       Boolean  @default(false) @map("debug_mode") // Enable detailed logging for debugging
 
+  // Experimental features
+  useGoogleJobs   Boolean  @default(false) @map("use_google_jobs") // Enable experimental Google Jobs scraping
+
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
   lastSearchAt    DateTime? @map("last_search_at")

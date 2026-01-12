@@ -2,6 +2,14 @@
  * Core types - shared across the application
  */
 
+/**
+ * Apply URL with source information (for Google Jobs multi-source links)
+ */
+export interface ApplyUrl {
+  url: string;
+  source: string;  // e.g., "LinkedIn", "Indeed", "Company Website"
+}
+
 export interface RawJob {
   title: string;
   company: string;
@@ -12,8 +20,9 @@ export interface RawJob {
   salaryMax?: number;
   salaryCurrency?: string;
   applicationUrl?: string;
+  applyUrls?: ApplyUrl[];  // Multiple apply URLs (Google Jobs provides links from all sources)
   postedDate?: Date;
-  source: 'serpapi' | 'jobspy';
+  source: 'serpapi' | 'jobspy' | 'google_jobs';
   sourceId?: string;
 }
 

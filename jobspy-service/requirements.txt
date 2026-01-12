@@ -2,3 +2,6 @@ fastapi==0.109.0
 uvicorn==0.27.0
 python-jobspy==1.1.82
 pandas==2.1.4
+# Google Jobs scraping (experimental)
+camoufox[geoip]>=0.4.11
+certifi>=2024.0.0
