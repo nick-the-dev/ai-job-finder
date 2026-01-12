@@ -99,7 +99,7 @@ ${escapeHtml(job.company)}
 ${escapeHtml(locationText)}
 
 <b>Match Score:</b> ${formatScore(match.score)}
-<b>Salary:</b> ${formatSalary(job, match)}
+<b>Salary:</b> ${escapeHtml(formatSalary(job, match))}
 
 <b>Why it matches:</b>
 ${escapeHtml(truncate(match.reasoning || 'No reasoning provided', 300))}
@@ -174,7 +174,7 @@ export async function sendMatchSummary(
 
     message += `<b>${i + 1}. ${escapeHtml(truncate(job.title, 40))}${marker}</b>\n`;
     message += `   ${escapeHtml(truncate(job.company, 30))} | ${match.score} pts\n`;
-    message += `   ${escapeHtml(location)} | ${salary}\n`;
+    message += `   ${escapeHtml(location)} | ${escapeHtml(salary)}\n`;
 
     // Show apply links (multiple for Google Jobs, single for others)
     if (job.applyUrls && job.applyUrls.length > 0) {
