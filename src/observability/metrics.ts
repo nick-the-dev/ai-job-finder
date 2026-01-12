@@ -12,7 +12,7 @@ import * as Sentry from '@sentry/node';
 /**
  * Track jobs collected from a source
  */
-export function trackJobsCollected(count: number, source: 'jobspy' | 'serpapi'): void {
+export function trackJobsCollected(count: number, source: 'jobspy' | 'serpapi' | 'google_jobs'): void {
   Sentry.metrics.count('jobs.collected', count, {
     attributes: { source },
   });
@@ -123,7 +123,7 @@ export function trackMatchCacheHit(hit: boolean): void {
 /**
  * Track external API errors
  */
-export function trackApiError(api: 'jobspy' | 'serpapi' | 'openrouter', errorType: string): void {
+export function trackApiError(api: 'jobspy' | 'serpapi' | 'openrouter' | 'google_jobs', errorType: string): void {
   Sentry.metrics.count('api.errors', 1, {
     attributes: { api, error_type: errorType },
   });

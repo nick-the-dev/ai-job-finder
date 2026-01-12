@@ -645,7 +645,8 @@ class GoogleScrapeRequest(BaseModel):
     """Request for Google Jobs scraping."""
     search_term: str
     location: str
-    max_jobs: int = 50
+    max_jobs: int = 10000  # High default - scroll until no more jobs
+    date_posted: str = "month"  # today, 3days, week, month, or all
     countries: Optional[list[str]] = None  # Proxy country filter, e.g., ["us", "ca"]
 
 
@@ -669,17 +670,25 @@ async def scrape_google(request: GoogleScrapeRequest):
     
     Returns jobs with ALL apply URLs from different sources (LinkedIn, Indeed, company sites, etc.)
     
-    This is experimental - uses residential proxies which have per-GB costs.
+    Scrolls until no more jobs are available for the given date range.
+    
+    Args:
+        search_term: Job search query
+        location: Location to search in
+        max_jobs: Maximum jobs (default 10000 - effectively scroll until done)
+        date_posted: Date filter - today, 3days, week, month, or all
+        countries: Proxy country filter
     """
     try:
         from google_scraper import scrape_google_jobs
         
-        logger.info(f"Google Jobs scrape: '{request.search_term}' in '{request.location}'")
+        logger.info(f"Google Jobs scrape: '{request.search_term}' in '{request.location}' (date_posted={request.date_posted})")
         
         jobs = await scrape_google_jobs(
             query=request.search_term,
             location=request.location,
             max_jobs=request.max_jobs,
+            date_posted=request.date_posted,
             countries=request.countries,
         )
         

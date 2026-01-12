@@ -794,17 +794,19 @@ export async function runSingleSubscriptionSearch(
         || 'United States';
 
       // Collect from Google Jobs for each job title
+      // Use the subscription's date_posted setting for filtering
+      const googleDatePosted = sub.datePosted || 'month';
       for (const jobTitle of sub.jobTitles) {
         try {
           const googleJobs = await collector.fetchFromGoogleJobs(
             jobTitle,
             googleLocation,
-            30 // Limit per query to control proxy costs
+            googleDatePosted  // Pass the date filter to get all jobs in the period
           );
           
           if (googleJobs.length > 0) {
             allRawJobs.push(...googleJobs);
-            logger.info('Scheduler', `[${triggerLabel}] Google Jobs: +${googleJobs.length} jobs for "${jobTitle}"`);
+            logger.info('Scheduler', `[${triggerLabel}] Google Jobs: +${googleJobs.length} jobs for "${jobTitle}" (date_posted=${googleDatePosted})`);
           }
         } catch (googleError: any) {
           // Log but don't fail the run - Google Jobs is experimental

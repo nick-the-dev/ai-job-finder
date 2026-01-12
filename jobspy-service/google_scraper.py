@@ -43,6 +43,16 @@ class GoogleJob:
     search_query: str = ""
 
 
+# Date filter mappings - these phrases work in Google Jobs search
+DATE_FILTER_PHRASES = {
+    "today": "since yesterday",
+    "3days": "in the last 3 days",
+    "week": "in the last week",
+    "month": "in the last month",
+    # No filter for "all" - just search without date phrase
+}
+
+
 class DataImpulseProxy:
     """
     DataImpulse residential proxy with automatic IP rotation.
@@ -110,7 +120,8 @@ class GoogleJobsScraper:
         self,
         query: str,
         location: str,
-        max_jobs: int = 50,
+        max_jobs: int = 10000,  # High default - we scroll until no more jobs
+        date_posted: str = "month",  # today, 3days, week, month, or all
         max_retries: int = 3,
     ) -> list[GoogleJob]:
         """
@@ -119,7 +130,8 @@ class GoogleJobsScraper:
         Args:
             query: Job title/keywords to search
             location: Location to search in
-            max_jobs: Maximum number of jobs to return
+            max_jobs: Maximum number of jobs to return (default 10000 - effectively unlimited)
+            date_posted: Filter by date - today, 3days, week, month, or all
             max_retries: Number of retry attempts on failure/blocks
             
         Returns:
@@ -127,7 +139,7 @@ class GoogleJobsScraper:
         """
         for attempt in range(max_retries):
             try:
-                jobs = await self._scrape_with_proxy(query, location, max_jobs)
+                jobs = await self._scrape_with_proxy(query, location, max_jobs, date_posted)
                 if jobs:
                     return jobs
                 logger.warning(f"Attempt {attempt + 1}/{max_retries}: No jobs found, retrying...")
@@ -146,6 +158,7 @@ class GoogleJobsScraper:
         query: str,
         location: str,
         max_jobs: int,
+        date_posted: str = "month",
     ) -> list[GoogleJob]:
         """Scrape with a fresh proxy session."""
         try:
@@ -155,7 +168,15 @@ class GoogleJobsScraper:
             return []
         
         proxy_config = self.proxy.get_proxy_config()
-        logger.info(f"Scraping Google Jobs: '{query}' in '{location}' (session: {proxy_config['username'][-8:]})")
+        
+        # Build search query with date filter
+        date_phrase = DATE_FILTER_PHRASES.get(date_posted, "")
+        if date_phrase:
+            full_query = f"{query} {location} {date_phrase}"
+        else:
+            full_query = f"{query} {location}"
+        
+        logger.info(f"Scraping Google Jobs: '{full_query}' (date_posted={date_posted}, session: {proxy_config['username'][-8:]})")
         
         async with AsyncCamoufox(headless=True, proxy=proxy_config, geoip=True) as browser:
             context = await browser.new_context(ignore_https_errors=True)
@@ -163,7 +184,7 @@ class GoogleJobsScraper:
             
             # Build Google Jobs URL with proper encoding and English language
             from urllib.parse import quote_plus
-            search_query = quote_plus(f"{query} {location}")
+            search_query = quote_plus(full_query)
             url = f"https://www.google.com/search?q={search_query}&ibp=htl;jobs&sa=X&hl=en"
             
             # Navigate with realistic timing
@@ -180,8 +201,8 @@ class GoogleJobsScraper:
             if len(content) < 50000:
                 raise Exception(f"Partial page load - only {len(content)} bytes")
             
-            # Extract jobs with scroll pagination
-            jobs = await self._extract_jobs_with_scroll(page, query, location, max_jobs)
+            # Extract jobs with scroll pagination - scroll until no more jobs
+            jobs = await self._extract_jobs_with_scroll(page, query, location, max_jobs, date_posted)
             
             return jobs
     
@@ -191,12 +212,30 @@ class GoogleJobsScraper:
         query: str,
         location: str,
         max_jobs: int,
+        date_posted: str = "month",
     ) -> list[GoogleJob]:
-        """Extract jobs with scroll pagination, only returning jobs with URLs."""
+        """Extract jobs with scroll pagination, only returning jobs with URLs.
+        
+        Scrolls until no more new jobs are found (up to a reasonable limit).
+        The limit is dynamic based on date range - more scrolls for longer periods.
+        """
         all_jobs: list[GoogleJob] = []
         scroll_attempts = 0
-        max_scroll_attempts = 10
+        
+        # Dynamic max scroll attempts based on date range
+        # More recent = fewer expected jobs, less scrolling needed
+        max_scroll_attempts = {
+            "today": 20,
+            "3days": 40,
+            "week": 60,
+            "month": 100,
+            "all": 150,
+        }.get(date_posted, 100)
+        
         no_new_jobs_count = 0
+        consecutive_no_new = 5  # Stop after 5 consecutive scrolls with no new jobs
+        
+        logger.info(f"Starting scroll extraction (max_scroll={max_scroll_attempts}, max_jobs={max_jobs})")
         
         while len(all_jobs) < max_jobs and scroll_attempts < max_scroll_attempts:
             # Get current page content
@@ -218,10 +257,13 @@ class GoogleJobsScraper:
             
             if added == 0:
                 no_new_jobs_count += 1
-                if no_new_jobs_count >= 3:
+                if no_new_jobs_count >= consecutive_no_new:
+                    logger.info(f"No new jobs for {consecutive_no_new} consecutive scrolls, stopping")
                     break
             else:
                 no_new_jobs_count = 0
+                if scroll_attempts % 10 == 0:
+                    logger.info(f"Scroll {scroll_attempts}: {len(all_jobs)} jobs collected (+{added} new)")
             
             # Scroll to load more
             scroll_attempts += 1
@@ -234,7 +276,7 @@ class GoogleJobsScraper:
             """)
             await page.wait_for_timeout(1500)
         
-        logger.info(f"Extracted {len(all_jobs)} jobs with URLs from Google Jobs")
+        logger.info(f"Extraction complete: {len(all_jobs)} jobs after {scroll_attempts} scrolls")
         return all_jobs[:max_jobs]
     
     def _parse_jobs_with_urls(
@@ -373,18 +415,26 @@ class GoogleJobsScraper:
 async def scrape_google_jobs(
     query: str,
     location: str,
-    max_jobs: int = 50,
+    max_jobs: int = 10000,  # High default - scroll until no more jobs
+    date_posted: str = "month",  # today, 3days, week, month, or all
     countries: list[str] = None,
 ) -> list[dict]:
     """
     API handler for Google Jobs scraping.
+    
+    Args:
+        query: Job search query
+        location: Location to search in
+        max_jobs: Maximum jobs to return (default 10000 - effectively unlimited)
+        date_posted: Date filter - today, 3days, week, month, or all
+        countries: Proxy country filter for residential IPs
     
     Returns list of jobs with all apply URLs.
     """
     proxy = DataImpulseProxy(countries=countries) if countries else None
     scraper = GoogleJobsScraper(proxy_provider=proxy)
     
-    jobs = await scraper.scrape(query, location, max_jobs=max_jobs)
+    jobs = await scraper.scrape(query, location, max_jobs=max_jobs, date_posted=date_posted)
     
     # Convert to dict for JSON serialization
     return [

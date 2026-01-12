@@ -853,7 +853,7 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
   async fetchFromGoogleJobs(
     query: string,
     location: string,
-    limit: number = 50,
+    datePosted: string = 'month',  // today, 3days, week, month, or all
     countries?: string[]
   ): Promise<RawJob[]> {
     const jobspyUrl = process.env.JOBSPY_URL;
@@ -863,19 +863,20 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     }
 
     try {
-      logger.info('Collector', `[Google Jobs] Scraping: "${query}" in "${location}"`);
-      addApiCallBreadcrumb('GoogleJobs', 'scrape', { query, location, limit: String(limit) });
+      logger.info('Collector', `[Google Jobs] Scraping: "${query}" in "${location}" (date_posted=${datePosted})`);
+      addApiCallBreadcrumb('GoogleJobs', 'scrape', { query, location, datePosted });
 
       const response = await axios.post(
         `${jobspyUrl}/scrape-google`,
         {
           search_term: query,
           location,
-          max_jobs: limit,
+          max_jobs: 10000,  // High limit - let the scraper scroll until done
+          date_posted: datePosted,
           countries,
         },
         { 
-          timeout: 180000, // 3 minutes - Google Jobs scraping is slow
+          timeout: 600000, // 10 minutes - Google Jobs scraping can be slow with many scrolls
           headers: this.getJobSpyHeaders(),
         }
       );
@@ -884,14 +885,14 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       logger.info('Collector', `[Google Jobs] Found ${jobs.length} jobs`);
 
       // Track metrics (note: count first, then source)
-      trackJobsCollected(jobs.length, 'jobspy');
+      trackJobsCollected(jobs.length, 'google_jobs');
 
       // Transform to RawJob format
       return jobs.map((job: any) => this.transformGoogleJob(job));
     } catch (error: any) {
       const errorMessage = error.response?.data?.detail || error.message;
       logger.error('Collector', `[Google Jobs] Error: ${errorMessage}`);
-      trackApiError('jobspy', error.code || 'unknown');
+      trackApiError('google_jobs', error.code || 'unknown');
 
       // Don't fail the whole collection, just return empty
       return [];
