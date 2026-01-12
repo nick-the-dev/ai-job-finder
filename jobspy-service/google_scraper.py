@@ -59,8 +59,10 @@ class DataImpulseProxy:
         port: int = 823,
         countries: list[str] = None,
     ):
-        self.login = login or os.getenv("DATAIMPULSE_LOGIN", "09155740b71c7845c38e")
-        self.password = password or os.getenv("DATAIMPULSE_PASSWORD", "11cff52a1368d5b0")
+        self.login = login or os.getenv("DATAIMPULSE_LOGIN")
+        self.password = password or os.getenv("DATAIMPULSE_PASSWORD")
+        if not self.login or not self.password:
+            raise ValueError("DATAIMPULSE_LOGIN and DATAIMPULSE_PASSWORD environment variables required")
         self.host = host
         self.port = port
         self.countries = countries or ["us", "ca"]  # Default: US and Canada

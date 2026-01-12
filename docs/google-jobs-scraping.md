@@ -37,29 +37,23 @@ async with AsyncCamoufox(headless=True, proxy=proxy_config, geoip=True) as brows
 
 #### DataImpulse (Recommended)
 ```python
+import os
+
 def get_dataimpulse_proxy():
+    login = os.getenv("DATAIMPULSE_LOGIN")
+    password = os.getenv("DATAIMPULSE_PASSWORD")
     session_id = ''.join(random.choices(string.ascii_lowercase, k=8))
     return {
         'server': 'http://gw.dataimpulse.com:823',
-        'username': f'09155740b71c7845c38e__cr.us,ca__sid.{session_id}',
-        'password': '11cff52a1368d5b0',
+        'username': f'{login}__cr.us,ca__sid.{session_id}',
+        'password': password,
     }
 ```
 
 - Session ID rotation (`__sid.{random}`) gives new IP per request
 - Country targeting: `__cr.us,ca` for US/Canada IPs
 - ~$1/GB pricing
-
-#### Bright Data (Alternative)
-```python
-def get_brightdata_proxy():
-    session_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-    return {
-        'server': 'http://brd.superproxy.io:33335',
-        'username': f'brd-customer-hl_9189d3b5-zone-residential_proxy1-session-{session_id}',
-        'password': 'scr58prz3kcj',
-    }
-```
+- Set `DATAIMPULSE_LOGIN` and `DATAIMPULSE_PASSWORD` env vars
 
 **Blocked Proxies (Don't Use):**
 - Datacenter proxies (the ones in JOBSPY_PROXIES env var)
@@ -289,11 +283,9 @@ See `/jobspy-service/test_dataimpulse_500.py` for a working implementation that:
 ### Environment Variables Needed:
 
 ```bash
-# DataImpulse proxy credentials
-DATAIMPULSE_USERNAME=09155740b71c7845c38e__cr.us,ca
-DATAIMPULSE_PASSWORD=11cff52a1368d5b0
-DATAIMPULSE_HOST=gw.dataimpulse.com
-DATAIMPULSE_PORT=823
+# DataImpulse proxy credentials (get from DataImpulse dashboard)
+DATAIMPULSE_LOGIN=your_login_here
+DATAIMPULSE_PASSWORD=your_password_here
 ```
 
 ### Dependencies:
@@ -303,14 +295,6 @@ camoufox[geoip]>=0.4.11
 ```
 
 Note: Camoufox requires downloading browser binaries (~300MB) on first run.
-
-## Files Created During Testing
-
-- `/jobspy-service/test_camoufox_google.py` - Initial Camoufox test
-- `/jobspy-service/test_brightdata_500.py` - Bright Data proxy test
-- `/jobspy-service/test_dataimpulse_500.py` - DataImpulse bulk scrape (500 jobs)
-- `/jobspy-service/bulk_google_scrape.py` - Multi-query scraper with variations
-- `/exports/google_jobs_*.csv` - Exported job data with apply URLs
 
 ## Limitations
 
