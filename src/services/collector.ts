@@ -49,6 +49,19 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
     }
   }
 
+  /**
+   * Get headers for JobSpy API calls (includes API key if configured)
+   */
+  private getJobSpyHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (config.JOBSPY_API_KEY) {
+      headers['X-API-Key'] = config.JOBSPY_API_KEY;
+    }
+    return headers;
+  }
+
   async execute(input: CollectorInput): Promise<RawJob[]> {
     const { source = 'serpapi' } = input;
 
@@ -499,7 +512,10 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
           logger.info('Collector', `[JobSpy] Sending API request to ${jobspyUrl}/scrape...`);
           const apiStartTime = Date.now();
-          const response = await axios.post(`${jobspyUrl}/scrape`, requestBody, { timeout: 120000 });
+          const response = await axios.post(`${jobspyUrl}/scrape`, requestBody, { 
+            timeout: 120000,
+            headers: this.getJobSpyHeaders(),
+          });
           const apiDuration = Date.now() - apiStartTime;
 
           const jobs = response.data.jobs || [];
@@ -769,7 +785,10 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
     logger.info('Collector', `[JobSpy] Search 1: date filter (hours_old=${hoursOld}, location=${location || 'global'}) - calling API...`);
     const search1Start = Date.now();
-    const dateResponse = await axios.post(`${jobspyUrl}/scrape`, dateRequest, { timeout: 120000 });
+    const dateResponse = await axios.post(`${jobspyUrl}/scrape`, dateRequest, { 
+      timeout: 120000,
+      headers: this.getJobSpyHeaders(),
+    });
     const search1Duration = Date.now() - search1Start;
     const dateJobs = dateResponse.data.jobs || [];
     logger.info('Collector', `[JobSpy] Search 1 found ${dateJobs.length} recent jobs in ${search1Duration}ms`);
@@ -798,7 +817,10 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
 
     logger.info('Collector', `[JobSpy] Search 2: type filter (job_type=${jobType}, is_remote=${isRemote}) - calling API...`);
     const search2Start = Date.now();
-    const typeResponse = await axios.post(`${jobspyUrl}/scrape`, typeRequest, { timeout: 120000 });
+    const typeResponse = await axios.post(`${jobspyUrl}/scrape`, typeRequest, { 
+      timeout: 120000,
+      headers: this.getJobSpyHeaders(),
+    });
     const search2Duration = Date.now() - search2Start;
     const typeJobs = typeResponse.data.jobs || [];
     logger.info('Collector', `[JobSpy] Search 2 found ${typeJobs.length} type-filtered jobs in ${search2Duration}ms`);
@@ -852,7 +874,10 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
           max_jobs: limit,
           countries,
         },
-        { timeout: 180000 } // 3 minutes - Google Jobs scraping is slow
+        { 
+          timeout: 180000, // 3 minutes - Google Jobs scraping is slow
+          headers: this.getJobSpyHeaders(),
+        }
       );
 
       const jobs = response.data.jobs || [];

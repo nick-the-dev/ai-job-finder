@@ -29,6 +29,8 @@ const envSchema = z.object({
   SERPAPI_API_KEY: z.string().min(1),
 
   // JobSpy
+  JOBSPY_URL: z.string().url().optional(), // URL of jobspy-service
+  JOBSPY_API_KEY: z.string().min(32).optional(), // API key for authenticating with jobspy-service
   JOBSPY_PROXIES: z.string().optional(), // Comma-separated proxy URLs
   JOBSPY_PARALLEL_ENABLED: z.coerce.boolean().default(false),
   JOBSPY_PARALLEL_WORKERS: z.coerce.number().default(10),

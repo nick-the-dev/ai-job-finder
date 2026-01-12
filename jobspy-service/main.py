@@ -1,8 +1,9 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from pydantic import BaseModel
 from typing import Optional
 import logging
 import importlib.metadata
+import os
 
 from jobspy import scrape_jobs
 from proxy_pool import ProxyPool
@@ -11,6 +12,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="JobSpy Scraper API", version="1.0.0")
+
+# API Key for internal endpoints (set via JOBSPY_API_KEY env var)
+JOBSPY_API_KEY = os.getenv("JOBSPY_API_KEY")
+
+def verify_api_key(x_api_key: str = Header(None, alias="X-API-Key")):
+    """Verify API key for protected endpoints."""
+    if not JOBSPY_API_KEY:
+        # If no API key configured, allow all requests (backward compatibility)
+        return True
+    if x_api_key != JOBSPY_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    return True
 
 # Get jobspy version for debugging
 try:
@@ -109,7 +122,7 @@ class NotifyRequest(BaseModel):
     level: str = "info"  # info, warn, error
 
 
-@app.post("/notify")
+@app.post("/notify", dependencies=[Depends(verify_api_key)])
 def notify(request: NotifyRequest):
     """Receive notifications from Node.js service for logging visibility."""
     log_func = logger.info
@@ -123,7 +136,7 @@ def notify(request: NotifyRequest):
     return {"status": "logged"}
 
 
-@app.get("/debug/proxies")
+@app.get("/debug/proxies", dependencies=[Depends(verify_api_key)])
 def debug_proxies():
     """Return proxy pool status (count only, not actual credentials)."""
     return {
@@ -132,7 +145,7 @@ def debug_proxies():
     }
 
 
-@app.get("/debug/info")
+@app.get("/debug/info", dependencies=[Depends(verify_api_key)])
 def debug_info():
     """Return debug info about the server environment."""
     import socket
@@ -172,7 +185,7 @@ def debug_info():
     }
 
 
-@app.get("/debug/test-linkedin")
+@app.get("/debug/test-linkedin", dependencies=[Depends(verify_api_key)])
 def debug_test_linkedin():
     """Test LinkedIn scraping with detailed debug info."""
     from collections import Counter
@@ -213,7 +226,7 @@ def debug_test_linkedin():
     }
 
 
-@app.get("/debug/raw-linkedin")
+@app.get("/debug/raw-linkedin", dependencies=[Depends(verify_api_key)])
 def debug_raw_linkedin(lang: str = "en-US"):
     """Make a raw request to LinkedIn API to test geolocation."""
     import requests as req
@@ -262,7 +275,7 @@ def debug_raw_linkedin(lang: str = "en-US"):
         return {"error": str(e)}
 
 
-@app.get("/debug/jobspy-session")
+@app.get("/debug/jobspy-session", dependencies=[Depends(verify_api_key)])
 def debug_jobspy_session():
     """Test using python-jobspy's actual session mechanism."""
     from bs4 import BeautifulSoup
@@ -311,7 +324,7 @@ def debug_jobspy_session():
         return {"error": str(e), "traceback": traceback.format_exc()}
 
 
-@app.get("/debug/linkedin-with-cookie")
+@app.get("/debug/linkedin-with-cookie", dependencies=[Depends(verify_api_key)])
 def debug_linkedin_with_cookie(lang: str = "en-GB", geo: str = ""):
     """Test LinkedIn with different cookies to see if geolocation changes.
 
@@ -493,7 +506,7 @@ def patch_linkedin_for_worldwide():
 patch_linkedin_for_worldwide()
 
 
-@app.post("/scrape")
+@app.post("/scrape", dependencies=[Depends(verify_api_key)])
 def scrape(request: ScrapeRequest):
     try:
         # Get proxy for this request (round-robin)
@@ -647,10 +660,12 @@ class GoogleJobResult(BaseModel):
     source: str = "google_jobs"
 
 
-@app.post("/scrape-google")
+@app.post("/scrape-google", dependencies=[Depends(verify_api_key)])
 async def scrape_google(request: GoogleScrapeRequest):
     """
     Scrape Google Jobs using Camoufox and residential proxies.
+    
+    Requires X-API-Key header for authentication.
     
     Returns jobs with ALL apply URLs from different sources (LinkedIn, Indeed, company sites, etc.)
     

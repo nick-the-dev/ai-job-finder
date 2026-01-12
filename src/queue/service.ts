@@ -379,9 +379,15 @@ export class QueueService {
     if (!jobspyUrl) return;
 
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const jobspyApiKey = process.env.JOBSPY_API_KEY;
+      if (jobspyApiKey) {
+        headers['X-API-Key'] = jobspyApiKey;
+      }
+
       const response = await fetch(`${jobspyUrl}/notify`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ message, run_id: runId, level }),
       });
       if (!response.ok) {

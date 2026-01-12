@@ -199,11 +199,16 @@ export class ParallelCollector {
 
       // Make request to JobSpy service
       // The JobSpy service will automatically rotate proxies using its proxy pool
+      const headers: Record<string, string> = {
+        'X-Worker-Index': proxyIndex.toString(), // For debugging
+      };
+      if (config.JOBSPY_API_KEY) {
+        headers['X-API-Key'] = config.JOBSPY_API_KEY;
+      }
+
       const response = await axios.post(`${this.jobspyUrl}/scrape`, requestBody, {
         timeout: 120000, // 2 minutes
-        headers: {
-          'X-Worker-Index': proxyIndex.toString(), // For debugging
-        },
+        headers,
       });
 
       const jobs = response.data.jobs || [];
