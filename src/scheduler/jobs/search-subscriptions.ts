@@ -793,26 +793,41 @@ export async function runSingleSubscriptionSearch(
         || sub.location 
         || 'United States';
 
-      // Collect from Google Jobs for each job title
-      // Use the subscription's date_posted setting for filtering
+      // Collect from Google Jobs for each job title IN PARALLEL
+      // Each query uses a different proxy session (fresh IP per scraper)
+      // Stagger start times to avoid detection
       const googleDatePosted = sub.datePosted || 'month';
-      for (const jobTitle of sub.jobTitles) {
-        try {
-          const googleJobs = await collector.fetchFromGoogleJobs(
-            jobTitle,
-            googleLocation,
-            googleDatePosted  // Pass the date filter to get all jobs in the period
-          );
-          
-          if (googleJobs.length > 0) {
-            allRawJobs.push(...googleJobs);
-            logger.info('Scheduler', `[${triggerLabel}] Google Jobs: +${googleJobs.length} jobs for "${jobTitle}" (date_posted=${googleDatePosted})`);
+      const staggerDelayMs = 2000; // 2 seconds between starting each scraper
+      
+      const googleJobPromises = sub.jobTitles.map((jobTitle, index) => {
+        return new Promise<void>(async (resolve) => {
+          // Stagger start times
+          if (index > 0) {
+            await new Promise(r => setTimeout(r, index * staggerDelayMs));
           }
-        } catch (googleError: any) {
-          // Log but don't fail the run - Google Jobs is experimental
-          logger.warn('Scheduler', `[${triggerLabel}] Google Jobs failed for "${jobTitle}": ${googleError.message}`);
-        }
-      }
+          
+          try {
+            // Each call gets a fresh proxy session automatically (new session ID)
+            const googleJobs = await collector.fetchFromGoogleJobs(
+              jobTitle,
+              googleLocation,
+              googleDatePosted
+            );
+            
+            if (googleJobs.length > 0) {
+              allRawJobs.push(...googleJobs);
+              logger.info('Scheduler', `[${triggerLabel}] Google Jobs: +${googleJobs.length} jobs for "${jobTitle}" (date_posted=${googleDatePosted})`);
+            }
+          } catch (googleError: any) {
+            // Log but don't fail the run - Google Jobs is experimental
+            logger.warn('Scheduler', `[${triggerLabel}] Google Jobs failed for "${jobTitle}": ${googleError.message}`);
+          }
+          resolve();
+        });
+      });
+      
+      // Wait for all parallel scrapers to complete
+      await Promise.all(googleJobPromises);
 
       logger.info('Scheduler', `[${triggerLabel}] <<< Google Jobs complete - total now ${allRawJobs.length} jobs`);
     } catch (importError: any) {
