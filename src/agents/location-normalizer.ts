@@ -53,37 +53,34 @@ Each location object must have:
 
 RULES:
 1. Parse multiple locations from comma-separated, "and", or "or" delimited input
-2. "Remote", "remote only", "work from home", "WFH" (with no country context) → type: "remote" with display: "Remote" and country: "Worldwide"
-3. "Remote in [country]", "Remote [country]", "[country] remote" → type: "remote" with country set to that country (NOT "Worldwide")
-   - This means the user wants remote jobs from/in that specific country
+2. IMPORTANT: "Remote" ALWAYS requires a country. There is NO worldwide/global remote option.
+   - "Remote" or "remote only" without country context → set needsClarification asking which country
+   - "Remote in [country]", "Remote [country]", "[country] remote" → type: "remote" with country set to that country
    - Example: "Remote in Canada" → type: "remote", country: "Canada", display: "Canada (Remote)"
-4. When user says "X or Remote", parse as TWO separate locations (one physical, one remote)
-5. Include useful searchVariants for job board compatibility:
+3. When user says "X or Remote", you MUST ask for clarification about which country for the remote jobs
+4. Include useful searchVariants for job board compatibility:
    - "NYC" → searchVariants: ["New York", "NYC", "New York City", "Manhattan"]
    - "SF" → searchVariants: ["San Francisco", "SF", "Bay Area"]
    - "USA" → searchVariants: ["United States", "USA", "US"]
-6. For ambiguous locations (like "Springfield" which exists in 30+ US states), set needsClarification with:
+5. For ambiguous locations (like "Springfield" which exists in 30+ US states), set needsClarification with:
    - question: a clear question asking for clarification
    - options: array of 3-5 most likely options (most populous first)
    - Still return an empty locations array when clarification is needed
-7. For country-wide searches, omit city/state and use country name for searchVariants
-8. For "anywhere", "worldwide", "skip", "any" → return empty locations array (no location filter)
-9. If input seems like a real location but you're not 100% sure it exists, parse it anyway - job boards will handle invalid locations gracefully
-10. IMPORTANT: If input mentions BOTH generic "remote" AND country-specific remote (e.g., "Remote... USA remote"), ask for clarification:
-   - User might want: global remote + on-site locations
-   - Or: ONLY country-specific remote + on-site (no global remote)
-   - Or: All three options (global remote + country-specific remote + on-site)
+6. For country-wide searches, omit city/state and use country name for searchVariants
+7. REJECT "anywhere", "worldwide", "skip", "any", "global" - set needsClarification asking for a specific country or region
+8. If input seems like a real location but you're not 100% sure it exists, parse it anyway - job boards will handle invalid locations gracefully
+9. NEVER use country: "Worldwide" - always require a specific country for remote jobs
 
 EXAMPLES:
 
 Input: "NYC, Boston, and remote"
 Output:
 {
-  "locations": [
-    { "raw": "NYC", "display": "New York, NY, USA", "city": "New York", "state": "New York", "country": "USA", "searchVariants": ["New York", "NYC", "New York City"], "type": "physical" },
-    { "raw": "Boston", "display": "Boston, MA, USA", "city": "Boston", "state": "Massachusetts", "country": "USA", "searchVariants": ["Boston", "Boston MA"], "type": "physical" },
-    { "raw": "remote", "display": "Remote", "country": "Worldwide", "searchVariants": [], "type": "remote" }
-  ]
+  "locations": [],
+  "needsClarification": {
+    "question": "Which country should I search for remote jobs?",
+    "options": ["USA (Remote)", "Canada (Remote)", "UK (Remote)", "Germany (Remote)", "Other country"]
+  }
 }
 
 Input: "Springfield" (ambiguous)
@@ -102,14 +99,28 @@ Output:
   "locations": [],
   "needsClarification": {
     "question": "What do you mean by 'Remote SF'?",
-    "options": ["Remote jobs anywhere + On-site jobs in SF", "Only remote jobs from SF-based companies", "Remote jobs anywhere (ignore SF)"]
+    "options": ["USA remote jobs + On-site jobs in SF", "Only remote jobs from SF-based companies", "On-site SF jobs only"]
   }
 }
 
 Input: "anywhere"
 Output:
 {
-  "locations": []
+  "locations": [],
+  "needsClarification": {
+    "question": "Please specify a country or region. We don't support worldwide searches.",
+    "options": ["USA", "Canada", "UK", "Europe", "Other (please specify)"]
+  }
+}
+
+Input: "remote"
+Output:
+{
+  "locations": [],
+  "needsClarification": {
+    "question": "Which country should I search for remote jobs?",
+    "options": ["USA (Remote)", "Canada (Remote)", "UK (Remote)", "Europe (Remote)", "Other country"]
+  }
 }
 
 Input: "Remote in Canada"
@@ -131,24 +142,20 @@ Output:
 Input: "Canada or remote"
 Output:
 {
-  "locations": [
-    { "raw": "Canada", "display": "Canada", "country": "Canada", "searchVariants": ["Canada", "CA"], "type": "physical" },
-    { "raw": "remote", "display": "Remote", "country": "Worldwide", "searchVariants": [], "type": "remote" }
-  ]
+  "locations": [],
+  "needsClarification": {
+    "question": "Which country should I search for remote jobs? (You also mentioned Canada for on-site)",
+    "options": ["Canada (Remote) + Canada (On-site)", "USA (Remote) + Canada (On-site)", "Canada (On-site only, no remote)"]
+  }
 }
 
 Input: "Remote, Canada Toronto preferable, but USA remote is okay"
 Output:
 {
-  "locations": [],
-  "needsClarification": {
-    "question": "You mentioned both 'Remote' and 'USA remote'. What do you mean?",
-    "options": [
-      "Remote anywhere + Toronto on-site",
-      "Toronto on-site + USA-based remote only (no global remote)",
-      "All: Remote anywhere + Toronto on-site + USA-based remote"
-    ]
-  }
+  "locations": [
+    { "raw": "Toronto", "display": "Toronto, ON, Canada", "city": "Toronto", "state": "Ontario", "country": "Canada", "searchVariants": ["Toronto", "Toronto ON"], "type": "physical" },
+    { "raw": "USA remote", "display": "USA (Remote)", "country": "USA", "searchVariants": ["United States", "USA", "US"], "type": "remote" }
+  ]
 }`;
 
     let userPrompt = `Parse this location input: "${text}"`;
@@ -207,11 +214,10 @@ Output:
    */
   static formatForDisplay(locations: NormalizedLocation[]): string {
     if (locations.length === 0) {
-      return 'Anywhere';
+      return 'No location specified';
     }
 
-    const worldwideRemote = locations.filter(l => l.type === 'remote' && l.country === 'Worldwide');
-    const countrySpecificRemote = locations.filter(l => l.type === 'remote' && l.country !== 'Worldwide');
+    const remoteLocations = locations.filter(l => l.type === 'remote');
     const physicalLocations = locations.filter(l => l.type === 'physical');
 
     const parts: string[] = [];
@@ -220,14 +226,9 @@ Output:
       parts.push(loc.display);
     }
 
-    // Show country-specific remote with the display name (e.g., "Canada (Remote)")
-    for (const loc of countrySpecificRemote) {
+    // Show remote locations with their display name (e.g., "Canada (Remote)")
+    for (const loc of remoteLocations) {
       parts.push(loc.display);
-    }
-
-    // Show worldwide remote as just "Remote"
-    if (worldwideRemote.length > 0) {
-      parts.push('Remote');
     }
 
     return parts.join('\n');
@@ -238,11 +239,10 @@ Output:
    */
   static formatForDisplaySingleLine(locations: NormalizedLocation[]): string {
     if (locations.length === 0) {
-      return 'Anywhere';
+      return 'No location specified';
     }
 
-    const worldwideRemote = locations.filter(l => l.type === 'remote' && l.country === 'Worldwide');
-    const countrySpecificRemote = locations.filter(l => l.type === 'remote' && l.country !== 'Worldwide');
+    const remoteLocations = locations.filter(l => l.type === 'remote');
     const physicalLocations = locations.filter(l => l.type === 'physical');
 
     const parts: string[] = [];
@@ -251,14 +251,9 @@ Output:
       parts.push(loc.display);
     }
 
-    // Show country-specific remote with the display name (e.g., "Canada (Remote)")
-    for (const loc of countrySpecificRemote) {
+    // Show remote locations with their display name (e.g., "Canada (Remote)")
+    for (const loc of remoteLocations) {
       parts.push(loc.display);
-    }
-
-    // Show worldwide remote as just "Remote"
-    if (worldwideRemote.length > 0) {
-      parts.push('Remote');
     }
 
     if (parts.length <= 2) {
@@ -270,24 +265,24 @@ Output:
 
   /**
    * Check if any location is worldwide remote (not country-specific)
+   * @deprecated Worldwide remote is no longer supported - all remote locations require a country
    */
   static hasWorldwideRemote(locations: NormalizedLocation[]): boolean {
     return locations.some(l => l.type === 'remote' && l.country === 'Worldwide');
   }
 
   /**
-   * Check if any location is remote (worldwide or country-specific)
+   * Check if any location is remote (country-specific only)
    */
   static hasRemote(locations: NormalizedLocation[]): boolean {
     return locations.some(l => l.type === 'remote');
   }
 
   /**
-   * Get country-specific remote locations (e.g., "Remote in Canada")
-   * These need to be searched WITH the country + isRemote: true
+   * Get remote locations (all remote locations require a country now)
    */
   static getCountrySpecificRemote(locations: NormalizedLocation[]): NormalizedLocation[] {
-    return locations.filter(l => l.type === 'remote' && l.country !== 'Worldwide');
+    return locations.filter(l => l.type === 'remote');
   }
 
   /**
@@ -301,23 +296,18 @@ Output:
    * Check if a job matches the normalized locations
    */
   static matchesJob(locations: NormalizedLocation[], job: { location?: string; isRemote?: boolean }): boolean {
-    // No location filter means all jobs match
+    // No location filter means no jobs match (worldwide not supported)
     if (locations.length === 0) {
-      return true;
+      return false;
     }
 
     const jobLocationLower = (job.location || '').toLowerCase();
 
-    // Worldwide remote jobs match any remote in our list
-    if (job.isRemote && LocationNormalizerAgent.hasWorldwideRemote(locations)) {
-      return true;
-    }
-
-    // Check country-specific remote (e.g., "Remote in Canada")
-    const countrySpecificRemote = LocationNormalizerAgent.getCountrySpecificRemote(locations);
-    if (job.isRemote && countrySpecificRemote.length > 0) {
+    // Check remote locations (all require a country now)
+    const remoteLocations = LocationNormalizerAgent.getCountrySpecificRemote(locations);
+    if (job.isRemote && remoteLocations.length > 0) {
       // Job must be remote AND in one of the specified countries
-      for (const loc of countrySpecificRemote) {
+      for (const loc of remoteLocations) {
         for (const variant of loc.searchVariants) {
           if (jobLocationLower.includes(variant.toLowerCase())) {
             return true;
@@ -332,10 +322,6 @@ Output:
 
     // Check physical locations
     const physicalLocations = LocationNormalizerAgent.getPhysicalLocations(locations);
-    if (physicalLocations.length === 0 && countrySpecificRemote.length === 0) {
-      // Only worldwide remote in list, no match for non-remote job
-      return job.isRemote === true;
-    }
 
     if (!jobLocationLower) {
       // Job has no location, only match if we have remote in our list

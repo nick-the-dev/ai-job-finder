@@ -262,24 +262,10 @@ async function collectJobsForSubscription(params: CollectionParams): Promise<Col
 
   if (normalizedLocations && normalizedLocations.length > 0) {
     const physicalLocations = LocationNormalizerAgent.getPhysicalLocations(normalizedLocations);
-    const hasWorldwideRemote = LocationNormalizerAgent.hasWorldwideRemote(normalizedLocations);
     const countrySpecificRemote = LocationNormalizerAgent.getCountrySpecificRemote(normalizedLocations);
 
     for (const jobType of jobTypesToSearch) {
       for (const title of jobTitles) {
-        // Worldwide remote jobs (no location filter = global search)
-        if (hasWorldwideRemote) {
-          const queryKey = generateQueryKey(title, undefined, jobType, true);
-          querySpecs.push({
-            title,
-            location: undefined,
-            isRemote: true,
-            jobType: jobType as 'fulltime' | 'parttime' | 'internship' | 'contract' | undefined,
-            country: undefined,
-            queryKey,
-          });
-        }
-
         // Country-specific remote jobs (e.g., "Remote in Canada")
         for (const loc of countrySpecificRemote) {
           const variants = loc.searchVariants.slice(0, 1);

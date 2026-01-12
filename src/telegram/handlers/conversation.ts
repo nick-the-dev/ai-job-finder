@@ -309,15 +309,14 @@ export function setupConversation(bot: Bot<BotContext>): void {
         await ctx.reply(
           `<b>Got it!</b> Searching for: ${titles.join(', ')}\n\n` +
             '<b>Step 2/10: Location</b>\n\n' +
-            'Where should I search for jobs?\n\n' +
+            'Where should I search for jobs? <b>Please specify a country or region.</b>\n\n' +
             '<b>Examples:</b>\n' +
             '• <code>New York</code> - single city\n' +
             '• <code>NYC, Boston, Austin</code> - multiple cities\n' +
-            '• <code>Remote</code> - remote jobs only\n' +
-            '• <code>SF or Remote</code> - either SF area or remote\n' +
-            '• <code>USA</code> - anywhere in USA\n' +
-            '• <code>Anywhere</code> - no location filter\n\n' +
-            'Just type naturally!',
+            '• <code>USA Remote</code> - remote jobs in USA\n' +
+            '• <code>SF or USA Remote</code> - SF area or remote in USA\n' +
+            '• <code>Germany, UK</code> - multiple countries\n\n' +
+            '⚠️ <i>Note: Worldwide/global searches are not supported. Please specify at least one country.</i>',
           { parse_mode: 'HTML' }
         );
         break;
@@ -326,25 +325,16 @@ export function setupConversation(bot: Bot<BotContext>): void {
       case 'awaiting_location': {
         const lowerText = text.toLowerCase();
 
-        // Handle quick keywords without LLM
-        if (lowerText === 'skip' || lowerText === 'any' || lowerText === 'anywhere' || lowerText === 'worldwide') {
-          await db.telegramUser.update({
-            where: { id: ctx.telegramUser.id },
-            data: {
-              conversationState: 'awaiting_job_types',
-              conversationData: { ...data, normalizedLocations: [], location: undefined, isRemote: false },
-            },
-          });
-
+        // Reject worldwide/anywhere keywords - require specific location
+        if (lowerText === 'skip' || lowerText === 'any' || lowerText === 'anywhere' || lowerText === 'worldwide' || lowerText === 'global') {
           await ctx.reply(
-            `<b>📍 Location:</b> Anywhere\n\n` +
-              '<b>Step 3/10: Job Type</b>\n\n' +
-              'What type of employment are you looking for?\n\n' +
-              '1️⃣ Full-time\n' +
-              '2️⃣ Part-time\n' +
-              '3️⃣ Internship\n' +
-              '4️⃣ Contract\n\n' +
-              'Send numbers separated by commas (e.g., <b>"1,2"</b>) or <b>"Skip"</b> for all types',
+            '⚠️ <b>Worldwide searches are not supported.</b>\n\n' +
+              'Please specify a country or region for your search.\n\n' +
+              '<b>Examples:</b>\n' +
+              '• <code>USA</code> - anywhere in USA\n' +
+              '• <code>USA Remote</code> - remote jobs in USA\n' +
+              '• <code>Germany, UK</code> - multiple countries\n' +
+              '• <code>Europe</code> - European countries',
             { parse_mode: 'HTML' }
           );
           break;
@@ -453,24 +443,16 @@ export function setupConversation(bot: Bot<BotContext>): void {
         // This is a bit of a hack, but avoids code duplication
         const lowerText = text.toLowerCase();
 
-        if (lowerText === 'skip' || lowerText === 'any' || lowerText === 'anywhere' || lowerText === 'worldwide') {
-          await db.telegramUser.update({
-            where: { id: ctx.telegramUser.id },
-            data: {
-              conversationState: 'awaiting_job_types',
-              conversationData: { ...data, normalizedLocations: [], location: undefined, isRemote: false },
-            },
-          });
-
+        // Reject worldwide/anywhere keywords - require specific location
+        if (lowerText === 'skip' || lowerText === 'any' || lowerText === 'anywhere' || lowerText === 'worldwide' || lowerText === 'global') {
           await ctx.reply(
-            `<b>📍 Location:</b> Anywhere\n\n` +
-              '<b>Step 3/10: Job Type</b>\n\n' +
-              'What type of employment are you looking for?\n\n' +
-              '1️⃣ Full-time\n' +
-              '2️⃣ Part-time\n' +
-              '3️⃣ Internship\n' +
-              '4️⃣ Contract\n\n' +
-              'Send numbers separated by commas (e.g., <b>"1,2"</b>) or <b>"Skip"</b> for all types',
+            '⚠️ <b>Worldwide searches are not supported.</b>\n\n' +
+              'Please specify a country or region for your search.\n\n' +
+              '<b>Examples:</b>\n' +
+              '• <code>USA</code> - anywhere in USA\n' +
+              '• <code>USA Remote</code> - remote jobs in USA\n' +
+              '• <code>Germany, UK</code> - multiple countries\n' +
+              '• <code>Europe</code> - European countries',
             { parse_mode: 'HTML' }
           );
           break;
