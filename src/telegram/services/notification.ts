@@ -27,6 +27,48 @@ function truncate(text: string, maxLength: number): string {
   return text.substring(0, maxLength - 3) + '...';
 }
 
+// Safely truncate HTML message without breaking tags
+function truncateHtml(html: string, maxLength: number): string {
+  if (html.length <= maxLength) return html;
+  
+  let truncated = html.substring(0, maxLength - 20);
+  
+  // Remove any incomplete tag at the end (e.g., "<a href='..." or "...</a")
+  // Find last '<' and check if there's a matching '>' after it
+  const lastOpenTag = truncated.lastIndexOf('<');
+  const lastCloseTag = truncated.lastIndexOf('>');
+  
+  if (lastOpenTag > lastCloseTag) {
+    // We have an unclosed tag, remove it
+    truncated = truncated.substring(0, lastOpenTag);
+  }
+  
+  // Close any open tags by finding unmatched opening tags
+  const openTags: string[] = [];
+  const tagRegex = /<\/?([a-zA-Z]+)[^>]*>/g;
+  let match;
+  
+  while ((match = tagRegex.exec(truncated)) !== null) {
+    const [fullMatch, tagName] = match;
+    if (fullMatch.startsWith('</')) {
+      // Closing tag - remove from stack if present
+      const idx = openTags.lastIndexOf(tagName.toLowerCase());
+      if (idx !== -1) openTags.splice(idx, 1);
+    } else if (!fullMatch.endsWith('/>')) {
+      // Opening tag (not self-closing)
+      openTags.push(tagName.toLowerCase());
+    }
+  }
+  
+  // Close remaining open tags in reverse order
+  let result = truncated + '\n...[Truncated]';
+  for (let i = openTags.length - 1; i >= 0; i--) {
+    result += `</${openTags[i]}>`;
+  }
+  
+  return result;
+}
+
 function formatScore(score: number): string {
   if (score >= 90) return `${score} (Excellent)`;
   if (score >= 70) return `${score} (Strong)`;
@@ -124,7 +166,7 @@ ${escapeHtml(truncate(match.reasoning || 'No reasoning provided', 300))}
 
   // Truncate if too long
   if (message.length > MAX_MESSAGE_LENGTH) {
-    message = message.substring(0, MAX_MESSAGE_LENGTH - 20) + '\n...[Truncated]';
+    message = truncateHtml(message, MAX_MESSAGE_LENGTH);
   }
 
   try {
@@ -211,7 +253,7 @@ export async function sendMatchSummary(
   }
 
   if (message.length > MAX_MESSAGE_LENGTH) {
-    message = message.substring(0, MAX_MESSAGE_LENGTH - 20) + '\n...[Truncated]';
+    message = truncateHtml(message, MAX_MESSAGE_LENGTH);
   }
 
   try {
