@@ -183,165 +183,271 @@ class GoogleJobsScraper:
         location: str,
         max_jobs: int,
     ) -> list[GoogleJob]:
-        """Extract jobs with scroll pagination to load more."""
+        """Extract jobs by clicking on each job card to get apply URLs."""
         all_jobs: list[GoogleJob] = []
+        processed_indices: set[int] = set()
         scroll_attempts = 0
-        max_scroll_attempts = 15
+        max_scroll_attempts = 10
         no_new_jobs_count = 0
-        
+
         while len(all_jobs) < max_jobs and scroll_attempts < max_scroll_attempts:
-            # Get current page content
-            html = await page.content()
-            body_text = await page.inner_text('body')
-            
-            # Extract jobs from current view
-            new_jobs = self._parse_jobs_from_html(html, body_text, query, location)
-            
-            # Deduplicate
-            existing_keys = {(j.title.lower(), j.company.lower()) for j in all_jobs}
-            added = 0
-            for job in new_jobs:
-                key = (job.title.lower(), job.company.lower())
-                if key not in existing_keys:
-                    all_jobs.append(job)
-                    existing_keys.add(key)
-                    added += 1
-            
-            if added == 0:
+            # Use JavaScript to find job cards dynamically - more robust than CSS selectors
+            job_cards_info = await page.evaluate("""
+                () => {
+                    // Google Jobs uses a list structure - find clickable job items
+                    const cards = [];
+
+                    // Try multiple potential container selectors
+                    const containers = [
+                        document.querySelector('[role="list"]'),
+                        document.querySelector('ul'),
+                        document.querySelector('.gws-plugins-horizon-jobs__tl-lvc'),
+                    ].filter(Boolean);
+
+                    for (const container of containers) {
+                        const items = container.querySelectorAll('li, [role="listitem"]');
+                        for (let i = 0; i < items.length; i++) {
+                            const item = items[i];
+                            const text = item.innerText || '';
+                            // Check if this looks like a job listing (has reasonable length)
+                            if (text.length > 20 && text.length < 1000) {
+                                const lines = text.split('\\n').filter(l => l.trim());
+                                if (lines.length >= 2) {
+                                    cards.push({
+                                        index: i,
+                                        title: lines[0].trim().substring(0, 200),
+                                        company: lines[1].trim().substring(0, 100),
+                                        hasContent: true,
+                                    });
+                                }
+                            }
+                        }
+                        if (cards.length > 0) break;  // Use first container that has cards
+                    }
+                    return cards;
+                }
+            """)
+
+            if not job_cards_info:
+                logger.warning("No job cards found on page")
+                break
+
+            added_this_round = 0
+
+            for card_info in job_cards_info:
+                if len(all_jobs) >= max_jobs:
+                    break
+
+                idx = card_info['index']
+                if idx in processed_indices:
+                    continue
+                processed_indices.add(idx)
+
+                try:
+                    # Click on the card using JavaScript (more reliable)
+                    clicked = await page.evaluate("""
+                        (cardIndex) => {
+                            const containers = [
+                                document.querySelector('[role="list"]'),
+                                document.querySelector('ul'),
+                                document.querySelector('.gws-plugins-horizon-jobs__tl-lvc'),
+                            ].filter(Boolean);
+
+                            for (const container of containers) {
+                                const items = container.querySelectorAll('li, [role="listitem"]');
+                                if (items[cardIndex]) {
+                                    items[cardIndex].click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                    """, idx)
+
+                    if not clicked:
+                        continue
+
+                    await page.wait_for_timeout(800)
+
+                    # Extract job details and apply URLs from the page after click
+                    job = await self._extract_job_after_click(page, query, card_info)
+
+                    if job:
+                        all_jobs.append(job)
+                        added_this_round += 1
+                        logger.debug(f"Extracted job: {job.title} @ {job.company} ({len(job.apply_urls)} apply URLs)")
+
+                except Exception as e:
+                    logger.debug(f"Error extracting job card {idx}: {str(e)[:100]}")
+                    continue
+
+            if added_this_round == 0:
                 no_new_jobs_count += 1
-                if no_new_jobs_count >= 3:
+                if no_new_jobs_count >= 2:
                     break
             else:
                 no_new_jobs_count = 0
-            
-            # Scroll to load more
+
+            # Scroll to load more jobs
             scroll_attempts += 1
             await page.evaluate("""
-                const containers = document.querySelectorAll('div[role="list"], ul');
+                const containers = [
+                    document.querySelector('.gws-plugins-horizon-jobs__tl-lvc'),
+                    document.querySelector('[role="list"]'),
+                    document.querySelector('ul'),
+                ].filter(Boolean);
                 containers.forEach(c => c.scrollTop = c.scrollHeight);
                 window.scrollTo(0, document.body.scrollHeight);
-                const jobContainer = document.querySelector('.gws-plugins-horizon-jobs__tl-lvc');
-                if (jobContainer) jobContainer.scrollTop = jobContainer.scrollHeight;
             """)
             await page.wait_for_timeout(1500)
-        
-        logger.info(f"Extracted {len(all_jobs)} jobs from Google Jobs")
+
+        logger.info(f"Extracted {len(all_jobs)} jobs from Google Jobs (with apply URLs)")
         return all_jobs[:max_jobs]
-    
-    def _parse_jobs_from_html(
-        self,
-        html: str,
-        body_text: str,
-        query: str,
-        location: str,
-    ) -> list[GoogleJob]:
-        """Parse job listings and apply URLs from HTML."""
-        jobs: list[GoogleJob] = []
-        
-        # Extract job titles from visible text
-        job_data = self._extract_job_titles(body_text, location)
-        
-        # Extract apply URLs and match to jobs
-        url_groups = self._extract_apply_urls(html)
-        
-        # Match URLs to jobs (they appear in same order)
-        for i, data in enumerate(job_data):
-            apply_urls = url_groups[i] if i < len(url_groups) else []
-            
-            job = GoogleJob(
-                title=data['title'],
-                company=data['company'],
-                location=data['location'],
+
+    async def _extract_job_after_click(self, page, query: str, card_info: dict) -> Optional[GoogleJob]:
+        """Extract job details and apply URLs after clicking on a job card."""
+        try:
+            # Get the HTML after clicking - it now contains the selected job's apply URLs
+            html = await page.content()
+
+            # Extract apply URLs using regex (most reliable method)
+            apply_urls = self._extract_apply_urls_from_html(html)
+
+            # Try to get more job details from the detail panel using JavaScript
+            job_details = await page.evaluate("""
+                () => {
+                    // Find the detail panel (right side of Google Jobs)
+                    const selectors = [
+                        '[data-async-context]',
+                        '#job-details',
+                        '[jsname="bN97Pc"]',
+                    ];
+
+                    let panel = null;
+                    for (const sel of selectors) {
+                        panel = document.querySelector(sel);
+                        if (panel && panel.innerText.length > 100) break;
+                    }
+
+                    // Fallback: find the largest content block on right side
+                    if (!panel) {
+                        const allDivs = document.querySelectorAll('div');
+                        let maxLen = 0;
+                        for (const div of allDivs) {
+                            const rect = div.getBoundingClientRect();
+                            // Look for divs on the right side of the page
+                            if (rect.left > window.innerWidth / 2 && div.innerText.length > maxLen) {
+                                maxLen = div.innerText.length;
+                                panel = div;
+                            }
+                        }
+                    }
+
+                    if (!panel) return null;
+
+                    const text = panel.innerText || '';
+                    const lines = text.split('\\n').filter(l => l.trim());
+
+                    // Try to find title (usually an h2)
+                    const h2 = panel.querySelector('h2');
+                    const title = h2 ? h2.innerText.trim() : (lines[0] || '');
+
+                    // Description is usually the longest block of text
+                    let description = '';
+                    for (const line of lines) {
+                        if (line.length > 200) {
+                            description = line;
+                            break;
+                        }
+                    }
+
+                    // Location usually contains city/state or "Remote"
+                    let location = '';
+                    for (const line of lines.slice(0, 10)) {
+                        if (line.match(/remote|hybrid|on-site|,\s*[A-Z]{2}|canada|usa|united states/i)) {
+                            location = line;
+                            break;
+                        }
+                    }
+
+                    return {
+                        title: title.substring(0, 200),
+                        description: description.substring(0, 5000),
+                        location: location.substring(0, 200),
+                    };
+                }
+            """)
+
+            # Use card info as fallback
+            title = card_info.get('title', 'Unknown Title')
+            company = card_info.get('company', 'Unknown Company')
+            location = ''
+            description = None
+
+            if job_details:
+                if job_details.get('title'):
+                    title = job_details['title']
+                if job_details.get('location'):
+                    location = job_details['location']
+                if job_details.get('description'):
+                    description = job_details['description']
+
+            return GoogleJob(
+                title=title,
+                company=company,
+                location=location,
+                description=description,
                 apply_urls=apply_urls,
                 search_query=query,
             )
-            jobs.append(job)
-        
-        return jobs
-    
-    def _extract_job_titles(self, body_text: str, default_location: str) -> list[dict]:
-        """Extract job titles, companies, and locations from page text."""
-        lines = [l.strip() for l in body_text.split('\n') if l.strip()]
-        
-        job_keywords = [
-            'Engineer', 'Developer', 'Manager', 'Designer', 'Analyst',
-            'Architect', 'Lead', 'Senior', 'Junior', 'Staff', 'Principal',
-            'Full Stack', 'Frontend', 'Backend', 'DevOps', 'SRE', 'QA',
-            'Programmer', 'Consultant', 'Specialist', 'Director', 'Scientist',
-            'Administrator', 'Coordinator', 'Technician', 'Associate',
-        ]
-        
-        skip_patterns = [
-            'http', 'www.', '.com', '.ca', '...', 'Search', 'Filter',
-            'Sign in', 'Menu', 'Indeed', 'LinkedIn', 'Glassdoor',
-            'jobs in', 'Jobs in', 'salary', 'Salary', 'course',
-            'meaning', 'roadmap', 'Best', 'Find the', 'Apply to',
-        ]
-        
-        jobs = []
-        i = 0
-        while i < len(lines) - 2 and len(jobs) < 100:
-            line = lines[i]
-            
-            if any(kw.lower() in line.lower() for kw in job_keywords) and 10 < len(line) < 150:
-                if not any(p in line for p in skip_patterns):
-                    company = lines[i + 1] if i + 1 < len(lines) else 'Unknown'
-                    loc = lines[i + 2] if i + 2 < len(lines) else default_location
-                    
-                    if not any(p in company for p in ['http', '.com', '.ca', '...']):
-                        company = company.replace('•', '').strip()
-                        if company.startswith('via '):
-                            company = company[4:]
-                        
-                        jobs.append({
-                            'title': line,
-                            'company': company,
-                            'location': loc.replace('•', '').strip(),
-                        })
-                    i += 3
-                    continue
-            i += 1
-        
-        return jobs
-    
-    def _extract_apply_urls(self, html: str) -> list[list[ApplyUrl]]:
+        except Exception as e:
+            logger.debug(f"Error extracting job detail: {str(e)[:100]}")
+            return None
+
+    def _extract_apply_urls_from_html(self, html: str) -> list[ApplyUrl]:
         """
-        Extract apply URLs grouped by job from HTML.
-        
-        Google Jobs embeds apply links in a specific pattern:
-        ["https://...google_jobs_apply...", "domain", "Source Name", ...]
-        
-        URLs appear in groups matching the job listing order.
+        Extract apply URLs from HTML using regex.
+
+        This is the most reliable method as it doesn't depend on DOM structure.
+        After clicking a job card, its apply URLs are loaded into the page HTML.
         """
-        # Pattern to match apply URLs with source
-        url_pattern = r'\["(https://[^"]+google_jobs_apply[^"]+)","?([^",]*)","([^"]+)"'
-        
-        url_groups: list[list[ApplyUrl]] = []
-        current_group: list[ApplyUrl] = []
-        last_pos = 0
-        
-        for match in re.finditer(url_pattern, html):
-            pos = match.start()
-            
-            # Gap > 1000 chars indicates new job
-            if last_pos > 0 and pos - last_pos > 1000:
-                if current_group:
-                    url_groups.append(current_group)
-                current_group = []
-            
+        apply_urls: list[ApplyUrl] = []
+        seen_urls: set[str] = set()
+
+        # Pattern 1: Google Jobs apply redirect URLs with source info
+        # Format: ["https://...google_jobs_apply...", "domain", "Source Name"]
+        pattern1 = r'\["(https://[^"]+google_jobs_apply[^"]+)","[^"]*","([^"]+)"'
+        for match in re.finditer(pattern1, html):
             url = match.group(1)
-            source = match.group(3)
-            
-            # Clean URL escapes
-            url = url.replace('\\u003d', '=').replace('\\u0026', '&')
-            
-            current_group.append(ApplyUrl(url=url, source=source))
-            last_pos = match.end()
-        
-        if current_group:
-            url_groups.append(current_group)
-        
-        return url_groups
+            source = match.group(2)
+            url = self._clean_url(url)
+            if url not in seen_urls:
+                seen_urls.add(url)
+                apply_urls.append(ApplyUrl(url=url, source=source))
+
+        # Pattern 2: Direct apply links in href attributes
+        pattern2 = r'href="(https://www\.google\.com/search\?[^"]*(?:ibp=htl;jobs|google_jobs_apply)[^"]*)"'
+        for match in re.finditer(pattern2, html):
+            url = self._clean_url(match.group(1))
+            if url not in seen_urls:
+                seen_urls.add(url)
+                apply_urls.append(ApplyUrl(url=url, source='Apply'))
+
+        # Pattern 3: Apply URLs in data attributes or JSON
+        pattern3 = r'(https://www\.google\.com/search\?[^"\'>\s]*google_jobs_apply[^"\'>\s]*)'
+        for match in re.finditer(pattern3, html):
+            url = self._clean_url(match.group(1))
+            if url not in seen_urls:
+                seen_urls.add(url)
+                apply_urls.append(ApplyUrl(url=url, source='Apply'))
+
+        return apply_urls
+
+    def _clean_url(self, url: str) -> str:
+        """Clean URL escapes and encoding."""
+        url = url.replace('\\u003d', '=').replace('\\u0026', '&')
+        url = url.replace('&amp;', '&').replace('\\/', '/')
+        return url
 
 
 # FastAPI endpoint handler (called from main.py)
