@@ -375,6 +375,35 @@ SENTRY_PROJECT=your-project  # Sentry project slug
 - Use `source: "serpapi"` in search requests
 - ~10 jobs per page, up to 100 pages
 
+### Google Jobs Direct Scraper (Experimental)
+- Scrapes Google Jobs directly using Camoufox (stealth Firefox) + DataImpulse residential proxies
+- Enabled per-subscription via `useGoogleJobs: true` flag
+- Collects jobs with full details: title, company, location, salary, job type, description
+- Extracts multiple apply URLs per job (Indeed, LinkedIn, Glassdoor, company sites, etc.)
+
+**How it works:**
+1. Uses mouse wheel scrolling to load jobs dynamically (not arrow keys or scrollTop)
+2. Clicks each job card to load details in the right panel
+3. Clicks "show full description" to expand the description
+4. Extracts all data from the DOM using position-based selectors (not CSS classes)
+5. Each job title query runs in a **separate parallel scraper** with a fresh proxy IP
+6. Staggered start times (2s between scrapers) to avoid detection
+
+**Key files:**
+- `jobspy-service/google_scraper.py` - Main scraper with click-based extraction
+- `jobspy-service/main.py` - FastAPI endpoint `/scrape-google`
+
+**Why click-based extraction?**
+- Google Jobs loads content dynamically - static HTML parsing doesn't work
+- CSS class names are obfuscated and change frequently
+- Position-based detection (x/y coordinates, font sizes) is more reliable
+
+**Proxy rotation:**
+- Uses DataImpulse residential proxy gateway
+- Each scraper gets a fresh session ID = fresh IP
+- Format: `{login}__cr.{country}__sid.{random8chars}`
+- Default country: US (to avoid EU consent dialogs)
+
 ## Query Caching
 
 To optimize API costs, queries are cached for 6 hours by default:
