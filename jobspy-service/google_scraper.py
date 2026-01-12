@@ -193,6 +193,19 @@ class GoogleJobsScraper:
             # Wait for page to fully load with human-like delay
             await page.wait_for_timeout(random.randint(3000, 5000))
             
+            # Handle EU consent dialog if present
+            if 'consent.google' in page.url:
+                logger.info("Consent dialog detected, accepting...")
+                try:
+                    # Try to click "Accept all" button
+                    accept_btn = await page.query_selector('button:has-text("Accept all")')
+                    if accept_btn:
+                        await accept_btn.click()
+                        await page.wait_for_timeout(3000)
+                        logger.info(f"Consent accepted, now at: {page.url}")
+                except Exception as e:
+                    logger.warning(f"Could not accept consent: {e}")
+            
             # Check for blocking
             content = await page.content()
             if 'unusual traffic' in content.lower() or 'captcha' in content.lower():
@@ -214,200 +227,305 @@ class GoogleJobsScraper:
         max_jobs: int,
         date_posted: str = "month",
     ) -> list[GoogleJob]:
-        """Extract jobs with scroll pagination, only returning jobs with URLs.
+        """Extract jobs by clicking each job card and extracting details from right panel.
         
-        Scrolls until no more new jobs are found (up to a reasonable limit).
-        The limit is dynamic based on date range - more scrolls for longer periods.
+        This approach:
+        1. Uses mouse wheel to scroll and load more jobs dynamically
+        2. Clicks each job card to load its details in the right panel
+        3. Clicks "show full description" to expand the description
+        4. Extracts title, company, location, salary, job type, description, and apply URLs
+        5. Only clicks NEW job cards (tracks what's been clicked)
         """
         all_jobs: list[GoogleJob] = []
-        scroll_attempts = 0
-        
-        # Dynamic max scroll attempts based on date range
-        # More recent = fewer expected jobs, less scrolling needed
-        max_scroll_attempts = {
-            "today": 20,
-            "3days": 40,
-            "week": 60,
-            "month": 100,
-            "all": 150,
-        }.get(date_posted, 100)
-        
+        clicked_titles: set[str] = set()  # Track clicked job titles to avoid re-clicking
         no_new_jobs_count = 0
-        consecutive_no_new = 5  # Stop after 5 consecutive scrolls with no new jobs
         
-        logger.info(f"Starting scroll extraction (max_scroll={max_scroll_attempts}, max_jobs={max_jobs})")
+        # Dynamic limits based on date range
+        max_no_new_scrolls = {
+            "today": 10,
+            "3days": 12,
+            "week": 15,
+            "month": 20,
+            "all": 25,
+        }.get(date_posted, 15)
         
-        while len(all_jobs) < max_jobs and scroll_attempts < max_scroll_attempts:
-            # Get current page content
-            html = await page.content()
-            body_text = await page.inner_text('body')
+        logger.info(f"Starting click-based extraction (max_jobs={max_jobs}, max_no_new_scrolls={max_no_new_scrolls})")
+        
+        while len(all_jobs) < max_jobs and no_new_jobs_count < max_no_new_scrolls:
+            # Find all visible job cards in left panel
+            cards = await page.evaluate('''() => {
+                const cards = [];
+                for (const el of document.querySelectorAll('li, div')) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.left > 0 && rect.left < 400 &&
+                        rect.width > 200 && rect.width < 500 &&
+                        rect.height > 60 && rect.height < 200 &&
+                        rect.top > 150 && rect.top < 700) {
+                        const text = (el.innerText || '').trim();
+                        const lines = text.split('\\n').filter(l => l.trim());
+                        if (lines.length >= 2 && lines.length <= 10 && lines[0].length > 10) {
+                            cards.push({
+                                x: rect.left + rect.width/2,
+                                y: rect.top + rect.height/2,
+                                title: lines[0]
+                            });
+                        }
+                    }
+                }
+                // Dedupe by title within this batch
+                const seen = new Set();
+                return cards.filter(c => {
+                    if (seen.has(c.title)) return false;
+                    seen.add(c.title);
+                    return true;
+                });
+            }''')
             
-            # Extract jobs from current view - only those with URLs
-            new_jobs = self._parse_jobs_with_urls(html, body_text, query, location)
+            # Only process cards we haven't clicked before
+            new_cards = [c for c in cards if c['title'] not in clicked_titles]
             
-            # Deduplicate
-            existing_keys = {(j.title.lower(), j.company.lower()) for j in all_jobs}
-            added = 0
-            for job in new_jobs:
-                key = (job.title.lower(), job.company.lower())
-                if key not in existing_keys:
-                    all_jobs.append(job)
-                    existing_keys.add(key)
-                    added += 1
-            
-            if added == 0:
+            if not new_cards:
+                # No new cards visible, scroll to load more
+                await page.mouse.move(300, 500)
+                await page.mouse.wheel(0, 300)
+                await page.wait_for_timeout(1000)
                 no_new_jobs_count += 1
-                if no_new_jobs_count >= consecutive_no_new:
-                    logger.info(f"No new jobs for {consecutive_no_new} consecutive scrolls, stopping")
-                    break
-            else:
-                no_new_jobs_count = 0
-                if scroll_attempts % 10 == 0:
-                    logger.info(f"Scroll {scroll_attempts}: {len(all_jobs)} jobs collected (+{added} new)")
+                continue
             
-            # Scroll to load more
-            scroll_attempts += 1
-            await page.evaluate("""
-                const containers = document.querySelectorAll('div[role="list"], ul');
-                containers.forEach(c => c.scrollTop = c.scrollHeight);
-                window.scrollTo(0, document.body.scrollHeight);
-                const jobContainer = document.querySelector('.gws-plugins-horizon-jobs__tl-lvc');
-                if (jobContainer) jobContainer.scrollTop = jobContainer.scrollHeight;
-            """)
-            await page.wait_for_timeout(1500)
+            no_new_jobs_count = 0  # Reset since we found new cards
+            
+            for card in new_cards:
+                if len(all_jobs) >= max_jobs:
+                    break
+                
+                clicked_titles.add(card['title'])
+                
+                # Click the job card
+                await page.mouse.click(card['x'], card['y'])
+                await page.wait_for_timeout(1200)
+                
+                # Click "show full description" if present
+                for _ in range(2):
+                    clicked = await page.evaluate('''() => {
+                        for (const el of document.querySelectorAll('span, div, button')) {
+                            const rect = el.getBoundingClientRect();
+                            const text = (el.innerText || '').toLowerCase().trim();
+                            if (rect.left > 400 && rect.top > 100 && text === 'show full description') {
+                                el.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }''')
+                    if clicked:
+                        await page.wait_for_timeout(500)
+                        break
+                    await page.wait_for_timeout(300)
+                
+                # Extract job details from right panel
+                job_data = await self._extract_job_from_panel(page)
+                
+                if job_data and job_data.get('apply_urls'):
+                    # Deduplicate by first apply URL
+                    existing_urls = {j.apply_urls[0].url if j.apply_urls else '' for j in all_jobs}
+                    first_url = job_data['apply_urls'][0].url if job_data['apply_urls'] else ''
+                    
+                    if first_url and first_url not in existing_urls:
+                        job = GoogleJob(
+                            title=job_data['title'],
+                            company=job_data['company'],
+                            location=job_data['location'],
+                            description=job_data['description'],
+                            apply_urls=job_data['apply_urls'],
+                            search_query=query,
+                        )
+                        all_jobs.append(job)
+                        
+                        if len(all_jobs) % 10 == 0:
+                            logger.info(f"Collected {len(all_jobs)} jobs...")
+            
+            # Scroll after processing all new cards
+            await page.mouse.move(300, 500)
+            await page.mouse.wheel(0, 300)
+            await page.wait_for_timeout(500)
         
-        logger.info(f"Extraction complete: {len(all_jobs)} jobs after {scroll_attempts} scrolls")
+        logger.info(f"Extraction complete: {len(all_jobs)} jobs collected")
         return all_jobs[:max_jobs]
     
-    def _parse_jobs_with_urls(
-        self,
-        html: str,
-        body_text: str,
-        query: str,
-        location: str,
-    ) -> list[GoogleJob]:
-        """Parse jobs and match with URL groups. Only return jobs that have URLs."""
-        # Extract URL groups first
-        url_groups = self._extract_all_url_groups(html)
-        
-        if not url_groups:
-            logger.warning("No URL groups found in HTML")
-            return []
-        
-        # Extract job titles from visible text
-        job_data = self._extract_job_titles(body_text, location)
-        
-        logger.debug(f"Found {len(job_data)} job titles and {len(url_groups)} URL groups")
-        
-        # Only return jobs that have matching URL groups with actual URLs
-        jobs: list[GoogleJob] = []
-        for i, data in enumerate(job_data):
-            if i >= len(url_groups):
-                break  # No more URL groups
-            
-            apply_urls = url_groups[i]
-            if not apply_urls:
-                continue  # Skip jobs without URLs
-            
-            job = GoogleJob(
-                title=data['title'],
-                company=data['company'],
-                location=data['location'],
-                apply_urls=apply_urls,
-                search_query=query,
-            )
-            jobs.append(job)
-        
-        return jobs
-    
-    def _extract_job_titles(self, body_text: str, default_location: str) -> list[dict]:
-        """Extract job titles, companies, and locations from page text."""
-        lines = [l.strip() for l in body_text.split('\n') if l.strip()]
-        
-        job_keywords = [
-            'Engineer', 'Developer', 'Manager', 'Designer', 'Analyst',
-            'Architect', 'Lead', 'Senior', 'Junior', 'Staff', 'Principal',
-            'Full Stack', 'Frontend', 'Backend', 'DevOps', 'SRE', 'QA',
-            'Programmer', 'Consultant', 'Specialist', 'Director', 'Scientist',
-            'Administrator', 'Coordinator', 'Technician', 'Associate',
-            'Intern', 'Co-op', 'Coop',
-        ]
-        
-        skip_patterns = [
-            'http', 'www.', '.com', '.ca', '...', 'Search', 'Filter',
-            'Sign in', 'Menu', 'Indeed', 'LinkedIn', 'Glassdoor',
-            'jobs in', 'Jobs in', 'salary', 'Salary', 'course',
-            'meaning', 'roadmap', 'Best', 'Find the', 'Apply to',
-            'Passer', 'contenu', 'principal', 'Skip to', 'How much',
-            'jobs found', 'Discover the', 'Entry level', 'jobs Remote',
-            'People also', 'Related searches', 'More results',
-            # Multi-language skip patterns
-            'Ir al contenido', 'Ayuda sobre', 'accessibilité', 'accessibility',
-            'Aller au contenu', 'Zum Inhalt', 'Vai al contenuto',
-            'main content', 'Skip to main', 'Jump to', 'Navegación',
-        ]
-        
-        jobs = []
-        i = 0
-        while i < len(lines) - 2 and len(jobs) < 100:
-            line = lines[i]
-            
-            # Must contain a job keyword and be reasonable length
-            if any(kw.lower() in line.lower() for kw in job_keywords) and 10 < len(line) < 150:
-                # Skip junk patterns
-                if not any(p.lower() in line.lower() for p in skip_patterns):
-                    company = lines[i + 1] if i + 1 < len(lines) else 'Unknown'
-                    loc = lines[i + 2] if i + 2 < len(lines) else default_location
+    async def _extract_job_from_panel(self, page) -> Optional[dict]:
+        """Extract job details from the right panel after clicking a job card."""
+        job_data = await page.evaluate('''() => {
+            const items = [];
+            document.querySelectorAll('*').forEach(el => {
+                const rect = el.getBoundingClientRect();
+                // Right panel area
+                if (rect.left > 450 && rect.width > 30 && rect.top > 80 && rect.top < 1200) {
+                    const text = (el.innerText || '').trim();
+                    const childText = Array.from(el.children).map(c => (c.innerText||'').trim()).join('');
+                    const isLeaf = text && (text !== childText || !el.children.length);
                     
-                    # Validate company name
-                    if not any(p in company for p in ['http', '.com', '.ca', '...', 'Skip', 'Passer']):
-                        company = company.replace('•', '').strip()
-                        if company.startswith('via '):
-                            company = company[4:]
-                        
-                        # Skip if company looks like navigation text
-                        if len(company) > 2 and len(company) < 100:
-                            jobs.append({
-                                'title': line,
-                                'company': company,
-                                'location': loc.replace('•', '').strip(),
-                            })
-                    i += 3
-                    continue
-            i += 1
-        
-        return jobs
-    
-    def _extract_all_url_groups(self, html: str) -> list[list[ApplyUrl]]:
-        """Extract all URL groups from HTML, one group per job."""
-        url_pattern = r'\["(https://[^"]+google_jobs_apply[^"]+)","?([^",]*)","([^"]+)"'
-        
-        url_groups: list[list[ApplyUrl]] = []
-        current_group: list[ApplyUrl] = []
-        last_pos = 0
-        
-        for match in re.finditer(url_pattern, html):
-            pos = match.start()
+                    if (isLeaf && text.length > 0 && text.length < 5000) {
+                        items.push({
+                            text,
+                            top: rect.top,
+                            fontSize: parseInt(getComputedStyle(el).fontSize) || 14
+                        });
+                    }
+                }
+            });
+            items.sort((a, b) => a.top - b.top);
             
-            # Gap > 1000 chars indicates new job
-            if last_pos > 0 and pos - last_pos > 1000:
-                if current_group:
-                    url_groups.append(current_group)
-                current_group = []
+            let title = '';
+            let company = '';
+            let location = '';
+            let jobType = '';
+            let salary = '';
+            let description = '';
             
-            url = match.group(1)
-            source = match.group(3)
+            // Title - first large text (fontSize >= 20) that isn't "Job description"
+            for (const item of items) {
+                if (item.fontSize >= 20 && item.text !== 'Job description' && 
+                    !item.text.match(/^\\d+\\.?\\d*\\/5$/) && item.text.length > 5 && item.text.length < 150) {
+                    title = item.text;
+                    break;
+                }
+            }
             
-            # Clean URL escapes
-            url = url.replace('\\u003d', '=').replace('\\u0026', '&')
+            // Company/Location - parse "Company • Location • via Source"
+            let foundTitle = false;
+            for (const item of items) {
+                if (item.text === title) {
+                    foundTitle = true;
+                    continue;
+                }
+                if (!foundTitle) continue;
+                
+                if (item.text.includes('•') && item.fontSize === 14) {
+                    const parts = item.text.split('•').map(p => p.trim());
+                    company = parts[0] || '';
+                    
+                    // Look for location in remaining parts (skip "via Source")
+                    for (let i = 1; i < parts.length; i++) {
+                        const part = parts[i];
+                        if (part.startsWith('via ')) continue;
+                        if (!location) {
+                            location = part;
+                        }
+                    }
+                    break;
+                }
+            }
             
-            current_group.append(ApplyUrl(url=url, source=source))
-            last_pos = match.end()
+            // Salary - get full salary text including range
+            for (const item of items.slice(0, 25)) {
+                if (item.text.includes('$')) {
+                    const salaryMatch = item.text.match(/\\$[\\d,]+K?(?:\\s*[–-]\\s*\\$[\\d,]+K?)?\\s*(?:a year|an hour|\\/year|\\/hour)?/i);
+                    if (salaryMatch) {
+                        salary = salaryMatch[0].trim();
+                        break;
+                    }
+                }
+            }
+            
+            // Job type - exact matches
+            for (const item of items.slice(0, 30)) {
+                const t = item.text.trim();
+                if (t === 'Full-time' || t === 'Part-time' || t === 'Contract' || t === 'Internship') {
+                    jobType = t;
+                    break;
+                }
+            }
+            
+            // Description - longest text block after "Job description" header
+            let afterJobDesc = false;
+            for (const item of items) {
+                if (item.text === 'Job description') {
+                    afterJobDesc = true;
+                    continue;
+                }
+                if (afterJobDesc) {
+                    if (item.text.length > 150 && 
+                        !item.text.includes('Glassdoor') && 
+                        !item.text.includes('reviews') &&
+                        !item.text.includes('Show full description') &&
+                        item.text.length > description.length) {
+                        description = item.text;
+                    }
+                }
+            }
+            
+            // Fallback - if no description found, look for any long text
+            if (!description) {
+                for (const item of items) {
+                    if (item.text.length > 200 && 
+                        !item.text.includes('Glassdoor') && 
+                        !item.text.includes('reviews') &&
+                        !item.text.includes('•') &&
+                        item.text.length > description.length) {
+                        description = item.text;
+                    }
+                }
+            }
+            
+            // Apply URLs - extract from right panel
+            const applyUrls = [];
+            document.querySelectorAll('a[href]').forEach(link => {
+                const rect = link.getBoundingClientRect();
+                const href = link.href || '';
+                if (rect.left > 450 && href.startsWith('http') && 
+                    !href.includes('google.com/search') &&
+                    !href.includes('support.google') &&
+                    !href.includes('policies.google') &&
+                    !href.includes('accounts.google') &&
+                    !href.includes('/intl/') &&
+                    !href.includes('about/products')) {
+                    applyUrls.push(href);
+                }
+            });
+            
+            return { 
+                title, 
+                company, 
+                location, 
+                jobType,
+                salary,
+                description: description.substring(0, 3000),
+                applyUrls: [...new Set(applyUrls)]
+            };
+        }''')
         
-        if current_group:
-            url_groups.append(current_group)
+        if not job_data or not job_data.get('title') or not job_data.get('applyUrls'):
+            return None
         
-        return url_groups
+        # Convert to ApplyUrl objects
+        apply_urls = []
+        for url in job_data['applyUrls']:
+            # Extract source from URL domain
+            source = "Unknown"
+            if 'indeed.com' in url:
+                source = "Indeed"
+            elif 'linkedin.com' in url:
+                source = "LinkedIn"
+            elif 'glassdoor' in url:
+                source = "Glassdoor"
+            elif 'ziprecruiter' in url:
+                source = "ZipRecruiter"
+            else:
+                # Try to extract domain as source
+                import re
+                domain_match = re.search(r'https?://(?:www\.)?([^/]+)', url)
+                if domain_match:
+                    source = domain_match.group(1).split('.')[0].title()
+            
+            apply_urls.append(ApplyUrl(url=url, source=source))
+        
+        return {
+            'title': job_data['title'],
+            'company': job_data['company'] or 'Unknown',
+            'location': job_data['location'] or '',
+            'description': job_data['description'] or '',
+            'apply_urls': apply_urls,
+        }
 
 
 
