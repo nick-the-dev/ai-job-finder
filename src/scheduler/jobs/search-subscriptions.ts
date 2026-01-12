@@ -700,75 +700,92 @@ export async function runSingleSubscriptionSearch(
   errorContext.location = sub.location ?? (normalizedLocations ? LocationNormalizerAgent.formatForDisplaySingleLine(normalizedLocations) : undefined);
 
   const stageStartTime = Date.now();
-  logger.info('Scheduler', `[${triggerLabel}] >>> STAGE: collection - Starting for ${sub.jobTitles.length} job titles`);
-
-  await RunTracker.updateProgress(runId, {
-    stage: 'collection',
-    percent: 1,
-    detail: `Starting collection for ${sub.jobTitles.length} job titles`,
-  });
-
-  subLogger.debug('Collection', 'Starting collection stage');
-  let progressRecalculated = false;
-  const collectionResult = await collectJobsForSubscription({
-    jobTitles: sub.jobTitles,
-    normalizedLocations,
-    legacyLocation: sub.location,
-    legacyIsRemote: sub.isRemote,
-    jobTypes,
-    datePosted,
-    limit: 1000, // Per-query limit for manual scans
-    skipCache: true, // Manual scans always fetch fresh results
-    priority: PRIORITY.MANUAL_SCAN,
-    subLogger,
-    runContext: { runId, subscriptionId },
-    onProgress: async (current, total, detail, accumulatedJobs, completedQueryKeys) => {
-      // Recalculate progress allocations on first callback when we know actual query count
-      // This fixes the mismatch between estimated queries (used for initial %) and actual queries
-      if (!progressRecalculated) {
-        progressRecalculated = true;
-        // Estimate jobs based on average per query so far
-        const avgJobsPerQuery = current > 0 ? accumulatedJobs.length / current : 50;
-        const estimatedTotalJobs = Math.round(avgJobsPerQuery * total);
-        progress.recalculate(total, Math.max(100, estimatedTotalJobs));
-      }
-      const percent = progress.collection(current, total);
-      const checkpoint: CollectionCheckpoint = {
-        stage: 'collection',
-        queriesCompleted: current,
-        queriesTotal: total,
-        collectedJobs: accumulatedJobs,
-        completedQueryKeys,
-      };
-      await RunTracker.updateProgress(runId, {
-        stage: 'collection',
-        percent,
-        detail,
-        checkpoint,
-      });
-    },
-  });
-
-  const allRawJobs = collectionResult.jobs;
-
-  // Check for collection failure - if ALL queries failed and we got 0 jobs, fail the run
-  if (collectionResult.queriesFailed > 0 && allRawJobs.length === 0) {
-    const errorMsg = `Collection failed: ${collectionResult.queriesFailed}/${collectionResult.queriesTotal} queries failed with 0 jobs collected`;
-    errorContext.collectionErrors = collectionResult.errors;
-    throw new Error(errorMsg);
-  }
-
-  errorContext.partialResults!.jobsCollected = allRawJobs.length;
-  const collectionDuration = ((Date.now() - stageStartTime) / 1000).toFixed(1);
-  logger.info('Scheduler', `[${triggerLabel}] <<< STAGE: collection - Completed in ${collectionDuration}s: ${allRawJobs.length} jobs (${collectionResult.queriesFailed}/${collectionResult.queriesTotal} queries failed)`);
-  subLogger.debug('Collection', `Collection complete: ${allRawJobs.length} raw jobs, ${collectionResult.queriesFailed} failed queries`);
-
-  // Google Jobs collection (experimental - opt-in only)
+  
+  // Check if Google Jobs only mode is enabled
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const useGoogleJobs = (sub as any).useGoogleJobs === true;
+  
+  // Initialize collection result variables
+  let allRawJobs: RawJob[] = [];
+  let collectionResult: CollectionResult = { jobs: [], queriesFailed: 0, queriesTotal: 0, errors: [] };
+
+  // Skip regular collection (Indeed/LinkedIn) if Google Jobs only mode is enabled
+  if (!useGoogleJobs) {
+    logger.info('Scheduler', `[${triggerLabel}] >>> STAGE: collection - Starting for ${sub.jobTitles.length} job titles`);
+
+    await RunTracker.updateProgress(runId, {
+      stage: 'collection',
+      percent: 1,
+      detail: `Starting collection for ${sub.jobTitles.length} job titles`,
+    });
+
+    subLogger.debug('Collection', 'Starting collection stage');
+    let progressRecalculated = false;
+    collectionResult = await collectJobsForSubscription({
+      jobTitles: sub.jobTitles,
+      normalizedLocations,
+      legacyLocation: sub.location,
+      legacyIsRemote: sub.isRemote,
+      jobTypes,
+      datePosted,
+      limit: 1000, // Per-query limit for manual scans
+      skipCache: true, // Manual scans always fetch fresh results
+      priority: PRIORITY.MANUAL_SCAN,
+      subLogger,
+      runContext: { runId, subscriptionId },
+      onProgress: async (current, total, detail, accumulatedJobs, completedQueryKeys) => {
+        // Recalculate progress allocations on first callback when we know actual query count
+        // This fixes the mismatch between estimated queries (used for initial %) and actual queries
+        if (!progressRecalculated) {
+          progressRecalculated = true;
+          // Estimate jobs based on average per query so far
+          const avgJobsPerQuery = current > 0 ? accumulatedJobs.length / current : 50;
+          const estimatedTotalJobs = Math.round(avgJobsPerQuery * total);
+          progress.recalculate(total, Math.max(100, estimatedTotalJobs));
+        }
+        const percent = progress.collection(current, total);
+        const checkpoint: CollectionCheckpoint = {
+          stage: 'collection',
+          queriesCompleted: current,
+          queriesTotal: total,
+          collectedJobs: accumulatedJobs,
+          completedQueryKeys,
+        };
+        await RunTracker.updateProgress(runId, {
+          stage: 'collection',
+          percent,
+          detail,
+          checkpoint,
+        });
+      },
+    });
+
+    allRawJobs = collectionResult.jobs;
+
+    // Check for collection failure - if ALL queries failed and we got 0 jobs, fail the run
+    if (collectionResult.queriesFailed > 0 && allRawJobs.length === 0) {
+      const errorMsg = `Collection failed: ${collectionResult.queriesFailed}/${collectionResult.queriesTotal} queries failed with 0 jobs collected`;
+      errorContext.collectionErrors = collectionResult.errors;
+      throw new Error(errorMsg);
+    }
+
+    errorContext.partialResults!.jobsCollected = allRawJobs.length;
+    const collectionDuration = ((Date.now() - stageStartTime) / 1000).toFixed(1);
+    logger.info('Scheduler', `[${triggerLabel}] <<< STAGE: collection - Completed in ${collectionDuration}s: ${allRawJobs.length} jobs (${collectionResult.queriesFailed}/${collectionResult.queriesTotal} queries failed)`);
+    subLogger.debug('Collection', `Collection complete: ${allRawJobs.length} raw jobs, ${collectionResult.queriesFailed} failed queries`);
+  } else {
+    logger.info('Scheduler', `[${triggerLabel}] >>> STAGE: collection - Google Jobs only mode, skipping Indeed/LinkedIn`);
+
+    await RunTracker.updateProgress(runId, {
+      stage: 'collection',
+      percent: 1,
+      detail: `Google Jobs only - collecting for ${sub.jobTitles.length} job titles`,
+    });
+  }
+  // Google Jobs collection (experimental - opt-in, exclusive when enabled)
   if (useGoogleJobs) {
-    logger.info('Scheduler', `[${triggerLabel}] >>> Google Jobs (experimental) enabled - starting additional collection`);
-    subLogger.debug('GoogleJobs', 'Google Jobs is enabled for this subscription');
+    logger.info('Scheduler', `[${triggerLabel}] >>> Google Jobs collection starting`);
+    subLogger.debug('GoogleJobs', 'Google Jobs only mode - collecting from Google Jobs');
 
     try {
       const { CollectorService } = await import('../../services/collector.js');
@@ -815,7 +832,8 @@ export async function runSingleSubscriptionSearch(
       // Wait for all parallel scrapers to complete
       await Promise.all(googleJobPromises);
 
-      logger.info('Scheduler', `[${triggerLabel}] <<< Google Jobs complete - total now ${allRawJobs.length} jobs`);
+      const collectionDuration = ((Date.now() - stageStartTime) / 1000).toFixed(1);
+      logger.info('Scheduler', `[${triggerLabel}] <<< STAGE: collection (Google Jobs) - Completed in ${collectionDuration}s: ${allRawJobs.length} jobs`);
     } catch (importError: any) {
       logger.warn('Scheduler', `[${triggerLabel}] Google Jobs unavailable: ${importError.message}`);
     }
@@ -825,7 +843,8 @@ export async function runSingleSubscriptionSearch(
 
   // Recalculate progress allocations now that we know actual job count
   // This adjusts phase percentages so remaining time estimate is accurate
-  progress.recalculate(collectionResult.queriesTotal, allRawJobs.length);
+  const queriesTotal = useGoogleJobs ? sub.jobTitles.length : collectionResult.queriesTotal;
+  progress.recalculate(queriesTotal, allRawJobs.length);
   subLogger.debug('Progress', `Recalculated progress allocations for ${allRawJobs.length} jobs`, progress.getAllocations());
 
   // Stage 2: Normalization (dynamic % based on job count)
