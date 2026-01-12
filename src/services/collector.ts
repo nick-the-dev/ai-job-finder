@@ -904,6 +904,16 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
    */
   private transformGoogleJob(job: any): RawJob {
     const locationStr = job.location || '';
+    
+    // Parse posted_date string (e.g., "3 hours ago", "2 days ago") to Date
+    let postedDate: Date | undefined;
+    if (job.posted_date) {
+      const parsed = this.parseRelativeDate(job.posted_date);
+      if (parsed) {
+        postedDate = parsed;
+      }
+    }
+    
     return {
       title: job.title || 'Unknown Title',
       company: job.company || 'Unknown Company',
@@ -914,6 +924,32 @@ export class CollectorService implements IService<CollectorInput, RawJob[]> {
       applyUrls: job.apply_urls || [],
       source: 'google_jobs',
       sourceId: undefined, // Google Jobs doesn't provide stable IDs
+      postedDate,
     };
+  }
+  
+  /**
+   * Parse relative date strings like "3 hours ago", "2 days ago" to Date
+   */
+  private parseRelativeDate(dateStr: string): Date | undefined {
+    const now = new Date();
+    const match = dateStr.match(/^(\d+)\s*(hour|day|week|month)s?\s*ago$/i);
+    if (!match) return undefined;
+    
+    const num = parseInt(match[1], 10);
+    const unit = match[2].toLowerCase();
+    
+    switch (unit) {
+      case 'hour':
+        return new Date(now.getTime() - num * 60 * 60 * 1000);
+      case 'day':
+        return new Date(now.getTime() - num * 24 * 60 * 60 * 1000);
+      case 'week':
+        return new Date(now.getTime() - num * 7 * 24 * 60 * 60 * 1000);
+      case 'month':
+        return new Date(now.getTime() - num * 30 * 24 * 60 * 60 * 1000);
+      default:
+        return undefined;
+    }
   }
 }
