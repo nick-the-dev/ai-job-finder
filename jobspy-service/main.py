@@ -659,6 +659,7 @@ class GoogleJobResult(BaseModel):
     apply_urls: list[dict] = []  # [{url, source}, ...]
     search_query: str = ""
     source: str = "google_jobs"
+    posted_date: Optional[str] = None  # e.g., "2 days ago", "1 week ago"
 
 
 @app.post("/scrape-google", dependencies=[Depends(verify_api_key)])

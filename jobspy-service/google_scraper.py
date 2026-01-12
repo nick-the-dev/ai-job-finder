@@ -41,6 +41,7 @@ class GoogleJob:
     description: Optional[str] = None
     apply_urls: list[ApplyUrl] = field(default_factory=list)
     search_query: str = ""
+    posted_date: Optional[str] = None  # e.g., "2 days ago", "1 week ago"
 
 
 # Date filter mappings - these phrases work in Google Jobs search
@@ -302,7 +303,7 @@ class GoogleJobsScraper:
                 
                 # Click the job card
                 await page.mouse.click(card['x'], card['y'])
-                await page.wait_for_timeout(1200)
+                await page.wait_for_timeout(2000)  # Wait for right panel to load
                 
                 # Click "show full description" if present
                 for _ in range(2):
@@ -338,6 +339,7 @@ class GoogleJobsScraper:
                             description=job_data['description'],
                             apply_urls=job_data['apply_urls'],
                             search_query=query,
+                            posted_date=job_data.get('postedDate'),
                         )
                         all_jobs.append(job)
                         
@@ -356,10 +358,14 @@ class GoogleJobsScraper:
         """Extract job details from the right panel after clicking a job card."""
         job_data = await page.evaluate('''() => {
             const items = [];
+            // Get viewport width to determine right panel threshold
+            const vpWidth = window.innerWidth;
+            const rightPanelStart = vpWidth > 1400 ? 700 : 450;
+            
             document.querySelectorAll('*').forEach(el => {
                 const rect = el.getBoundingClientRect();
-                // Right panel area
-                if (rect.left > 450 && rect.width > 30 && rect.top > 80 && rect.top < 1200) {
+                // Right panel area - dynamically adjusted based on viewport
+                if (rect.left > rightPanelStart && rect.width > 30 && rect.top > 80 && rect.top < 1200) {
                     const text = (el.innerText || '').trim();
                     const childText = Array.from(el.children).map(c => (c.innerText||'').trim()).join('');
                     const isLeaf = text && (text !== childText || !el.children.length);
@@ -436,6 +442,26 @@ class GoogleJobsScraper:
                 }
             }
             
+            // Posted date - search specifically for date elements in right panel
+            // These are small SPAN elements with exact date text
+            let postedDate = '';
+            document.querySelectorAll('span, div').forEach(el => {
+                if (postedDate) return; // Already found
+                const text = (el.innerText || '').trim();
+                const rect = el.getBoundingClientRect();
+                // Must be in right panel, small element, font size 12-14
+                if (rect.left > rightPanelStart && rect.top > 200 && rect.top < 500 &&
+                    rect.width < 150 && rect.height < 30) {
+                    const fontSize = parseInt(getComputedStyle(el).fontSize) || 14;
+                    if (fontSize <= 14) {
+                        if (text.match(/^\\d+\\s*(hour|day|week|month)s?\\s*ago$/i) ||
+                            text === 'Just posted' || text === 'Today' || text === 'Yesterday') {
+                            postedDate = text;
+                        }
+                    }
+                }
+            });
+            
             // Description - longest text block after "Job description" header
             let afterJobDesc = false;
             for (const item of items) {
@@ -489,6 +515,7 @@ class GoogleJobsScraper:
                 location, 
                 jobType,
                 salary,
+                postedDate,
                 description: description.substring(0, 3000),
                 applyUrls: [...new Set(applyUrls)]
             };
@@ -525,6 +552,7 @@ class GoogleJobsScraper:
             'location': job_data['location'] or '',
             'description': job_data['description'] or '',
             'apply_urls': apply_urls,
+            'postedDate': job_data.get('postedDate') or None,
         }
 
 
@@ -567,6 +595,7 @@ async def scrape_google_jobs(
             ],
             'search_query': job.search_query,
             'source': 'google_jobs',
+            'posted_date': job.posted_date,
         }
         for job in jobs
     ]
