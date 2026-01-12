@@ -25,6 +25,8 @@ AI-powered job aggregation and matching system that collects jobs from multiple 
   3. `@updatedAt` fields are required by Prisma and CANNOT have defaults - don't add them to tables with existing data
   4. Test the migration locally with a copy of production data if possible
 
+- **NEVER modify other Dokploy projects or resources.** Only interact with the `ai-job-finder` project and its child resources (applications, databases, Redis, etc.). Do not view, edit, delete, or redeploy any other projects on the Dokploy server. This prevents accidental damage to unrelated production systems.
+
 ## Quick Start
 
 **Requirements:** Node.js 20+ (required for Prisma)
