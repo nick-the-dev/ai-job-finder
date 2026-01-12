@@ -65,7 +65,8 @@ class DataImpulseProxy:
             raise ValueError("DATAIMPULSE_LOGIN and DATAIMPULSE_PASSWORD environment variables required")
         self.host = host
         self.port = port
-        self.countries = countries or ["us", "ca"]  # Default: US and Canada
+        # Use only US for consistent English results
+        self.countries = countries or ["us"]
     
     def get_proxy_config(self) -> dict:
         """
@@ -75,12 +76,14 @@ class DataImpulseProxy:
         - Same session ID = same IP (sticky session)
         - New session ID = new IP (rotation)
         
-        Format: {login}__cr.{countries}__sid.{session_id}
+        Format: {login}__cr.{country}__sid.{session_id}
+        DataImpulse uses ISO 3166-1 alpha-2 country codes
         """
         session_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        country_param = ','.join(self.countries)
+        # Use first country only - DataImpulse doesn't support multiple in one request
+        country = self.countries[0] if self.countries else "us"
         
-        username = f"{self.login}__cr.{country_param}__sid.{session_id}"
+        username = f"{self.login}__cr.{country}__sid.{session_id}"
         
         return {
             'server': f'http://{self.host}:{self.port}',
@@ -131,7 +134,9 @@ class GoogleJobsScraper:
             except Exception as e:
                 logger.warning(f"Attempt {attempt + 1}/{max_retries}: Error - {str(e)[:100]}")
             
-            await asyncio.sleep(2)
+            # Exponential backoff with jitter
+            delay = (2 ** attempt) + random.uniform(1, 3)
+            await asyncio.sleep(delay)
         
         logger.error(f"Failed to scrape Google Jobs after {max_retries} attempts")
         return []
@@ -156,16 +161,20 @@ class GoogleJobsScraper:
             context = await browser.new_context(ignore_https_errors=True)
             page = await context.new_page()
             
-            # Build Google Jobs URL
-            search_query = f"{query} {location}".replace(" ", "+")
-            url = f"https://www.google.com/search?q={search_query}&ibp=htl;jobs&sa=X"
+            # Build Google Jobs URL with proper encoding and English language
+            from urllib.parse import quote_plus
+            search_query = quote_plus(f"{query} {location}")
+            url = f"https://www.google.com/search?q={search_query}&ibp=htl;jobs&sa=X&hl=en"
             
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(4000)
+            # Navigate with realistic timing
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            
+            # Wait for page to fully load with human-like delay
+            await page.wait_for_timeout(random.randint(3000, 5000))
             
             # Check for blocking
             content = await page.content()
-            if 'unusual traffic' in content.lower():
+            if 'unusual traffic' in content.lower() or 'captcha' in content.lower():
                 raise Exception("Blocked by Google - unusual traffic detected")
             
             if len(content) < 50000:
@@ -183,10 +192,10 @@ class GoogleJobsScraper:
         location: str,
         max_jobs: int,
     ) -> list[GoogleJob]:
-        """Extract jobs with scroll pagination to load more."""
+        """Extract jobs with scroll pagination, only returning jobs with URLs."""
         all_jobs: list[GoogleJob] = []
         scroll_attempts = 0
-        max_scroll_attempts = 15
+        max_scroll_attempts = 10
         no_new_jobs_count = 0
         
         while len(all_jobs) < max_jobs and scroll_attempts < max_scroll_attempts:
@@ -194,8 +203,8 @@ class GoogleJobsScraper:
             html = await page.content()
             body_text = await page.inner_text('body')
             
-            # Extract jobs from current view
-            new_jobs = self._parse_jobs_from_html(html, body_text, query, location)
+            # Extract jobs from current view - only those with URLs
+            new_jobs = self._parse_jobs_with_urls(html, body_text, query, location)
             
             # Deduplicate
             existing_keys = {(j.title.lower(), j.company.lower()) for j in all_jobs}
@@ -225,28 +234,38 @@ class GoogleJobsScraper:
             """)
             await page.wait_for_timeout(1500)
         
-        logger.info(f"Extracted {len(all_jobs)} jobs from Google Jobs")
+        logger.info(f"Extracted {len(all_jobs)} jobs with URLs from Google Jobs")
         return all_jobs[:max_jobs]
     
-    def _parse_jobs_from_html(
+    def _parse_jobs_with_urls(
         self,
         html: str,
         body_text: str,
         query: str,
         location: str,
     ) -> list[GoogleJob]:
-        """Parse job listings and apply URLs from HTML."""
-        jobs: list[GoogleJob] = []
+        """Parse jobs and match with URL groups. Only return jobs that have URLs."""
+        # Extract URL groups first
+        url_groups = self._extract_all_url_groups(html)
+        
+        if not url_groups:
+            logger.warning("No URL groups found in HTML")
+            return []
         
         # Extract job titles from visible text
         job_data = self._extract_job_titles(body_text, location)
         
-        # Extract apply URLs and match to jobs
-        url_groups = self._extract_apply_urls(html)
+        logger.debug(f"Found {len(job_data)} job titles and {len(url_groups)} URL groups")
         
-        # Match URLs to jobs (they appear in same order)
+        # Only return jobs that have matching URL groups with actual URLs
+        jobs: list[GoogleJob] = []
         for i, data in enumerate(job_data):
-            apply_urls = url_groups[i] if i < len(url_groups) else []
+            if i >= len(url_groups):
+                break  # No more URL groups
+            
+            apply_urls = url_groups[i]
+            if not apply_urls:
+                continue  # Skip jobs without URLs
             
             job = GoogleJob(
                 title=data['title'],
@@ -269,6 +288,7 @@ class GoogleJobsScraper:
             'Full Stack', 'Frontend', 'Backend', 'DevOps', 'SRE', 'QA',
             'Programmer', 'Consultant', 'Specialist', 'Director', 'Scientist',
             'Administrator', 'Coordinator', 'Technician', 'Associate',
+            'Intern', 'Co-op', 'Coop',
         ]
         
         skip_patterns = [
@@ -276,6 +296,13 @@ class GoogleJobsScraper:
             'Sign in', 'Menu', 'Indeed', 'LinkedIn', 'Glassdoor',
             'jobs in', 'Jobs in', 'salary', 'Salary', 'course',
             'meaning', 'roadmap', 'Best', 'Find the', 'Apply to',
+            'Passer', 'contenu', 'principal', 'Skip to', 'How much',
+            'jobs found', 'Discover the', 'Entry level', 'jobs Remote',
+            'People also', 'Related searches', 'More results',
+            # Multi-language skip patterns
+            'Ir al contenido', 'Ayuda sobre', 'accessibilité', 'accessibility',
+            'Aller au contenu', 'Zum Inhalt', 'Vai al contenuto',
+            'main content', 'Skip to main', 'Jump to', 'Navegación',
         ]
         
         jobs = []
@@ -283,37 +310,34 @@ class GoogleJobsScraper:
         while i < len(lines) - 2 and len(jobs) < 100:
             line = lines[i]
             
+            # Must contain a job keyword and be reasonable length
             if any(kw.lower() in line.lower() for kw in job_keywords) and 10 < len(line) < 150:
-                if not any(p in line for p in skip_patterns):
+                # Skip junk patterns
+                if not any(p.lower() in line.lower() for p in skip_patterns):
                     company = lines[i + 1] if i + 1 < len(lines) else 'Unknown'
                     loc = lines[i + 2] if i + 2 < len(lines) else default_location
                     
-                    if not any(p in company for p in ['http', '.com', '.ca', '...']):
+                    # Validate company name
+                    if not any(p in company for p in ['http', '.com', '.ca', '...', 'Skip', 'Passer']):
                         company = company.replace('•', '').strip()
                         if company.startswith('via '):
                             company = company[4:]
                         
-                        jobs.append({
-                            'title': line,
-                            'company': company,
-                            'location': loc.replace('•', '').strip(),
-                        })
+                        # Skip if company looks like navigation text
+                        if len(company) > 2 and len(company) < 100:
+                            jobs.append({
+                                'title': line,
+                                'company': company,
+                                'location': loc.replace('•', '').strip(),
+                            })
                     i += 3
                     continue
             i += 1
         
         return jobs
     
-    def _extract_apply_urls(self, html: str) -> list[list[ApplyUrl]]:
-        """
-        Extract apply URLs grouped by job from HTML.
-        
-        Google Jobs embeds apply links in a specific pattern:
-        ["https://...google_jobs_apply...", "domain", "Source Name", ...]
-        
-        URLs appear in groups matching the job listing order.
-        """
-        # Pattern to match apply URLs with source
+    def _extract_all_url_groups(self, html: str) -> list[list[ApplyUrl]]:
+        """Extract all URL groups from HTML, one group per job."""
         url_pattern = r'\["(https://[^"]+google_jobs_apply[^"]+)","?([^",]*)","([^"]+)"'
         
         url_groups: list[list[ApplyUrl]] = []
@@ -342,6 +366,7 @@ class GoogleJobsScraper:
             url_groups.append(current_group)
         
         return url_groups
+
 
 
 # FastAPI endpoint handler (called from main.py)
