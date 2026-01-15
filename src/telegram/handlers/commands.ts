@@ -5,7 +5,7 @@ import { getDb } from '../../db/client.js';
 import { logger } from '../../utils/logger.js';
 import { runSingleSubscriptionSearch } from '../../scheduler/jobs/search-subscriptions.js';
 import { isSubscriptionRunning, markSubscriptionRunning, markSubscriptionFinished } from '../../scheduler/cron.js';
-import { saveMatchesToCSV, generateDownloadToken } from '../../utils/csv.js';
+import { saveMatchesToCSV, saveAllSubscriptionsMatchesToCSV, generateDownloadToken, type MatchEntryWithSubscription } from '../../utils/csv.js';
 import { config } from '../../config.js';
 import { getPersonalStats, getMarketInsights, getResumeTips } from '../../observability/index.js';
 import { LocationNormalizerAgent } from '../../agents/location-normalizer.js';
@@ -216,6 +216,11 @@ Ready to get started?
       if ((i + 1) % 2 === 0 || i === subs.length - 1) keyboard.row();
     }
     keyboard.text('➕ New Subscription', 'sub:new');
+    // Check if any subscription has matches before showing download button
+    const totalMatches = subs.reduce((sum, s) => sum + s._count.sentNotifications, 0);
+    if (totalMatches > 0) {
+      keyboard.text('📥 Download All', 'sub:downloadall');
+    }
 
     await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
   });
@@ -309,6 +314,16 @@ Ready to get started?
       logger.error('Telegram', 'Failed to clear cache', error);
       await ctx.reply('❌ Failed to clear cache. Please try again.');
     }
+  });
+
+  // /downloadall - Download CSV of jobs from all active subscriptions
+  bot.command('downloadall', async (ctx) => {
+    if (!ctx.telegramUser) {
+      await ctx.reply('Something went wrong. Please try again.');
+      return;
+    }
+
+    await downloadAllSubscriptions(ctx);
   });
 
   // /stats - Personal performance stats
@@ -631,6 +646,17 @@ Ready to get started?
     }
   });
 
+  // Download all matches from all subscriptions as CSV
+  bot.callbackQuery('sub:downloadall', async (ctx) => {
+    if (!ctx.telegramUser) {
+      await ctx.answerCallbackQuery({ text: 'Please try again' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: '📥 Generating CSV...' });
+    await downloadAllSubscriptions(ctx, true);
+  });
+
   // Pause subscription
   bot.callbackQuery(/^sub:pause:(.+)$/, async (ctx) => {
     const subId = ctx.match[1];
@@ -806,6 +832,11 @@ Ready to get started?
       if ((i + 1) % 2 === 0 || i === subs.length - 1) keyboard.row();
     }
     keyboard.text('➕ New Subscription', 'sub:new');
+    // Check if any subscription has matches before showing download button
+    const totalMatches = subs.reduce((sum, s) => sum + s._count.sentNotifications, 0);
+    if (totalMatches > 0) {
+      keyboard.text('📥 Download All', 'sub:downloadall');
+    }
 
     await ctx.answerCallbackQuery();
     await ctx.editMessageText(message, { parse_mode: 'HTML', reply_markup: keyboard });
@@ -1265,5 +1296,132 @@ async function showTipsForSubscription(
     await ctx.editMessageText(message, { parse_mode: 'HTML', reply_markup: keyboard });
   } else {
     await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
+  }
+}
+
+// Helper function to download all subscriptions matches as CSV
+async function downloadAllSubscriptions(
+  ctx: BotContext,
+  isEdit = false
+): Promise<void> {
+  const db = getDb();
+
+  if (!ctx.telegramUser) {
+    return;
+  }
+
+  // Show loading message
+  const loadingMessage = '📥 <b>Generating CSV...</b>\n\nPlease wait while I prepare your download.';
+  if (isEdit) {
+    await ctx.editMessageText(loadingMessage, { parse_mode: 'HTML' });
+  } else {
+    await ctx.reply(loadingMessage, { parse_mode: 'HTML' });
+  }
+
+  try {
+    // Get all active subscriptions for the user
+    const subs = await db.searchSubscription.findMany({
+      where: { userId: ctx.telegramUser.id, isActive: true },
+      select: { id: true, jobTitles: true },
+    });
+
+    if (subs.length === 0) {
+      const noSubsMessage = '📭 <b>No subscriptions found</b>\n\nCreate a subscription first to start collecting job matches.';
+      const keyboard = new InlineKeyboard().text('➕ Create Subscription', 'sub:new');
+      if (isEdit) {
+        await ctx.editMessageText(noSubsMessage, { parse_mode: 'HTML', reply_markup: keyboard });
+      } else {
+        await ctx.reply(noSubsMessage, { parse_mode: 'HTML', reply_markup: keyboard });
+      }
+      return;
+    }
+
+    // Get all sent notifications for all subscriptions with job data
+    const sentNotifications = await db.sentNotification.findMany({
+      where: { subscriptionId: { in: subs.map((s) => s.id) } },
+      include: {
+        subscription: { select: { jobTitles: true } },
+        jobMatch: {
+          include: { job: true },
+        },
+      },
+      orderBy: { sentAt: 'desc' },
+    });
+
+    if (sentNotifications.length === 0) {
+      const noMatchesMessage = '📭 <b>No matches found</b>\n\nYour subscriptions have no job matches yet. Run a scan to find jobs!';
+      const keyboard = new InlineKeyboard().text('📋 My Subscriptions', 'sub:list');
+      if (isEdit) {
+        await ctx.editMessageText(noMatchesMessage, { parse_mode: 'HTML', reply_markup: keyboard });
+      } else {
+        await ctx.reply(noMatchesMessage, { parse_mode: 'HTML', reply_markup: keyboard });
+      }
+      return;
+    }
+
+    // Deduplicate by job ID (same job might be matched multiple times)
+    const seenJobs = new Set<string>();
+    const matches: MatchEntryWithSubscription[] = sentNotifications
+      .filter(({ jobMatch }) => {
+        if (seenJobs.has(jobMatch.jobId)) return false;
+        seenJobs.add(jobMatch.jobId);
+        return true;
+      })
+      .map(({ jobMatch, subscription }) => ({
+        subscriptionName: subscription.jobTitles.slice(0, 2).join(', '),
+        job: {
+          contentHash: jobMatch.job.contentHash,
+          title: jobMatch.job.title,
+          company: jobMatch.job.company,
+          description: jobMatch.job.description,
+          location: jobMatch.job.location ?? undefined,
+          isRemote: jobMatch.job.isRemote,
+          salaryMin: jobMatch.job.salaryMin ?? undefined,
+          salaryMax: jobMatch.job.salaryMax ?? undefined,
+          salaryCurrency: jobMatch.job.salaryCurrency ?? undefined,
+          applicationUrl: jobMatch.job.applicationUrl ?? undefined,
+          postedDate: jobMatch.job.postedDate ?? undefined,
+          source: jobMatch.job.source as 'serpapi' | 'jobspy',
+        },
+        match: {
+          score: jobMatch.score,
+          reasoning: jobMatch.reasoning,
+          matchedSkills: jobMatch.matchedSkills,
+          missingSkills: jobMatch.missingSkills,
+          pros: jobMatch.pros,
+          cons: jobMatch.cons,
+        },
+      }))
+      .sort((a, b) => b.match.score - a.match.score);
+
+    // Generate CSV and download token with content stored in database
+    const { filename: csvFilename, content: csvContent } = await saveAllSubscriptionsMatchesToCSV(matches);
+    const downloadToken = await generateDownloadToken(csvFilename, csvContent);
+
+    const baseUrl = config.APP_URL || `http://localhost:${config.PORT}`;
+    const downloadUrl = `${baseUrl}/download/${downloadToken}`;
+
+    const successMessage =
+      `📥 <b>Download Ready</b>\n\n` +
+      `<b>${matches.length}</b> unique job matches from <b>${subs.length}</b> subscription${subs.length > 1 ? 's' : ''}.\n\n` +
+      `<a href="${downloadUrl}">📄 Download CSV</a>`;
+
+    const keyboard = new InlineKeyboard().text('📋 My Subscriptions', 'sub:list');
+    if (isEdit) {
+      await ctx.editMessageText(successMessage, { parse_mode: 'HTML', reply_markup: keyboard });
+    } else {
+      await ctx.reply(successMessage, { parse_mode: 'HTML', reply_markup: keyboard });
+    }
+
+    logger.info('Telegram', `Generated CSV download for all subscriptions (user ${ctx.telegramUser.id}): ${matches.length} matches`);
+  } catch (error) {
+    logger.error('Telegram', `Failed to generate CSV for all subscriptions (user ${ctx.telegramUser?.id})`, error);
+    const errorMessage = '❌ <b>Download Failed</b>\n\nSomething went wrong. Please try again later.';
+    const keyboard = new InlineKeyboard().text('📋 My Subscriptions', 'sub:list');
+    if (isEdit) {
+      await ctx.editMessageText(errorMessage, { parse_mode: 'HTML', reply_markup: keyboard });
+    } else {
+      await ctx.reply(errorMessage, { parse_mode: 'HTML', reply_markup: keyboard });
+    }
   }
 }

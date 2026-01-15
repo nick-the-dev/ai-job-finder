@@ -455,6 +455,18 @@ Search results are automatically saved to CSV files in the `exports/` directory:
 - Accessible via: `http://localhost:3001/exports/{filename}`
 - Response includes `downloadUrl` for direct download
 
+### Telegram CSV Downloads
+
+Users can download CSV exports of their job matches in Telegram:
+
+| Method | Description |
+|--------|-------------|
+| `/downloadall` command | Download all matches from all active subscriptions |
+| 📥 Download All button | Available in `/mysubs` when matches exist |
+| 📥 Download button | Per-subscription download in subscription details |
+
+The CSV includes a **Subscription** column when downloading from all subscriptions, making it easy to identify which search each job came from.
+
 ## Tech Stack
 - TypeScript, Node.js, Express
 - PostgreSQL + Prisma ORM

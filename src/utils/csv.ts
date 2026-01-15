@@ -62,6 +62,10 @@ interface MatchEntry {
   match: JobMatchResult;
 }
 
+interface MatchEntryWithSubscription extends MatchEntry {
+  subscriptionName: string;
+}
+
 /**
  * Safely format a date string, returning empty string if invalid
  */
@@ -270,6 +274,50 @@ function matchesToCSV(matches: MatchEntry[]): string {
 }
 
 /**
+ * Convert matches with subscription info to CSV string
+ * Includes a Subscription column at the start
+ */
+function matchesToCSVWithSubscription(matches: MatchEntryWithSubscription[]): string {
+  const headers = [
+    'Subscription',
+    'Score',
+    'Title',
+    'Company',
+    'Location',
+    'Remote',
+    'Salary',
+    'Application URLs',
+    'Posted Date',
+    'Source',
+    'Matched Skills',
+    'Missing Skills',
+    'Pros',
+    'Cons',
+    'Reasoning',
+  ];
+
+  const rows = matches.map(({ job, match, subscriptionName }) => [
+    escapeCSV(subscriptionName),
+    match.score,
+    escapeCSV(job.title),
+    escapeCSV(job.company),
+    escapeCSV(job.location),
+    job.isRemote ? 'Yes' : 'No',
+    escapeCSV(formatSalary(job, match.extractedSalary)),
+    escapeCSV(formatApplyUrls(job)),
+    job.postedDate ? formatDate(job.postedDate) : '',
+    escapeCSV(job.source),
+    escapeCSV(match.matchedSkills.join('; ')),
+    escapeCSV(match.missingSkills.join('; ')),
+    escapeCSV(match.pros.join('; ')),
+    escapeCSV(match.cons.join('; ')),
+    escapeCSV(match.reasoning),
+  ]);
+
+  return [headers.join(','), ...rows.map((row) => row.join(','))].join('\n');
+}
+
+/**
  * Save matches to CSV and return filename + content
  * Also writes to filesystem for backwards compatibility
  */
@@ -281,6 +329,28 @@ export async function saveMatchesToCSV(matches: MatchEntry[]): Promise<{ filenam
   const filepath = join(EXPORTS_DIR, filename);
 
   const csv = matchesToCSV(matches);
+  await writeFile(filepath, csv, 'utf-8');
+
+  return { filename, content: csv };
+}
+
+// Re-export type for use in commands.ts
+export type { MatchEntryWithSubscription };
+
+/**
+ * Save matches from multiple subscriptions to CSV
+ * Includes subscription name column for identification
+ */
+export async function saveAllSubscriptionsMatchesToCSV(
+  matches: MatchEntryWithSubscription[]
+): Promise<{ filename: string; content: string }> {
+  await mkdir(EXPORTS_DIR, { recursive: true });
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename = `all-job-matches-${timestamp}.csv`;
+  const filepath = join(EXPORTS_DIR, filename);
+
+  const csv = matchesToCSVWithSubscription(matches);
   await writeFile(filepath, csv, 'utf-8');
 
   return { filename, content: csv };
