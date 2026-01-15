@@ -1,6 +1,19 @@
-import { InlineKeyboard } from 'grammy';
+import { InlineKeyboard, Keyboard } from 'grammy';
 import type { Bot } from 'grammy';
 import type { BotContext } from '../bot.js';
+
+/**
+ * Create the main persistent keyboard that appears at the bottom of the chat.
+ * This replaces the need to type commands manually.
+ */
+function getMainKeyboard(): Keyboard {
+  return new Keyboard()
+    .text('📋 My Subscriptions').text('➕ New Subscription').row()
+    .text('📥 Download All').text('📜 History').row()
+    .text('📊 Stats').text('💡 Tips')
+    .resized()  // Fit keyboard to content
+    .persistent();  // Keep keyboard visible
+}
 import { getDb } from '../../db/client.js';
 import { logger } from '../../utils/logger.js';
 import { runSingleSubscriptionSearch } from '../../scheduler/jobs/search-subscriptions.js';
@@ -76,7 +89,7 @@ function formatLocationDisplay(
 }
 
 export function setupCommands(bot: Bot<BotContext>): void {
-  // /start - Welcome message with inline keyboard
+  // /start - Welcome message with persistent keyboard
   bot.command('start', async (ctx) => {
     const firstName = ctx.from?.first_name || 'there';
 
@@ -90,139 +103,52 @@ I'll help you find jobs that match your skills and notify you automatically when
 2️⃣ Upload or paste your resume
 3️⃣ I'll search hourly and send you matching jobs
 
-Ready to get started?
+Use the buttons below to get started! 👇
     `.trim();
 
-    const keyboard = new InlineKeyboard()
-      .text('🚀 Create Subscription', 'sub:new')
-      .row()
-      .text('📋 My Subscriptions', 'sub:list')
-      .text('📜 History', 'cmd:history');
+    // Send with persistent keyboard at the bottom of chat
+    await ctx.reply(welcomeMessage, { parse_mode: 'HTML', reply_markup: getMainKeyboard() });
+  });
 
-    await ctx.reply(welcomeMessage, { parse_mode: 'HTML', reply_markup: keyboard });
+  // Handle persistent keyboard button presses (text messages that match button labels)
+  bot.hears('📋 My Subscriptions', async (ctx) => {
+    // Delegate to the /mysubs logic
+    await handleMySubsCommand(ctx);
+  });
+
+  bot.hears('➕ New Subscription', async (ctx) => {
+    // Delegate to the /subscribe logic
+    await handleSubscribeCommand(ctx);
+  });
+
+  bot.hears('📥 Download All', async (ctx) => {
+    if (!ctx.telegramUser) {
+      await ctx.reply('Something went wrong. Please try again.');
+      return;
+    }
+    await downloadAllSubscriptions(ctx);
+  });
+
+  bot.hears('📜 History', async (ctx) => {
+    await handleHistoryCommand(ctx);
+  });
+
+  bot.hears('📊 Stats', async (ctx) => {
+    await handleStatsCommand(ctx);
+  });
+
+  bot.hears('💡 Tips', async (ctx) => {
+    await handleTipsCommand(ctx);
   });
 
   // /subscribe - Start subscription flow (allow multiple)
   bot.command('subscribe', async (ctx) => {
-    if (!ctx.telegramUser) {
-      await ctx.reply('Something went wrong. Please try again.');
-      return;
-    }
-
-    const db = getDb();
-
-    // Count active subscriptions
-    const activeCount = await db.searchSubscription.count({
-      where: { userId: ctx.telegramUser.id, isActive: true },
-    });
-
-    if (activeCount >= 5) {
-      await ctx.reply(
-        'You have reached the maximum of 5 active subscriptions.\n\n' +
-          'Use /mysubs to manage existing subscriptions.'
-      );
-      return;
-    }
-
-    // Update conversation state
-    await db.telegramUser.update({
-      where: { id: ctx.telegramUser.id },
-      data: {
-        conversationState: 'awaiting_titles',
-        conversationData: {},
-      },
-    });
-
-    await ctx.reply(
-      '<b>Step 1/9: Job Titles</b>\n\n' +
-        'What job titles are you looking for?\n\n' +
-        'Send a comma-separated list, e.g.:\n' +
-        '<i>"Backend Engineer, Senior Developer, DevOps"</i>',
-      { parse_mode: 'HTML' }
-    );
+    await handleSubscribeCommand(ctx);
   });
 
   // /mysubs - List all active subscriptions with management UI
   bot.command('mysubs', async (ctx) => {
-    if (!ctx.telegramUser) {
-      await ctx.reply('Something went wrong. Please try again.');
-      return;
-    }
-
-    const db = getDb();
-    const subs = await db.searchSubscription.findMany({
-      where: { userId: ctx.telegramUser.id, isActive: true },
-      orderBy: { createdAt: 'desc' },
-      include: { _count: { select: { sentNotifications: true } } },
-    });
-
-    if (subs.length === 0) {
-      await ctx.reply(
-        'No active subscriptions found.\n\nUse /subscribe to create one!'
-      );
-      return;
-    }
-
-    // Check for active runs for each subscription
-    const activeRuns = await db.subscriptionRun.findMany({
-      where: {
-        subscriptionId: { in: subs.map((s) => s.id) },
-        status: 'running',
-      },
-      select: {
-        subscriptionId: true,
-        currentStage: true,
-        progressPercent: true,
-        progressDetail: true,
-      },
-    });
-    const activeRunMap = new Map(activeRuns.map((r) => [r.subscriptionId, r]));
-
-    // Build message with subscription list
-    let message = `<b>📋 Your Subscriptions (${subs.length})</b>\n\n`;
-
-    for (let i = 0; i < subs.length; i++) {
-      const sub = subs[i];
-      const activeRun = activeRunMap.get(sub.id);
-      const location = formatLocationDisplay(sub.normalizedLocations, sub.location, sub.isRemote);
-
-      message += `<b>${i + 1}. ${sub.jobTitles.slice(0, 2).join(', ')}</b>`;
-      if (sub.jobTitles.length > 2) message += ` +${sub.jobTitles.length - 2}`;
-      message += '\n';
-
-      // Show progress if running, otherwise show status
-      if (activeRun) {
-        const progress = activeRun.progressPercent ?? 0;
-        const progressBar = getProgressBar(progress);
-        const stageName = formatStageName(activeRun.currentStage);
-        message += `   🔄 <b>Running:</b> ${progressBar} ${progress}%\n`;
-        message += `   ${stageName}\n`;
-      } else {
-        const status = sub.isPaused ? '⏸️ Paused' : '✅ Active';
-        message += `   ${status} | 📍 ${location} | Score ≥${sub.minScore}\n`;
-        message += `   💼 ${formatJobTypesDisplay(sub.jobTypes)}\n`;
-      }
-      message += `   📬 ${sub._count.sentNotifications} matches\n\n`;
-    }
-
-    message += 'Select a subscription to manage:';
-
-    // Build inline keyboard with subscription buttons
-    const keyboard = new InlineKeyboard();
-    for (let i = 0; i < subs.length; i++) {
-      const sub = subs[i];
-      const label = `${i + 1}. ${sub.jobTitles[0].substring(0, 20)}${sub.isPaused ? ' ⏸️' : ''}`;
-      keyboard.text(label, `sub:view:${sub.id}`);
-      if ((i + 1) % 2 === 0 || i === subs.length - 1) keyboard.row();
-    }
-    keyboard.text('➕ New Subscription', 'sub:new');
-    // Check if any subscription has matches before showing download button
-    const totalMatches = subs.reduce((sum, s) => sum + s._count.sentNotifications, 0);
-    if (totalMatches > 0) {
-      keyboard.text('📥 Download All', 'sub:downloadall');
-    }
-
-    await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
+    await handleMySubsCommand(ctx);
   });
 
   // /status - Shortcut for /mysubs
@@ -232,43 +158,7 @@ Ready to get started?
 
   // /history - View past subscriptions with inline keyboard
   bot.command('history', async (ctx) => {
-    if (!ctx.telegramUser) {
-      await ctx.reply('Something went wrong. Please try again.');
-      return;
-    }
-
-    const db = getDb();
-    const pastSubs = await db.searchSubscription.findMany({
-      where: { userId: ctx.telegramUser.id, isActive: false },
-      orderBy: { updatedAt: 'desc' },
-      take: 10,
-      include: { _count: { select: { sentNotifications: true } } },
-    });
-
-    const keyboard = new InlineKeyboard()
-      .text('📋 My Subscriptions', 'sub:list')
-      .text('➕ New', 'sub:new');
-
-    if (pastSubs.length === 0) {
-      await ctx.reply(
-        'No past subscriptions found.\n\nYour cancelled subscriptions will appear here.',
-        { reply_markup: keyboard }
-      );
-      return;
-    }
-
-    let message = '<b>📜 Past Subscriptions</b>\n\n';
-
-    for (const sub of pastSubs) {
-      const location = sub.isRemote ? 'Remote' : sub.location || 'Any';
-      const ended = sub.updatedAt.toLocaleDateString();
-
-      message += `• <b>${sub.jobTitles.slice(0, 2).join(', ')}</b>\n`;
-      message += `  ${location} | Ended: ${ended}\n`;
-      message += `  📬 ${sub._count.sentNotifications} matches\n\n`;
-    }
-
-    await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
+    await handleHistoryCommand(ctx);
   });
 
   // Legacy commands - redirect to new UI
@@ -328,43 +218,7 @@ Ready to get started?
 
   // /stats - Personal performance stats
   bot.command('stats', async (ctx) => {
-    if (!ctx.telegramUser) {
-      await ctx.reply('Something went wrong. Please try again.');
-      return;
-    }
-
-    const db = getDb();
-    const subs = await db.searchSubscription.findMany({
-      where: { userId: ctx.telegramUser.id, isActive: true },
-      select: { id: true, jobTitles: true, isPaused: true },
-    });
-
-    if (subs.length === 0) {
-      await ctx.reply(
-        'No active subscriptions found.\n\nUse /subscribe to create one and start tracking stats!',
-        { reply_markup: new InlineKeyboard().text('➕ Create Subscription', 'sub:new') }
-      );
-      return;
-    }
-
-    if (subs.length === 1) {
-      // Single subscription - show stats directly
-      await showStatsForSubscription(ctx, subs[0].id);
-    } else {
-      // Multiple subscriptions - show picker
-      let message = '<b>📊 Select a subscription to view stats:</b>\n\n';
-
-      const keyboard = new InlineKeyboard();
-      for (let i = 0; i < subs.length; i++) {
-        const sub = subs[i];
-        const label = `${i + 1}. ${sub.jobTitles[0].substring(0, 20)}${sub.isPaused ? ' ⏸️' : ''}`;
-        keyboard.text(label, `insight:stats:${sub.id}`);
-        if ((i + 1) % 2 === 0 || i === subs.length - 1) keyboard.row();
-      }
-      keyboard.text('📋 My Subscriptions', 'sub:list');
-
-      await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
-    }
+    await handleStatsCommand(ctx);
   });
 
   // /market - Job market insights
@@ -408,41 +262,7 @@ Ready to get started?
 
   // /tips - Resume improvement tips
   bot.command('tips', async (ctx) => {
-    if (!ctx.telegramUser) {
-      await ctx.reply('Something went wrong. Please try again.');
-      return;
-    }
-
-    const db = getDb();
-    const subs = await db.searchSubscription.findMany({
-      where: { userId: ctx.telegramUser.id, isActive: true },
-      select: { id: true, jobTitles: true, isPaused: true },
-    });
-
-    if (subs.length === 0) {
-      await ctx.reply(
-        'No active subscriptions found.\n\nUse /subscribe to create one and I\'ll analyze your matches for tips!',
-        { reply_markup: new InlineKeyboard().text('➕ Create Subscription', 'sub:new') }
-      );
-      return;
-    }
-
-    if (subs.length === 1) {
-      await showTipsForSubscription(ctx, subs[0].id);
-    } else {
-      let message = '<b>💡 Select a subscription to get resume tips:</b>\n\n';
-
-      const keyboard = new InlineKeyboard();
-      for (let i = 0; i < subs.length; i++) {
-        const sub = subs[i];
-        const label = `${i + 1}. ${sub.jobTitles[0].substring(0, 20)}${sub.isPaused ? ' ⏸️' : ''}`;
-        keyboard.text(label, `insight:tips:${sub.id}`);
-        if ((i + 1) % 2 === 0 || i === subs.length - 1) keyboard.row();
-      }
-      keyboard.text('📋 My Subscriptions', 'sub:list');
-
-      await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
-    }
+    await handleTipsCommand(ctx);
   });
 
   // === Callback Query Handlers for Inline Keyboard ===
@@ -1423,5 +1243,251 @@ async function downloadAllSubscriptions(
     } else {
       await ctx.reply(errorMessage, { parse_mode: 'HTML', reply_markup: keyboard });
     }
+  }
+}
+
+// === Helper functions for keyboard button handlers ===
+
+// Handle My Subscriptions (from keyboard button or /mysubs command)
+async function handleMySubsCommand(ctx: BotContext): Promise<void> {
+  if (!ctx.telegramUser) {
+    await ctx.reply('Something went wrong. Please try again.');
+    return;
+  }
+
+  const db = getDb();
+  const subs = await db.searchSubscription.findMany({
+    where: { userId: ctx.telegramUser.id, isActive: true },
+    orderBy: { createdAt: 'desc' },
+    include: { _count: { select: { sentNotifications: true } } },
+  });
+
+  if (subs.length === 0) {
+    await ctx.reply(
+      'No active subscriptions found.\n\nUse the "➕ New Subscription" button to create one!'
+    );
+    return;
+  }
+
+  // Check for active runs for each subscription
+  const activeRuns = await db.subscriptionRun.findMany({
+    where: {
+      subscriptionId: { in: subs.map((s) => s.id) },
+      status: 'running',
+    },
+    select: {
+      subscriptionId: true,
+      currentStage: true,
+      progressPercent: true,
+      progressDetail: true,
+    },
+  });
+  const activeRunMap = new Map(activeRuns.map((r) => [r.subscriptionId, r]));
+
+  // Build message with subscription list
+  let message = `<b>📋 Your Subscriptions (${subs.length})</b>\n\n`;
+
+  for (let i = 0; i < subs.length; i++) {
+    const sub = subs[i];
+    const activeRun = activeRunMap.get(sub.id);
+    const location = formatLocationDisplay(sub.normalizedLocations, sub.location, sub.isRemote);
+
+    message += `<b>${i + 1}. ${sub.jobTitles.slice(0, 2).join(', ')}</b>`;
+    if (sub.jobTitles.length > 2) message += ` +${sub.jobTitles.length - 2}`;
+    message += '\n';
+
+    // Show progress if running, otherwise show status
+    if (activeRun) {
+      const progress = activeRun.progressPercent ?? 0;
+      const progressBar = getProgressBar(progress);
+      const stageName = formatStageName(activeRun.currentStage);
+      message += `   🔄 <b>Running:</b> ${progressBar} ${progress}%\n`;
+      message += `   ${stageName}\n`;
+    } else {
+      const status = sub.isPaused ? '⏸️ Paused' : '✅ Active';
+      message += `   ${status} | 📍 ${location} | Score ≥${sub.minScore}\n`;
+      message += `   💼 ${formatJobTypesDisplay(sub.jobTypes)}\n`;
+    }
+    message += `   📬 ${sub._count.sentNotifications} matches\n\n`;
+  }
+
+  message += 'Select a subscription to manage:';
+
+  // Build inline keyboard with subscription buttons
+  const keyboard = new InlineKeyboard();
+  for (let i = 0; i < subs.length; i++) {
+    const sub = subs[i];
+    const label = `${i + 1}. ${sub.jobTitles[0].substring(0, 20)}${sub.isPaused ? ' ⏸️' : ''}`;
+    keyboard.text(label, `sub:view:${sub.id}`);
+    if ((i + 1) % 2 === 0 || i === subs.length - 1) keyboard.row();
+  }
+  keyboard.text('➕ New Subscription', 'sub:new');
+  // Check if any subscription has matches before showing download button
+  const totalMatches = subs.reduce((sum, s) => sum + s._count.sentNotifications, 0);
+  if (totalMatches > 0) {
+    keyboard.text('📥 Download All', 'sub:downloadall');
+  }
+
+  await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
+}
+
+// Handle New Subscription (from keyboard button or /subscribe command)
+async function handleSubscribeCommand(ctx: BotContext): Promise<void> {
+  if (!ctx.telegramUser) {
+    await ctx.reply('Something went wrong. Please try again.');
+    return;
+  }
+
+  const db = getDb();
+
+  // Count active subscriptions
+  const activeCount = await db.searchSubscription.count({
+    where: { userId: ctx.telegramUser.id, isActive: true },
+  });
+
+  if (activeCount >= 5) {
+    await ctx.reply(
+      'You have reached the maximum of 5 active subscriptions.\n\n' +
+        'Use "📋 My Subscriptions" to manage existing subscriptions.'
+    );
+    return;
+  }
+
+  // Update conversation state
+  await db.telegramUser.update({
+    where: { id: ctx.telegramUser.id },
+    data: {
+      conversationState: 'awaiting_titles',
+      conversationData: {},
+    },
+  });
+
+  await ctx.reply(
+    '<b>Step 1/9: Job Titles</b>\n\n' +
+      'What job titles are you looking for?\n\n' +
+      'Send a comma-separated list, e.g.:\n' +
+      '<i>"Backend Engineer, Senior Developer, DevOps"</i>',
+    { parse_mode: 'HTML' }
+  );
+}
+
+// Handle History (from keyboard button or /history command)
+async function handleHistoryCommand(ctx: BotContext): Promise<void> {
+  if (!ctx.telegramUser) {
+    await ctx.reply('Something went wrong. Please try again.');
+    return;
+  }
+
+  const db = getDb();
+  const pastSubs = await db.searchSubscription.findMany({
+    where: { userId: ctx.telegramUser.id, isActive: false },
+    orderBy: { updatedAt: 'desc' },
+    take: 10,
+    include: { _count: { select: { sentNotifications: true } } },
+  });
+
+  const keyboard = new InlineKeyboard()
+    .text('📋 My Subscriptions', 'sub:list')
+    .text('➕ New', 'sub:new');
+
+  if (pastSubs.length === 0) {
+    await ctx.reply(
+      'No past subscriptions found.\n\nYour cancelled subscriptions will appear here.',
+      { reply_markup: keyboard }
+    );
+    return;
+  }
+
+  let message = '<b>📜 Past Subscriptions</b>\n\n';
+
+  for (const sub of pastSubs) {
+    const location = sub.isRemote ? 'Remote' : sub.location || 'Any';
+    const ended = sub.updatedAt.toLocaleDateString();
+
+    message += `• <b>${sub.jobTitles.slice(0, 2).join(', ')}</b>\n`;
+    message += `  ${location} | Ended: ${ended}\n`;
+    message += `  📬 ${sub._count.sentNotifications} matches\n\n`;
+  }
+
+  await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
+}
+
+// Handle Stats (from keyboard button or /stats command)
+async function handleStatsCommand(ctx: BotContext): Promise<void> {
+  if (!ctx.telegramUser) {
+    await ctx.reply('Something went wrong. Please try again.');
+    return;
+  }
+
+  const db = getDb();
+  const subs = await db.searchSubscription.findMany({
+    where: { userId: ctx.telegramUser.id, isActive: true },
+    select: { id: true, jobTitles: true, isPaused: true },
+  });
+
+  if (subs.length === 0) {
+    await ctx.reply(
+      'No active subscriptions found.\n\nUse "➕ New Subscription" to create one and start tracking stats!',
+      { reply_markup: new InlineKeyboard().text('➕ Create Subscription', 'sub:new') }
+    );
+    return;
+  }
+
+  if (subs.length === 1) {
+    // Single subscription - show stats directly
+    await showStatsForSubscription(ctx, subs[0].id);
+  } else {
+    // Multiple subscriptions - show picker
+    let message = '<b>📊 Select a subscription to view stats:</b>\n\n';
+
+    const keyboard = new InlineKeyboard();
+    for (let i = 0; i < subs.length; i++) {
+      const sub = subs[i];
+      const label = `${i + 1}. ${sub.jobTitles[0].substring(0, 20)}${sub.isPaused ? ' ⏸️' : ''}`;
+      keyboard.text(label, `insight:stats:${sub.id}`);
+      if ((i + 1) % 2 === 0 || i === subs.length - 1) keyboard.row();
+    }
+    keyboard.text('📋 My Subscriptions', 'sub:list');
+
+    await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
+  }
+}
+
+// Handle Tips (from keyboard button or /tips command)
+async function handleTipsCommand(ctx: BotContext): Promise<void> {
+  if (!ctx.telegramUser) {
+    await ctx.reply('Something went wrong. Please try again.');
+    return;
+  }
+
+  const db = getDb();
+  const subs = await db.searchSubscription.findMany({
+    where: { userId: ctx.telegramUser.id, isActive: true },
+    select: { id: true, jobTitles: true, isPaused: true },
+  });
+
+  if (subs.length === 0) {
+    await ctx.reply(
+      'No active subscriptions found.\n\nUse "➕ New Subscription" to create one and I\'ll analyze your matches for tips!',
+      { reply_markup: new InlineKeyboard().text('➕ Create Subscription', 'sub:new') }
+    );
+    return;
+  }
+
+  if (subs.length === 1) {
+    await showTipsForSubscription(ctx, subs[0].id);
+  } else {
+    let message = '<b>💡 Select a subscription to get resume tips:</b>\n\n';
+
+    const keyboard = new InlineKeyboard();
+    for (let i = 0; i < subs.length; i++) {
+      const sub = subs[i];
+      const label = `${i + 1}. ${sub.jobTitles[0].substring(0, 20)}${sub.isPaused ? ' ⏸️' : ''}`;
+      keyboard.text(label, `insight:tips:${sub.id}`);
+      if ((i + 1) % 2 === 0 || i === subs.length - 1) keyboard.row();
+    }
+    keyboard.text('📋 My Subscriptions', 'sub:list');
+
+    await ctx.reply(message, { parse_mode: 'HTML', reply_markup: keyboard });
   }
 }
